@@ -7,17 +7,17 @@ Provides secure cryptographic key storage and management with multiple backends:
 - Process isolation for sensitive operations
 """
 
-import base64
-import hashlib
-import logging
 import os
-import platform
 import stat
-import subprocess
+import base64
+import logging
+import hashlib
 import tempfile
+import platform
 import threading
+import subprocess
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Union
+from typing import Optional, Dict, Union, Tuple
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s')
@@ -668,5 +668,4 @@ def cleanup():
 
 # Cleanup on exit
 import atexit
-
 atexit.register(cleanup) 

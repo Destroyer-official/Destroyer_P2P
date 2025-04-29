@@ -21,11 +21,13 @@ import webbrowser
 import base64
 import hashlib
 import struct
-from typing import Optional, Tuple,  Dict,  Callable
-from cryptography.hazmat.primitives.asymmetric import x25519, rsa, ed25519
-from cryptography.hazmat.primitives import hashes,  serialization
+import math
+from typing import Optional, Tuple, Union, Any, Dict, List, Callable
+from cryptography.hazmat.primitives.asymmetric import x25519, rsa, ed25519, ec
+from cryptography.hazmat.primitives import hashes, hmac, serialization
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305, AESGCM
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 import sys
@@ -55,6 +57,7 @@ except ImportError:
     
 try:
     import pkcs11
+    from pkcs11 import KeyType, ObjectClass, Mechanism
     HAVE_PKCS11 = True
 except ImportError:
     HAVE_PKCS11 = False

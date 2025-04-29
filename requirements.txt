@@ -1,0 +1,36 @@
+# Secure P2P Chat with Double Ratchet and Post-Quantum Security
+# Cross-platform requirements (Linux, macOS, Windows)
+
+# Core cryptography
+cryptography>=37.0.0,<39.0.0
+
+# Post-quantum cryptography
+# Custom package - would need to be installed separately or provided in the repository
+# quantcrypt==1.0.0
+
+# Networking dependencies
+asyncio>=3.4.3
+
+# Key management
+keyring>=23.0.0
+pyzmq>=23.0.0
+
+# Security modules
+# TPM support (optional)
+# tpm2-pytss>=1.0.0
+
+# PKCS#11 HSM support (optional)
+# python-pkcs11>=0.7.0
+
+# Operating system specific dependencies - install as needed
+
+# Windows specific (will be skipped on other platforms)
+pywin32>=300; sys_platform == 'win32'
+wincertstore>=0.2; sys_platform == 'win32'
+
+# Linux specific (will be skipped on other platforms)
+# These are typically installed via the system package manager
+# python3-cffi>=1.14.0; sys_platform == 'linux'
+
+# macOS specific (will be skipped on other platforms)
+# objc>=8.0.0; sys_platform == 'darwin' 

@@ -13,28 +13,28 @@ Security features:
 - Key derivation: HKDF with domain separation
 """
 
-import base64
-import hashlib
-import hmac
-import json
-import logging
 import os
+import hmac
+import hashlib
+import logging
 import struct
+import base64
+import json
+from typing import Dict, Tuple, Any, Optional, List, Union
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
 
-import quantcrypt.cipher
-import quantcrypt.kem
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric.x25519 import (X25519PrivateKey,
-                                                              X25519PublicKey)
-from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+# Classical cryptography
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from quantcrypt.dss import FALCON_1024
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.exceptions import InvalidTag
 
 # Post-quantum cryptography
-# Classical cryptography
+import quantcrypt.kem
+import quantcrypt.cipher
+from quantcrypt.dss import FALCON_1024
 
 # Configure logging
 logging.basicConfig(

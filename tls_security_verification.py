@@ -5,7 +5,8 @@ This module provides comprehensive security verification for the TLS secure chan
 with a focus on validating that ML-KEM-1024 post-quantum cryptography is properly
 implemented and used during communications.
 """
-
+import ctypes
+libc = ctypes.cdll.LoadLibrary('/lib/libc.so.6')  # Example: specify full path
 import os
 import ssl
 import socket

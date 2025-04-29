@@ -5,28 +5,29 @@ Combines X3DH (Extended Triple Diffie-Hellman) with Post-Quantum Cryptography
 for establishing secure shared secrets resistant to both classical and quantum attacks.
 """
 
-import base64
-import json
-import logging
 import os
+import json
 import time
-from typing import Dict, Tuple
+import base64
+import logging
+from typing import Tuple, Dict
 
-import quantcrypt.cipher
-import quantcrypt.kem
+# X25519 for classical key exchange
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+from cryptography.hazmat.primitives import serialization
+
+# Ed25519 for classical signatures
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey, Ed25519PublicKey)
-from cryptography.hazmat.primitives.asymmetric.x25519 import (X25519PrivateKey,
-                                                              X25519PublicKey)
+
+# Key derivation
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from quantcrypt.dss import FALCON_1024
+from cryptography.hazmat.primitives import hashes
 
 # Post-quantum cryptography
-# Ed25519 for classical signatures
-# X25519 for classical key exchange
-# Key derivation
+import quantcrypt.kem
+import quantcrypt.cipher
+from quantcrypt.dss import FALCON_1024
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s')

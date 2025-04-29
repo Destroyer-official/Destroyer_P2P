@@ -16,21 +16,20 @@ License: MIT
 """
 
 import asyncio
-import atexit
-import base64
-import ctypes
-import gc
-import json
 import logging
 import os
+import sys
+import socket
+import signal
+import atexit
+import ssl
+import json
+import base64
 import random
 import re
-import signal
-import socket
-import ssl
-import sys
+import gc
+import ctypes
 import time
-
 
 # Custom security exception
 class SecurityError(Exception):
@@ -42,13 +41,12 @@ class SecurityError(Exception):
     """
     pass
 
-import p2p
-import secure_key_manager
-from double_ratchet import DoubleRatchet
-from hybrid_kex import (HybridKeyExchange, _format_binary, secure_erase,
-                        verify_key_material)
 # Import dependencies
 from tls_secure_channel import TLSSecureChannel
+import p2p
+from hybrid_kex import HybridKeyExchange, verify_key_material, _format_binary, secure_erase
+from double_ratchet import DoubleRatchet
+import secure_key_manager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s')
