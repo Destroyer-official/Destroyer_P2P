@@ -1,0 +1,51 @@
+2025-04-29 21:37:27,047 [INFO] [double_ratchet.py:353] [__init__] Double Ratchet initialized as initiator with PQ-enabled security
+2025-04-29 21:37:27,073 [INFO] [double_ratchet.py:353] [__init__] Double Ratchet initialized as responder with PQ-enabled security
+2025-04-29 21:37:27,074 [INFO] [double_ratchet.py:1262] [set_remote_public_key] Initializing with remote public key (32 bytes) and KEM public key (1568 bytes)
+2025-04-29 21:37:27,077 [INFO] [double_ratchet.py:1059] [_initialize_chain_keys] Successfully initialized chain keys for initiator
+2025-04-29 21:37:27,078 [INFO] [double_ratchet.py:1307] [set_remote_public_key] Successfully initialized chains with remote key: ZLENKET1twE=
+2025-04-29 21:37:27,078 [INFO] [double_ratchet.py:1262] [set_remote_public_key] Initializing with remote public key (32 bytes) and KEM public key (1568 bytes)
+2025-04-29 21:37:27,080 [INFO] [double_ratchet.py:1059] [_initialize_chain_keys] Successfully initialized chain keys for responder
+2025-04-29 21:37:27,085 [INFO] [double_ratchet.py:622] [_encrypt] Encrypted message: 1403 bytes (header: 48, sig: 1264, nonce: 12, ciphertext: 77)
+2025-04-29 21:37:27,094 [INFO] [double_ratchet.py:622] [_encrypt] Encrypted message: 1406 bytes (header: 48, sig: 1273, nonce: 12, ciphertext: 71)
+2025-04-29 21:37:27,101 [INFO] [double_ratchet.py:622] [_encrypt] Encrypted message: 1398 bytes (header: 48, sig: 1271, nonce: 12, ciphertext: 65)
+2025-04-29 21:37:27,105 [INFO] [double_ratchet.py:622] [_encrypt] Encrypted message: 1401 bytes (header: 48, sig: 1272, nonce: 12, ciphertext: 67)
+2025-04-29 21:37:27,114 [INFO] [double_ratchet.py:622] [_encrypt] Encrypted message: 1396 bytes (header: 48, sig: 1268, nonce: 12, ciphertext: 66)
+2025-04-29 21:37:27,117 [INFO] [double_ratchet.py:1207] [_skip_message_keys] Skipping 2 message keys (from 1 to 2)
+2025-04-29 21:37:27,122 [INFO] [double_ratchet.py:809] [_ratchet_decrypt] Using stored key for message #1 from ratchet Ae9Hmn7IFRw=
+2025-04-29 21:37:27,126 [INFO] [double_ratchet.py:809] [_ratchet_decrypt] Using stored key for message #2 from ratchet Ae9Hmn7IFRw=
+2025-04-29 21:37:27,130 [INFO] [double_ratchet.py:1188] [secure_cleanup] Double Ratchet state securely cleaned up
+2025-04-29 21:37:27,132 [INFO] [double_ratchet.py:1188] [secure_cleanup] Double Ratchet state securely cleaned up
+2025-04-29 22:37:03,504 [INFO] [double_ratchet.py:353] [__init__] Double Ratchet initialized as initiator with PQ-enabled security
+2025-04-29 22:37:03,528 [INFO] [double_ratchet.py:353] [__init__] Double Ratchet initialized as responder with PQ-enabled security
+2025-04-29 22:37:03,528 [INFO] [double_ratchet.py:1262] [set_remote_public_key] Initializing with remote public key (32 bytes) and KEM public key (1568 bytes)
+2025-04-29 22:37:03,537 [INFO] [double_ratchet.py:1059] [_initialize_chain_keys] Successfully initialized chain keys for initiator
+2025-04-29 22:37:03,538 [INFO] [double_ratchet.py:1307] [set_remote_public_key] Successfully initialized chains with remote key: JVUt+Wr+H7s=
+2025-04-29 22:37:03,538 [INFO] [double_ratchet.py:1262] [set_remote_public_key] Initializing with remote public key (32 bytes) and KEM public key (1568 bytes)
+2025-04-29 22:37:03,540 [INFO] [double_ratchet.py:1059] [_initialize_chain_keys] Successfully initialized chain keys for responder
+2025-04-29 22:37:03,551 [INFO] [double_ratchet.py:622] [_encrypt] Encrypted message: 1414 bytes (header: 48, sig: 1275, nonce: 12, ciphertext: 77)
+2025-04-29 22:37:03,558 [INFO] [double_ratchet.py:622] [_encrypt] Encrypted message: 1405 bytes (header: 48, sig: 1272, nonce: 12, ciphertext: 71)
+2025-04-29 22:37:03,565 [INFO] [double_ratchet.py:622] [_encrypt] Encrypted message: 1401 bytes (header: 48, sig: 1274, nonce: 12, ciphertext: 65)
+2025-04-29 22:37:03,570 [INFO] [double_ratchet.py:622] [_encrypt] Encrypted message: 1396 bytes (header: 48, sig: 1267, nonce: 12, ciphertext: 67)
+2025-04-29 22:37:03,575 [INFO] [double_ratchet.py:622] [_encrypt] Encrypted message: 1402 bytes (header: 48, sig: 1274, nonce: 12, ciphertext: 66)
+2025-04-29 22:37:03,577 [INFO] [double_ratchet.py:1207] [_skip_message_keys] Skipping 2 message keys (from 1 to 2)
+2025-04-29 22:37:03,579 [INFO] [double_ratchet.py:809] [_ratchet_decrypt] Using stored key for message #1 from ratchet iGsPz0vGEQg=
+2025-04-29 22:37:03,580 [INFO] [double_ratchet.py:809] [_ratchet_decrypt] Using stored key for message #2 from ratchet iGsPz0vGEQg=
+2025-04-29 22:37:03,585 [INFO] [double_ratchet.py:1188] [secure_cleanup] Double Ratchet state securely cleaned up
+2025-04-29 22:37:03,587 [INFO] [double_ratchet.py:1188] [secure_cleanup] Double Ratchet state securely cleaned up
+2025-04-29 23:09:59,155 [INFO] [double_ratchet.py:353] [__init__] Double Ratchet initialized as initiator with PQ-enabled security
+2025-04-29 23:09:59,184 [INFO] [double_ratchet.py:353] [__init__] Double Ratchet initialized as responder with PQ-enabled security
+2025-04-29 23:09:59,184 [INFO] [double_ratchet.py:1262] [set_remote_public_key] Initializing with remote public key (32 bytes) and KEM public key (1568 bytes)
+2025-04-29 23:09:59,192 [INFO] [double_ratchet.py:1059] [_initialize_chain_keys] Successfully initialized chain keys for initiator
+2025-04-29 23:09:59,192 [INFO] [double_ratchet.py:1307] [set_remote_public_key] Successfully initialized chains with remote key: eOhD9O2kZQk=
+2025-04-29 23:09:59,192 [INFO] [double_ratchet.py:1262] [set_remote_public_key] Initializing with remote public key (32 bytes) and KEM public key (1568 bytes)
+2025-04-29 23:09:59,197 [INFO] [double_ratchet.py:1059] [_initialize_chain_keys] Successfully initialized chain keys for responder
+2025-04-29 23:09:59,202 [INFO] [double_ratchet.py:622] [_encrypt] Encrypted message: 1409 bytes (header: 48, sig: 1270, nonce: 12, ciphertext: 77)
+2025-04-29 23:09:59,211 [INFO] [double_ratchet.py:622] [_encrypt] Encrypted message: 1400 bytes (header: 48, sig: 1267, nonce: 12, ciphertext: 71)
+2025-04-29 23:09:59,223 [INFO] [double_ratchet.py:622] [_encrypt] Encrypted message: 1400 bytes (header: 48, sig: 1273, nonce: 12, ciphertext: 65)
+2025-04-29 23:09:59,229 [INFO] [double_ratchet.py:622] [_encrypt] Encrypted message: 1398 bytes (header: 48, sig: 1269, nonce: 12, ciphertext: 67)
+2025-04-29 23:09:59,234 [INFO] [double_ratchet.py:622] [_encrypt] Encrypted message: 1398 bytes (header: 48, sig: 1270, nonce: 12, ciphertext: 66)
+2025-04-29 23:09:59,237 [INFO] [double_ratchet.py:1207] [_skip_message_keys] Skipping 2 message keys (from 1 to 2)
+2025-04-29 23:09:59,241 [INFO] [double_ratchet.py:809] [_ratchet_decrypt] Using stored key for message #1 from ratchet ap3gM+24CU8=
+2025-04-29 23:09:59,259 [INFO] [double_ratchet.py:809] [_ratchet_decrypt] Using stored key for message #2 from ratchet ap3gM+24CU8=
+2025-04-29 23:09:59,266 [INFO] [double_ratchet.py:1188] [secure_cleanup] Double Ratchet state securely cleaned up
+2025-04-29 23:09:59,269 [INFO] [double_ratchet.py:1188] [secure_cleanup] Double Ratchet state securely cleaned up
