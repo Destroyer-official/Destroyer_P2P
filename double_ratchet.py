@@ -32,8 +32,8 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.exceptions import InvalidTag
 
 # Post-quantum cryptography
-import quantcrypt.kem
-import quantcrypt.cipher
+from quantcrypt import kem
+from  quantcrypt import cipher
 from quantcrypt.dss import FALCON_1024
 
 # Configure logging
@@ -322,7 +322,7 @@ class DoubleRatchet:
         # Post-quantum state
         if self.enable_pq:
             # Initialize KEM components
-            self.kem = quantcrypt.kem.MLKEM_1024()
+            self.kem = kem.MLKEM_1024()
             self.kem_public_key, self.kem_private_key = self.kem.keygen()
             self.remote_kem_public_key = None
             self.kem_ciphertext = None
@@ -516,9 +516,12 @@ class DoubleRatchet:
         # Compute a unique salt derived from current material
         salt = hmac.HMAC(key_material, b"DR_SALT", hashlib.sha256).digest()
         
+        # Create a SHA512 instance properly
+        sha512_instance = hashes.SHA512()
+        
         # Use SHA-512 for post-quantum security level
         hkdf = HKDF(
-            algorithm=hashes.SHA512(),
+            algorithm=sha512_instance,  # Use the properly instantiated SHA512 object
             length=64,  # 64 bytes: 32 for root key, 32 for chain key
             salt=salt,
             info=info

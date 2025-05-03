@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 
 # Try to import optional dependencies
 try:
-    import keyring
+    import keyring 
     HAVE_KEYRING = True
 except ImportError:
     HAVE_KEYRING = False

@@ -73,6 +73,7 @@ MAGENTA = '\033[95m'
 CYAN = '\033[96m'
 RED = '\033[91m'
 RESET = '\033[0m'
+BOLD = '\033[1m'
 
 class KeyEraser:
     """
@@ -1849,11 +1850,14 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                                 peer_name_candidate = decrypted_message[len('USERNAME:'):].strip()
                                 if 1 <= len(peer_name_candidate) <= self.MAX_USERNAME_LENGTH and re.match(self.USERNAME_REGEX, peer_name_candidate):
                                     self.peer_username = peer_name_candidate
-                                    print(f"\n{GREEN}Connected with {self.peer_username}{RESET}")
-                                    print("\n")
+                                    # Clear line and print notification (p2p.py style)
+                                    print("\r" + " " * 100)
+                                    print(f"\n{GREEN}{BOLD}Connected with {self.peer_username}{RESET}\n")
+                                    print(f"{CYAN}{self.local_username}: {RESET}", end='', flush=True)
                                 else:
                                     log.warning(f"Received invalid username: '{peer_name_candidate}'")
                             elif decrypted_message == 'EXIT':
+                                print("\r" + " " * 100)
                                 print(f"\n{YELLOW}{self.peer_username} has left the chat.{RESET}")
                                 log.info(f"Peer {self.peer_username} initiated disconnect.")
                                 # Trigger clean close, but don't attempt reconnect here as it was intentional
@@ -1863,13 +1867,21 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                                 parts = decrypted_message.split(':', 2)
                                 if len(parts) == 3:
                                     sender, content = parts[1], parts[2]
-                                    # Clear current line before printing message
+                                    # Store message in history (p2p.py style)
+                                    if hasattr(self, 'message_history'):
+                                        if len(self.message_history) >= self.max_history_size:
+                                            self.message_history.pop(0)
+                                        # Store in a format compatible with our encrypted system
+                                        self.message_history.append({"sender": sender, "content": content, "timestamp": time.time()})
+                                    
+                                    # Clear line before printing message
                                     print("\r" + " " * 100 + "\r", end='')
                                     print(f"{MAGENTA}{sender}: {RESET}{content}")
                                     print(f"{CYAN}{self.local_username}: {RESET}", end='', flush=True)
                                 else:
                                     log.warning(f"Received malformed message: {decrypted_message}")
                             elif decrypted_message == 'HEARTBEAT':
+                                self.last_heartbeat_received = time.time()
                                 log.debug("Received heartbeat message")
                                 # Send heartbeat response to confirm connection is still alive
                                 try:
@@ -1880,8 +1892,10 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                                     log.debug(f"Failed to send heartbeat ACK: {e}")
                                     # Ignore send errors here, heartbeat loop will handle disconnect
                             elif decrypted_message == 'HEARTBEAT_ACK':
+                                self.last_heartbeat_received = time.time()
                                 log.debug("Received heartbeat acknowledgment")
                             elif decrypted_message == 'RECONNECTED':
+                                print("\r" + " " * 100)
                                 print(f"\n{GREEN}{self.peer_username} has reconnected.{RESET}")
                                 print(f"{CYAN}{self.local_username}: {RESET}", end='', flush=True)
                             elif decrypted_message.startswith('KEY_ROTATION:'):
@@ -1951,7 +1965,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         except Exception as e:
             log.error(f"Receive loop exited with unhandled exception: {e}", exc_info=True)
         finally:
-            # Ensure connection state is updated if loop exits unexpectedly without calling _close_connection
+            # Update connection state if loop exits unexpectedly without calling _close_connection
             # (e.g., due to max errors without specific socket closed errors)
             if self.is_connected and not self.stop_event.is_set():
                  log.warning("Receive loop ended unexpectedly without explicit close. Closing connection.")
@@ -2125,7 +2139,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         if not is_reconnect:
             if not self.local_username or self.local_username.startswith("User_"):
                 while True:
-                    candidate_name = (await self._async_input(f"{YELLOW}Enter your username (max {self.MAX_USERNAME_LENGTH} chars, pattern: {self.USERNAME_REGEX}): {RESET}")).strip()
+                    candidate_name = (await self._async_input(f"{YELLOW}Enter your username (max {self.MAX_USERNAME_LENGTH} chars): {RESET}")).strip()
                     if not candidate_name:
                         self.local_username = f"User_{random.randint(100,999)}"
                         print(f"Using default username: {self.local_username}")
@@ -2172,7 +2186,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
 
         if not is_reconnect:
             print(f"\n{GREEN}Chat session started.{RESET}")
-            print(f"{YELLOW}Type 'exit' to quit.{RESET}\n")
+            print(f"{YELLOW}Type 'exit' to quit or '/help' for commands.{RESET}\n")
 
         # Process any queued messages (for reconnect)
         if is_reconnect and not self.message_queue.empty():
@@ -2193,13 +2207,16 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         # Sending Loop
         while not self.stop_event.is_set() and self.is_connected:
             try:
-                message = await self._async_input(f"{CYAN}{self.local_username}: {RESET}")
-                message = message.strip()
+                user_input = await self._async_input(f"{CYAN}{self.local_username}: {RESET}")
+                if not user_input:
+                    continue
+                    
+                user_input = user_input.strip()
 
                 if not self.is_connected or self.stop_event.is_set():
                     break
 
-                if message.lower() == 'exit':
+                if user_input.lower() == 'exit':
                     try:
                         # Encrypt the exit message using the Double Ratchet
                         exit_msg = "EXIT"
@@ -2209,17 +2226,29 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                         pass  # Ignore errors when exiting
                     break
 
-                if message:
+                # Handle special commands
+                if user_input.startswith('/'):
+                    await self._handle_command(user_input)
+                    continue
+
+                if user_input:
                     try:
-                        # Encrypt the message using the Double Ratchet
-                        msg_data = f"MSG:{self.local_username}:{message}"
+                        # Format message similar to p2p.py but encrypted
+                        msg_data = f"MSG:{self.local_username}:{user_input}"
                         encrypted_msg = await self._encrypt_message(msg_data)
+                        
+                        # Store in message history before sending (like p2p.py)
+                        if hasattr(self, 'message_history'):
+                            if len(self.message_history) >= self.max_history_size:
+                                self.message_history.pop(0)
+                            # Store message in history
+                            self.message_history.append({"sender": self.local_username, "content": user_input, "timestamp": time.time()})
                         
                         success = await p2p.send_framed(self.tcp_socket, encrypted_msg)
                         
                         if not success:
                             log.warning("Failed to send message, connection may be lost")
-                            # Queue the message for potential reconnect
+                            # Queue message for potential reconnect
                             if self.message_queue.qsize() < 100: # Limit queue size
                                 await self.message_queue.put(msg_data)
                             else:
@@ -2747,6 +2776,76 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         except Exception as e:
             log.error(f"Key storage verification failed with error: {e}")
             return False
+
+    async def _handle_command(self, command: str) -> None:
+        """
+        Handle special chat commands starting with /
+        
+        Args:
+            command: The command string entered by the user
+        """
+        cmd_parts = command.split(maxsplit=1)
+        cmd = cmd_parts[0].lower()
+        
+        if cmd == '/help':
+            print("\r" + " " * 100)
+            print(f"\n{YELLOW}Available commands:{RESET}")
+            print(f"  {BOLD}/help{RESET} - Show this help message")
+            print(f"  {BOLD}/clear{RESET} - Clear the chat screen")
+            print(f"  {BOLD}/status{RESET} - Show connection status")
+            print(f"  {BOLD}/exit{RESET} - Exit the chat")
+            print(f"{CYAN}{self.local_username}: {RESET}", end='', flush=True)
+            
+        elif cmd == '/clear':
+            if sys.platform == 'win32':
+                os.system('cls')
+            else:
+                os.system('clear')
+            print(f"{CYAN}{self.local_username}: {RESET}", end='', flush=True)
+            
+        elif cmd == '/status':
+            uptime = time.time() - self.last_heartbeat_received if self.last_heartbeat_received else 0
+            print("\r" + " " * 100)
+            print(f"\n{YELLOW}Secure Connection Status:{RESET}")
+            print(f"  Connected to: {self.peer_username} [{self.peer_ip}]:{self.peer_port}")
+            print(f"  Connection uptime: {int(uptime)} seconds")
+            print(f"  Security: Hybrid X3DH+PQ & Double Ratchet active")
+            if hasattr(self, 'message_history'):
+                print(f"  Messages in history: {len(self.message_history)}")
+            print(f"  Messages queued: {self.message_queue.qsize()}")
+            print(f"{CYAN}{self.local_username}: {RESET}", end='', flush=True)
+            
+        elif cmd == '/exit':
+            encrypted_exit = await self._encrypt_message("EXIT")
+            await p2p.send_framed(self.tcp_socket, encrypted_exit)
+            await self._close_connection(attempt_reconnect=False)
+            
+        else:
+            print("\r" + " " * 100)
+            print(f"\n{RED}Unknown command: {cmd}. Type /help for available commands.{RESET}")
+            print(f"{CYAN}{self.local_username}: {RESET}", end='', flush=True)
+
+    async def _refresh_stun(self):
+        """Refresh STUN discovery of public IP/port."""
+        print(f"{CYAN}Rediscovering public IPv6 address via STUN...{RESET}")
+        try:
+            old_ip = self.public_ip
+            old_port = self.public_port
+            
+            self.public_ip, self.public_port = await p2p.get_public_ip_port()
+
+            if self.public_ip:
+                ip_display = f"[{self.public_ip}]" if ':' in self.public_ip else self.public_ip
+                print(f"{GREEN}Public IP: {ip_display}:{self.public_port}{RESET}")
+                if old_ip != self.public_ip or old_port != self.public_port:
+                    print(f"{YELLOW}Note: Your public endpoint has changed from previous value!{RESET}")
+            else:
+                print(f"{RED}Could not determine public IP address.{RESET}")
+                print(f"{YELLOW}You may still be able to accept incoming connections on a local network.{RESET}")
+                print(f"{YELLOW}Make sure your system has IPv6 connectivity.{RESET}")
+        except Exception as e:
+            log.error(f"STUN discovery error: {e}", exc_info=True)
+            print(f"{RED}Error during STUN discovery: {e}{RESET}")
 
 # Only execute this code if the script is run directly
 if __name__ == "__main__":

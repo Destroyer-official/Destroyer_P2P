@@ -28,29 +28,32 @@ The application combines multiple security layers:
 
 - Python 3.8 or higher
 - Windows, macOS, or Linux operating system
-- Internet connection with UDP port access
+- Internet connection with ipv6 supported
 
 ## Installation
 
 1. Clone the repository
 ```bash
-git clone https://github.com/yourusername/secure-p2p-chat.git
-cd secure-p2p-chat
+git clone https://github.com/Destroyer-official/Destroyer_P2P.git
+cd Destroyer_P2P
 ```
 
 2. Install dependencies
 ```bash
-pip install cryptography pyopenssl pyzmq quantcrypt
+pip install -r requirements.txt
 ```
 
-3. Create required directories
-```bash
-mkdir -p keys cert
 ```
 
 ## Usage
 
 1. Start the application
+
+for windows 
+```bash
+python secure_p2p.py
+```
+for linux 
 ```bash
 python secure_p2p.py
 ```
@@ -65,7 +68,7 @@ python secure_p2p.py
    - **Retry STUN discovery**: Refreshes your public IP/port information
 
 4. Share your connection information:
-   - Your public endpoint will be displayed (e.g., `[2409:40e1:1107:1288:3101:2701:59f6:8ca2]:60973`)
+   - Your public endpoint will be displayed (e.g., `[2409:00e1:1117:1288:3101:2701:59f6:0ca2]:60973`)
    - Share this with your peer through a separate secure channel
 
 5. Starting a chat:
@@ -110,22 +113,18 @@ The application performs extensive validation of all cryptographic operations:
 
 ### Security Levels
 
-The application supports multiple security levels that can be configured:
-- `STANDARD`: Basic security features (TLS, X3DH)
-- `ENHANCED`: Adds Double Ratchet and stronger ciphers
-- `QUANTUM_RESISTANT`: Enables all post-quantum features (default)
 
-## Troubleshooting
 
 ### Connection Issues
 
 1. **Cannot discover public IP**:
-   - Ensure your firewall allows UDP traffic
+   - Ensure you have an publiv ipv6 address 
    - Try alternative STUN servers through the retry option
+   - if no ipv6 address avilable only ipv4 address show uou can restart your network device to get an new public ipv6 address or use an vpn to get an public ipv6 address
 
 2. **Connection timeout**:
    - Verify both peers have correct connection information
-   - Check if both peers are behind symmetric NATs (may require relay server)
+   - Check if both peers are behind symmetric NATs 
 
 3. **TLS handshake failure**:
    - Ensure both peers are running the same version

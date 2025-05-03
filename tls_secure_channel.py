@@ -50,13 +50,13 @@ except ImportError:
 
 # Import TPM/HSM modules if available
 try:
-    import tpm2_pytss
+    from standalone import tpm2_pytss
     HAVE_TPM = True
 except ImportError:
     HAVE_TPM = False
     
 try:
-    import pkcs11
+    from standalone import pkcs11
     from pkcs11 import KeyType, ObjectClass, Mechanism
     HAVE_PKCS11 = True
 except ImportError:
