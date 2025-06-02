@@ -1,5 +1,5 @@
-cryptography
+cryptography>=3.4.0
 quantcrypt
-keyring 
-pyzmq
-python-pkcs11  sys_platform != 'win32'
+keyring>=23.0.0
+pyzmq>=22.0.0
+python-pkcs11; sys_platform != "win32"
