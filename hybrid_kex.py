@@ -10,7 +10,10 @@ import json
 import time
 import base64
 import logging
-from typing import Tuple, Dict
+import uuid
+import random
+import string
+from typing import Tuple, Dict, Optional, Union
 
 # X25519 for classical key exchange
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
@@ -43,6 +46,11 @@ try:
 except Exception as e:
     log.warning(f"Could not create hybrid security log file: {e}")
 
+# Constants for ephemeral identity management
+DEFAULT_KEY_LIFETIME = 3072  # Default lifetime: 3072 seconds (51.2 minutes)
+MIN_KEY_LIFETIME = 300       # 5 minutes minimum lifetime
+EPHEMERAL_ID_PREFIX = "eph"   # Prefix for ephemeral identities
+MAX_KEY_LIFETIME = 86400    # 24 hours in seconds maximum lifetime
 
 def verify_key_material(key_material, expected_length=None, description="key material"):
     """
@@ -134,25 +142,64 @@ class HybridKeyExchange:
     
     The protocol uses multiple Diffie-Hellman exchanges with X25519 keys for classical
     security, combined with ML-KEM-1024 for post-quantum security.
+    
+    Features:
+    - Support for ephemeral identities with automatic rotation
+    - In-memory key option to avoid storing sensitive key material
+    - Post-quantum security with ML-KEM-1024 and FALCON-1024
     """
     
-    def __init__(self, identity: str = "user", keys_dir: str = None):
+    def __init__(self, identity: str = "user", keys_dir: str = None,
+                 ephemeral: bool = True, key_lifetime: int = MIN_KEY_LIFETIME,
+                 in_memory_only: bool = True):
         """
         Initialize the hybrid key exchange.
         
         Args:
-            identity: User identifier
-            keys_dir: Directory for storing keys
+            identity: User identifier (ignored if ephemeral=True, which is the default).
+            keys_dir: Directory for storing keys (not used if in_memory_only=True, which is the default).
+            ephemeral: Defaults to True for maximum security (ephemeral identity).
+                       If True, use an ephemeral identity with random identifier.
+            key_lifetime: Defaults to MIN_KEY_LIFETIME for frequent rotation in ephemeral mode.
+                          Seconds until keys should be rotated (for ephemeral mode).
+            in_memory_only: Defaults to True for maximum security (keys only in memory).
+                            If True, never store keys on disk.
         """
-        self.identity = identity
+        self.in_memory_only = in_memory_only
+        self.ephemeral_mode = ephemeral
         
-        # Set up keys directory
-        if keys_dir is None:
+        # Set key lifetime with bounds checking
+        self.key_lifetime = max(MIN_KEY_LIFETIME, min(key_lifetime, MAX_KEY_LIFETIME))
+        
+        # Determine actual identity (ephemeral or persistent)
+        _initial_identity_param = identity # Store for logging clarity if needed
+        if ephemeral:
+            # Create a random identity with uuid and random chars for privacy
+            random_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+            self.identity = f"{EPHEMERAL_ID_PREFIX}-{random_id}-{str(uuid.uuid4())[:8]}"
+        else:
+            self.identity = identity
+        
+        log.info(
+            f"HybridKeyExchange initializing for identity '{self.identity}'. "
+            f"Configuration - Ephemeral Mode: {self.ephemeral_mode}, "
+            f"In-Memory Keys: {self.in_memory_only}, "
+            f"Specified Key Lifetime: {key_lifetime}s, Effective Key Lifetime: {self.key_lifetime}s (for ephemeral mode)."
+        )
+        
+        if self.ephemeral_mode and self.in_memory_only and self.key_lifetime == MIN_KEY_LIFETIME and ephemeral and in_memory_only and key_lifetime == MIN_KEY_LIFETIME:
+            log.info("SECURITY INFO: Instance configured with maximal security defaults: ephemeral ID, in-memory keys, and minimal rotation time.")
+        elif self.ephemeral_mode and self.in_memory_only:
+            log.info("SECURITY INFO: Instance configured with strong security settings: ephemeral ID, in-memory keys.")
+        
+        # Set up keys directory (not used in memory-only mode)
+        if not in_memory_only and keys_dir is None:
             self.keys_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "keys")
         else:
             self.keys_dir = keys_dir
-            
-        os.makedirs(self.keys_dir, exist_ok=True)
+        
+        if not in_memory_only:
+            os.makedirs(self.keys_dir, exist_ok=True)
         
         # Initialize key storage
         self.static_key = None
@@ -165,6 +212,11 @@ class HybridKeyExchange:
         self.falcon_public_key = None
         self.peer_hybrid_bundle = None
         
+        # Create trackers for ephemeral keys
+        self.key_creation_time = None
+        self.next_rotation_time = None
+        self.pending_rotation = False
+        
         # Initialize KEM and DSS instances
         self.kem = quantcrypt.kem.MLKEM_1024()
         self.dss = FALCON_1024()
@@ -173,13 +225,38 @@ class HybridKeyExchange:
         self._load_or_generate_keys()
     
     def _load_or_generate_keys(self):
-        """Load existing keys or generate new ones if they don't exist."""
+        """Load existing keys or generate new ones if they don't exist, with support for ephemeral mode."""
+        self.key_creation_time = time.time()
+        
+        # In ephemeral or in-memory mode, always generate fresh keys
+        if self.ephemeral_mode or self.in_memory_only:
+            self._generate_keys()
+            
+            # Set the next rotation time for ephemeral keys
+            if self.ephemeral_mode:
+                self.next_rotation_time = self.key_creation_time + self.key_lifetime
+                log.info(f"Ephemeral keys will rotate after: {self.key_lifetime} seconds")
+                log.info(f"Next rotation scheduled at: {time.ctime(self.next_rotation_time)}")
+            
+            # Only save to disk if neither ephemeral nor in-memory mode is active
+            if not self.in_memory_only and not self.ephemeral_mode:
+                self._save_keys()
+            return
+            
+        # For persistent identities, try to load existing keys
         key_file = os.path.join(self.keys_dir, f"{self.identity}_hybrid_keys.json")
         
         try:
             if os.path.exists(key_file):
                 with open(key_file, 'r') as f:
                     keys_data = json.load(f)
+                
+                # Check for key expiration if present in the file
+                if 'expiration_time' in keys_data and keys_data['expiration_time'] < time.time():
+                    log.info(f"Keys for {self.identity} have expired, generating new ones")
+                    self._generate_keys()
+                    self._save_keys()
+                    return
                 
                 # Load X25519 static key
                 self.static_key = X25519PrivateKey.from_private_bytes(
@@ -210,6 +287,10 @@ class HybridKeyExchange:
                     log.info(f"Generating new FALCON-1024 keys for {self.identity}")
                     self.falcon_public_key, self.falcon_private_key = self.dss.keygen()
                     self._save_keys()
+                
+                # Load or set key creation time
+                if 'created_at' in keys_data:
+                    self.key_creation_time = keys_data['created_at']
                 
                 log.info(f"Loaded existing hybrid key material for {self.identity}")
             else:
@@ -279,7 +360,18 @@ class HybridKeyExchange:
         log.info(f"Successfully generated complete hybrid key material for {self.identity}")
     
     def _save_keys(self):
-        """Save the generated keys to a file."""
+        """Save the generated keys to a file if neither in-memory nor ephemeral mode is active."""
+        # Skip saving if in-memory only mode is enabled
+        if self.in_memory_only:
+            log.debug("In-memory only mode active, skipping key persistence")
+            return
+            
+        # Skip saving if ephemeral mode is enabled
+        if self.ephemeral_mode:
+            log.debug("Ephemeral mode active, skipping key persistence")
+            return
+            
+        # Only save if neither in-memory nor ephemeral mode is active
         key_file = os.path.join(self.keys_dir, f"{self.identity}_hybrid_keys.json")
         
         keys_data = {
@@ -312,13 +404,14 @@ class HybridKeyExchange:
             'falcon_public_key': base64.b64encode(self.falcon_public_key).decode('utf-8')
         }
         
-        # Add generation timestamp
-        keys_data['generated_at'] = int(time.time())
+        # Add timestamps for key management
+        keys_data['created_at'] = self.key_creation_time or int(time.time())
+        keys_data['expiration_time'] = self.key_creation_time + self.key_lifetime
         
         with open(key_file, 'w') as f:
             json.dump(keys_data, f)
         
-        log.info(f"Saved hybrid keys to {key_file}")
+        log.info(f"Saved hybrid keys to {key_file} (expires: {time.ctime(keys_data['expiration_time'])})")
     
     def get_public_bundle(self) -> Dict[str, str]:
         """
@@ -327,6 +420,10 @@ class HybridKeyExchange:
         Returns:
             Dictionary containing all public key components
         """
+        # Check if keys need rotation before creating bundle
+        if self.check_key_expiration():
+            self.rotate_keys()
+            
         # Create basic bundle with X25519 and KEM keys
         bundle = {
             'identity': self.identity,
@@ -354,6 +451,12 @@ class HybridKeyExchange:
             'falcon_public_key': base64.b64encode(self.falcon_public_key).decode('utf-8')
         }
         
+        # Add ephemeral identity metadata if applicable
+        if self.ephemeral_mode:
+            bundle['ephemeral'] = True
+            bundle['created_at'] = int(self.key_creation_time)
+            bundle['expires_at'] = int(self.next_rotation_time)
+            
         # Create a canonicalized representation of the bundle for signing
         bundle_data = json.dumps(bundle, sort_keys=True).encode('utf-8')
         
@@ -630,6 +733,147 @@ class HybridKeyExchange:
         except (KeyError, ValueError) as e:
             log.error(f"SECURITY ALERT: Error processing handshake: {e}", exc_info=True)
             raise ValueError(f"Invalid handshake message: {e}")
+
+    def rotate_keys(self) -> bool:
+        """
+        Manually rotate all cryptographic keys.
+        
+        This completely regenerates the identity with new keys for improved security.
+        It's automatically called when ephemeral keys expire, but can be manually
+        triggered for extra security.
+        
+        Returns:
+            bool: True if rotation was successful
+        """
+        log.info(f"Rotating cryptographic keys for {self.identity}")
+        
+        try:
+            # Securely erase old keys
+            if self.static_key:
+                secure_erase(self.static_key)
+            if self.signing_key:
+                secure_erase(self.signing_key)
+            if self.signed_prekey:
+                secure_erase(self.signed_prekey)
+            if self.kem_private_key:
+                secure_erase(self.kem_private_key)
+            if self.falcon_private_key:
+                secure_erase(self.falcon_private_key)
+            
+            # Generate new identity if in ephemeral mode
+            if self.ephemeral_mode:
+                random_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+                self.identity = f"{EPHEMERAL_ID_PREFIX}-{random_id}-{str(uuid.uuid4())[:8]}"
+                log.info(f"Generated new ephemeral identity: {self.identity}")
+            
+            # Generate all new keys
+            self._generate_keys()
+            
+            # Save keys if not in ephemeral or in-memory mode
+            if not self.ephemeral_mode and not self.in_memory_only:
+                self._save_keys()
+                
+            # Reset key rotation timing
+            self.key_creation_time = time.time()
+            self.next_rotation_time = self.key_creation_time + self.key_lifetime
+            self.pending_rotation = False
+            
+            log.info(f"Key rotation completed successfully")
+            return True
+            
+        except Exception as e:
+            log.error(f"Key rotation failed: {e}")
+            return False
+    
+    def check_key_expiration(self) -> bool:
+        """
+        Check if the current keys have expired and need rotation.
+        
+        For ephemeral identities, this should be called periodically to
+        ensure the keys are rotated according to the key_lifetime value.
+        
+        Returns:
+            bool: True if keys need rotation, False otherwise
+        """
+        # Only ephemeral identities need automatic rotation
+        if not self.ephemeral_mode:
+            return False
+            
+        # Check if it's time to rotate
+        current_time = time.time()
+        if self.next_rotation_time and current_time >= self.next_rotation_time:
+            log.info(f"Ephemeral keys have expired (created: {time.ctime(self.key_creation_time)})")
+            self.pending_rotation = True
+            return True
+            
+        return self.pending_rotation
+
+    def generate_ephemeral_identity(self) -> str:
+        """
+        Generate a completely new ephemeral identity.
+        
+        This method creates a new random identity and rotates all keys,
+        returning the new identity string.
+        
+        Returns:
+            str: The new ephemeral identity string
+        """
+        if not self.ephemeral_mode:
+            # Convert to ephemeral mode
+            self.ephemeral_mode = True
+            log.info("Switching to ephemeral mode")
+            
+        # Create new random identity
+        random_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        self.identity = f"{EPHEMERAL_ID_PREFIX}-{random_id}-{str(uuid.uuid4())[:8]}"
+        
+        # Rotate all keys
+        self.rotate_keys()
+        
+        log.info(f"Generated fresh ephemeral identity: {self.identity}")
+        return self.identity
+    
+    def secure_cleanup(self):
+        """
+        Securely erase all key material from memory.
+        
+        Should be called when the object is no longer needed to ensure
+        no sensitive key material remains in memory.
+        """
+        log.info(f"Performing secure cleanup for {self.identity}")
+        
+        # Erase all sensitive key material
+        if self.static_key:
+            secure_erase(self.static_key)
+            self.static_key = None
+            
+        if self.signing_key:
+            secure_erase(self.signing_key)
+            self.signing_key = None
+            
+        if self.signed_prekey:
+            secure_erase(self.signed_prekey)
+            self.signed_prekey = None
+            
+        if self.prekey_signature:
+            secure_erase(self.prekey_signature)
+            self.prekey_signature = None
+            
+        if self.kem_private_key:
+            secure_erase(self.kem_private_key)
+            self.kem_private_key = None
+            
+        if self.kem_public_key:
+            secure_erase(self.kem_public_key)
+            self.kem_public_key = None
+            
+        if self.falcon_private_key:
+            secure_erase(self.falcon_private_key)
+            self.falcon_private_key = None
+            
+        if self.falcon_public_key:
+            secure_erase(self.falcon_public_key)
+            self.falcon_public_key = None
 
 
 def demonstrate_handshake():
