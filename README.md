@@ -1,5 +1,3 @@
-```markdown
-# Secure P2P Chat
 
 <div align="center">
   <img src="https://img.shields.io/badge/security-maximum-brightgreen" alt="Security: Maximum">
@@ -47,6 +45,11 @@
 - [Module Breakdown & Network Stages](#module-breakdown--network-stages)
 - [Security Flow Summary](#security-flow-summary)
 - [Advanced Protection Features](#advanced-protection-features)
+  - [Traffic Analysis Resistance](#traffic-analysis-resistance)
+  - [Double Ratchet Enhancement](#double-ratchet-enhancement)
+  - [Anti-Forensic Design](#anti-forensic-design)
+  - [Security Monitoring](#security-monitoring)
+  - [Ephemeral Identities](#ephemeral-identities)
 - [Setup and Running](#setup-and-running)
 - [Under The Hood](#under-the-hood)
 - [Dependencies](#dependencies)
@@ -215,6 +218,15 @@ Built-in security monitoring capabilities:
 - **Heartbeat Encryption**: Encrypted keepalive messages to maintain connection security
 - **Anomaly Detection**: Identifies potential security issues during operation
 
+### 🆔 Ephemeral Identities
+
+Enhances privacy and thwarts long-term tracking:
+
+- **Automatic Identity Rotation**: All cryptographic identifiers (keys, certificates) are automatically rotated at configurable intervals (e.g., every hour or day).
+- **No Persistent Identifiers**: The system avoids long-term static identifiers that could be used to track users over time.
+- **Untraceable Sessions**: Each communication session can appear to originate from a new, unrelated identity, making it difficult to link sessions or build a profile of a user.
+- **Increased Anonymity**: Complements other security layers by making it harder to attribute communication to specific individuals over extended periods.
+
 ## Module Breakdown & Network Stages
 
 The application's functionality is distributed across several Python modules:
@@ -369,17 +381,26 @@ The hardware security integration leverages:
 
 ## Dependencies
 
-Core dependencies:
+This project relies on several external Python libraries and core internal modules:
+
+### External Libraries (from PyPI)
+
+These should be installed via `pip install -r requirements.txt`:
 
 ```
-cryptography>=3.4.0      # Core cryptographic operations
-keyring>=23.0.0          # OS keyring integration
-pyzmq>=22.0.0            # Process isolation for key management
+cryptography>=3.4.0      # Core cryptographic operations (AES, ChaCha20, RSA, ECC)
+keyring>=23.0.0          # Secure OS-specific credential storage (keychain, credential manager)
+pyzmq>=22.0.0            # Inter-process communication for key management isolation (POSIX)
+python-pkcs11            # PKCS#11 interface for HSMs (Linux/macOS only)
 ```
 
-Custom modules:
-- `quantcrypt` - ML-KEM and FALCON implementations
-- `cphs` - Hardware security abstraction layer
+### Core Internal Modules & Custom Libraries
+
+These modules are part of the project's codebase:
+
+- **`quantcrypt`**: A custom local library providing implementations for the post-quantum algorithms ML-KEM (for Key Encapsulation) and FALCON (for digital signatures). This module is essential for the hybrid post-quantum security features.
+- **`platform_hsm_interface.py`** (often imported as `cphs`): This is the core internal module that provides the cross-platform hardware security abstraction layer. It interfaces with Windows CNG/TPM and PKCS#11 for HSMs on Linux/macOS.
+- Other Python files like `secure_p2p.py`, `hybrid_kex.py`, `double_ratchet.py`, etc., constitute the main application logic and security protocols.
 
 ## Potential Use Cases
 
@@ -389,7 +410,6 @@ Custom modules:
 - **Corporate Security**: Protection of intellectual property discussions
 - **Healthcare**: HIPAA-compliant patient information exchange
 - **Legal Sector**: Privileged attorney-client communications
-
 
 
 ## Contributing
@@ -421,5 +441,5 @@ This project is available under the MIT License. See the LICENSE file for detail
 - NIST Post-Quantum Cryptography standardization efforts
 - The open-source cryptography community
 - All contributors to this project
-```
+
 
