@@ -314,8 +314,8 @@ The application's functionality is distributed across several Python modules:
 1. **Clone the repository**
 
 ```bash
-git clone https://github.com/yourusername/secure-p2p-chat.git
-cd secure-p2p-chat
+git clone https://github.com/Destroyer-official/Destroyer_P2P.git
+cd Destroyer_P2P
 ```
 
 2. **Set up a virtual environment**
