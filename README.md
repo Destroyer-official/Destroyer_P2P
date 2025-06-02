@@ -1,5 +1,3 @@
-I'll enhance the README with more detailed features and make it more engaging for GitHub:
-
 ```markdown
 # Secure P2P Chat
 
