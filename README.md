@@ -131,8 +131,8 @@ graph TB
     end
 
     subgraph "🔒 Hardware Security"
-        HSMInterface[\\\"platform_hsm_interface.py<br/>TPM/HSM Abstraction\"/]
-        KeyMgr[\\\"secure_key_manager.py<br/>Secure Key Storage\"\\]
+        HSMInterface["platform_hsm_interface.py<br/>TPM/HSM Abstraction"]
+        KeyMgr["secure_key_manager.py<br/>Secure Key Storage"]
     end
 
     UI <==> SecureP2P
