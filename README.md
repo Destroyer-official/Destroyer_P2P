@@ -1,4 +1,3 @@
-
 <div align="center">
   <img src="https://img.shields.io/badge/security-maximum-brightgreen" alt="Security: Maximum">
   <img src="https://img.shields.io/badge/encryption-hybrid_post_quantum-blue" alt="Encryption: Hybrid Post-Quantum">
@@ -11,135 +10,149 @@
 <br />
 
 <div align="center">
-  <h3 align="center">🔐 Secure P2P Chat</h3>
+  <h1 align="center">🔐 Secure P2P Chat 🌌</h1>
   <p align="center">
-    Quantum-resistant, military-grade P2P communication with multi-layered cryptographic protection
+    <em>Quantum-resistant, military-grade P2P communication with multi-layered cryptographic protection</em>
     <br />
     <br />
-    <a href="#architecture"><strong>Explore the Architecture »</strong></a>
+    <a href="#🏗️-architecture"><strong>Explore the Architecture »</strong></a>
     <br />
     <br />
-    <a href="#setup-and-running">Installation Guide</a>
+    <a href="#⚙️-setup-and-running">Installation Guide</a>
     ·
-    <a href="#security-flow-summary">Security Flow</a>
+    <a href="#📈-security-flow-summary">Security Flow</a>
     ·
-    <a href="#module-breakdown--network-stages">Module Details</a>
+    <a href="#🧩-module-breakdown--network-stages">Module Details</a>
   </p>
 </div>
 
+---
+
 ## ✨ Highlights
 
-- **Quantum-Resistant Encryption**: Combines X25519 with ML-KEM-1024 and FALCON-1024 to protect against quantum computing threats
-- **4 Independent Encryption Layers**: Unbreakable security with TLS 1.3, Double Ratchet, application ciphers, and certificate encryption
-- **Advanced Traffic Analysis Protection**: Message length obfuscation makes all communications look identical regardless of content
-- **Hardware Security Integration**: Leverages TPM on Windows and HSM on Linux/macOS for maximum key protection
-- **Forward Secrecy & Break-in Recovery**: Automatically rotates keys and provides security even after key compromise
-- **Zero Persistence Option**: In-memory only mode leaves no trace on disk after shutdown
-- **Cross-Platform**: Works seamlessly across Windows, macOS, and Linux with native security features
+- **🛡️ Quantum-Resistant Encryption**: Combines X25519 with ML-KEM-1024 and FALCON-1024.
+- **🧅 4 Independent Encryption Layers**: TLS 1.3, Double Ratchet, application ciphers, and certificate encryption.
+- **👁️‍🗨️ Advanced Traffic Analysis Protection**: Message length obfuscation.
+- **⚙️ Hardware Security Integration**: Leverages TPM on Windows and HSM on Linux/macOS.
+- **🔑 Forward Secrecy & Break-in Recovery**: Automatic key rotation and post-compromise security.
+- **💨 Zero Persistence Option**: In-memory only mode leaves no trace.
+- **💻 Cross-Platform**: Works seamlessly across Windows, macOS, and Linux.
 
-## Table of Contents
+---
 
-- [About The Project](#about-the-project)
-- [Architecture](#architecture)
-- [Security Features In-Depth](#security-features-in-depth)
-- [Module Breakdown & Network Stages](#module-breakdown--network-stages)
-- [Security Flow Summary](#security-flow-summary)
-- [Advanced Protection Features](#advanced-protection-features)
-  - [Traffic Analysis Resistance](#traffic-analysis-resistance)
-  - [Double Ratchet Enhancement](#double-ratchet-enhancement)
-  - [Anti-Forensic Design](#anti-forensic-design)
-  - [Security Monitoring](#security-monitoring)
-  - [Ephemeral Identities](#ephemeral-identities)
-- [Setup and Running](#setup-and-running)
-- [Under The Hood](#under-the-hood)
-- [Dependencies](#dependencies)
-- [Potential Use Cases](#potential-use-cases)
-- [Roadmap](#roadmap)
-- [Contributing](#contributing)
-- [Security Considerations](#security-considerations)
-- [License](#license)
-- [Acknowledgments](#acknowledgments)
+## 📜 Table of Contents
 
-## About The Project
+- [About The Project](#-about-the-project)
+- [Architecture](#🏗️-architecture)
+- [Security Features In-Depth](#🛡️-security-features-in-depth)
+- [Module Breakdown & Network Stages](#🧩-module-breakdown--network-stages)
+- [Security Flow Summary](#📈-security-flow-summary)
+- [Advanced Protection Features](#🚀-advanced-protection-features)
+  - [Traffic Analysis Resistance](#📊-traffic-analysis-resistance)
+  - [Double Ratchet Enhancement](#🔄-double-ratchet-enhancement)
+  - [Anti-Forensic Design](#👻-anti-forensic-design)
+  - [Security Monitoring](#🔍-security-monitoring)
+  - [Ephemeral Identities](#🆔-ephemeral-identities)
+- [Setup and Running](#⚙️-setup-and-running)
+- [Under The Hood](#🔬-under-the-hood)
+- [Dependencies](#🔗-dependencies)
+- [Potential Use Cases](#🎯-potential-use-cases)
+- [Roadmap](#🗺️-roadmap)
+- [Contributing](#🤝-contributing)
+- [Security Considerations](#⚠️-security-considerations)
+- [License](#📄-license)
+- [Acknowledgments](#🙏-acknowledgments)
 
-### 🔒 Motivation
+---
 
-This project was developed to create the most secure peer-to-peer communication system possible by combining cutting-edge cryptographic techniques. The primary goals were:
+## 🚀 About The Project
 
-1. **Future-proof security** - Implement post-quantum cryptographic methods that resist both classical and quantum attacks
-2. **Defense in depth** - Create multiple independent security layers that would require breaking multiple encryption systems
-3. **Cross-platform hardware security** - Leverage hardware security elements available on different platforms for maximum protection
-4. **Zero-knowledge architecture** - Design a system where even if servers are compromised, messages remain protected
-5. **Educational foundation** - Demonstrate advanced security concepts in a practical implementation
+### 🎯 Motivation
+
+> This project was developed to create the most secure peer-to-peer communication system possible by combining cutting-edge cryptographic techniques. The primary goals were:
+>
+> 1. **Future-proof security** - Implement post-quantum cryptographic methods.
+> 2. **Defense in depth** - Create multiple independent security layers.
+> 3. **Cross-platform hardware security** - Leverage hardware security elements.
+> 4. **Zero-knowledge architecture** - Design for server compromise resilience.
+> 5. **Educational foundation** - Demonstrate advanced security concepts.
 
 ### 🌟 Key Features
 
-- **Hybrid X3DH+PQ Key Exchange**: Extended Triple Diffie-Hellman with Post-Quantum enhancements
-- **Multi-layered Protection**: TLS 1.3, Double Ratchet, and application-layer encryption
-- **Traffic Analysis Resistance**: Advanced message length obfuscation techniques
-- **Hardware Security Module Integration**: OS-specific hardware-backed crypto operations
-- **Post-quantum Algorithms**: ML-KEM-1024 for key exchange and FALCON-1024 for signatures
-- **Ephemeral Identity**: Automatic key rotation at configurable intervals
-- **Memory Protection**: Security-hardened memory handling with canary values
-- **Anti-Forensic Design**: Options for zero-persistence operation mode
+- **Hybrid X3DH+PQ Key Exchange**: Extended Triple Diffie-Hellman with Post-Quantum enhancements.
+- **Multi-layered Protection**: TLS 1.3, Double Ratchet, and application-layer encryption.
+- **Traffic Analysis Resistance**: Advanced message length obfuscation techniques.
+- **Hardware Security Module Integration**: OS-specific hardware-backed crypto operations.
+- **Post-quantum Algorithms**: ML-KEM-1024 for key exchange and FALCON-1024 for signatures.
+- **Ephemeral Identity**: Automatic key rotation at configurable intervals.
+- **Memory Protection**: Security-hardened memory handling with canary values.
+- **Anti-Forensic Design**: Options for zero-persistence operation mode.
 
-## Architecture
+---
+
+## 🏗️ Architecture
 
 The application employs a defense-in-depth security architecture with multiple specialized modules:
 
 ```mermaid
-flowchart TB
-    subgraph "User Interface"
-        UI[User Interface]
+graph TB
+    subgraph "📱 User Interface"
+        UI([User Interface])
     end
 
-    subgraph "Security Orchestration"
-        SecureP2P["secure_p2p.py\nMain Security Coordinator"]
+    subgraph "⚙️ Security Orchestration"
+        SecureP2P((""secure_p2p.py<br/>Main Security Coordinator""))
     end
 
-    subgraph "Network Layer"
-        P2P["p2p_core.py\nP2P Networking & STUN"]
+    subgraph "🌐 Network Layer"
+        P2P([p2p_core.py<br/>P2P Networking & STUN])
     end
 
-    subgraph "Security Protocol Stack"
+    subgraph "🛡️ Security Protocol Stack"
         direction TB
-        TLS["tls_channel_manager.py\nTLS 1.3 with PQ Extensions"]
-        CA["ca_services.py\nCertificate Exchange"]
-        KEX["hybrid_kex.py\nX3DH + ML-KEM-1024"]
-        DR["double_ratchet.py\nE2E Encryption & Forward Secrecy"]
+        TLS[/tls_channel_manager.py<br/>TLS 1.3 with PQ Extensions\]
+        CA[/ca_services.py<br/>Certificate Exchange\]
+        KEX[/hybrid_kex.py<br/>X3DH + ML-KEM-1024\]
+        DR[/double_ratchet.py<br/>E2E Encryption & Forward Secrecy\]
     end
 
-    subgraph "Hardware Security"
-        HSM["platform_hsm_interface.py\nTPM/HSM Integration"]
-        KeyMgr["secure_key_manager.py\nSecure Key Storage"]
+    subgraph "🔒 Hardware Security"
+        HSMInterface[\"platform_hsm_interface.py<br/>TPM/HSM Abstraction"/]
+        KeyMgr[\"secure_key_manager.py<br/>Secure Key Storage"\]
     end
 
-    UI <--> SecureP2P
-    SecureP2P <--> P2P
+    UI <==> SecureP2P
+    SecureP2P <==> P2P
     
-    SecureP2P --> TLS
-    SecureP2P --> CA
-    SecureP2P --> KEX
-    SecureP2P --> DR
+    SecureP2P ==> TLS
+    SecureP2P ==> CA
+    SecureP2P ==> KEX
+    SecureP2P ==> DR
     
-    TLS --> CA
-    KEX --> DR
+    TLS -.-> CA
+    KEX -.-> DR
     
-    TLS --> HSM
-    KEX --> HSM
-    DR --> HSM
-    CA --> HSM
+    TLS --> HSMInterface
+    KEX --> HSMInterface
+    DR --> HSMInterface
+    CA --> HSMInterface
     
-    HSM <--> KeyMgr
+    HSMInterface <--> KeyMgr
 
-    classDef primary fill:#f9f9f9,stroke:#333,stroke-width:2px,color:#333;
-    classDef secondary fill:#f6f8fa,stroke:#666,stroke-width:1px,color:#666;
+    classDef orchestrator fill:#cce5ff,stroke:#004080,stroke-width:2px,color:#004080,font-weight:bold;
+    classDef protocol fill:#ccffcc,stroke:#006600,stroke-width:2px,color:#003300;
+    classDef hardware fill:#ffe0cc,stroke:#993300,stroke-width:2px,color:#662200;
+    classDef utility fill:#f0f0f0,stroke:#333,stroke-width:1px,color:#333;
     
-    class SecureP2P,HSM primary;
-    class UI,P2P,TLS,CA,KEX,DR,KeyMgr secondary;
+    class SecureP2P orchestrator;
+    class TLS,CA,KEX,DR protocol;
+    class HSMInterface,KeyMgr hardware;
+    class UI,P2P utility;
 ```
 
-## Security Features In-Depth
+---
+
+## 🛡️ Security Features In-Depth
 
 ### 🛡️ Hybrid Post-Quantum Cryptography
 
@@ -179,11 +192,11 @@ Cross-platform interface for hardware security elements:
 Advanced key storage with OS-specific best practices:
 
 - **Storage Options**:
-  - **OS Keyring**: Windows Credential Manager, macOS Keychain, Linux Keyring
-  - **Secure Filesystem**: OS-specific secure locations with strict permissions
-  - **In-Memory**: Zero-persistence mode for maximum security
-- **Process Isolation**: Key operations in separate process on POSIX systems
-- **Memory Protection**: Secure memory wiping, canary values, and anti-debugging features
+  - **OS Keyring**: Windows Credential Manager, macOS Keychain, Linux Keyring.
+  - **Secure Filesystem**: OS-specific secure locations with strict permissions.
+  - **In-Memory**: Zero-persistence mode for maximum security.
+- **Process Isolation**: Key operations in separate process on POSIX systems.
+- **Memory Protection**: Secure memory wiping, canary values, and anti-debugging features.
 
 ### 🛡️ Layered Security Model
 
@@ -191,51 +204,50 @@ The application employs multiple layers of security to protect data in transit. 
 
 ```mermaid
 graph LR
-    subgraph "Network Transmission (OS Kernel)"
-        TCPIP["TCP/IP Frame\\n(Contains Encrypted TLS Record)"]
+    subgraph "🌍 Network Transmission (OS Kernel)"
+        TCPIP>"TCP/IP Frame<br/>(Contains Encrypted TLS Record)"]
     end
-    subgraph "Transport Layer Security (TLS 1.3 Channel)"
-        TLS_Packet["TLS Record\\n(Contains Encrypted Double Ratchet Message)"]
+    subgraph "🔒 Transport Layer Security (TLS 1.3 Channel)"
+        TLS_Packet>"TLS Record<br/>(Contains Encrypted Double Ratchet Message)"]
     end
-    subgraph "End-to-End Encrypted Message (Double Ratchet Protocol)"
-        DR_Message["Double Ratchet Message\\n(Header + Encrypted Padded User Data + Signature)"]
+    subgraph "✉️ End-to-End Encrypted Message (Double Ratchet)"
+        DR_Message>"Double Ratchet Message<br/>(Header + Encrypted Padded User Data + Signature)"]
     end
-    subgraph "Application Data Preparation"
-        Padded_Message["Padded User Message\\n(Random Padding Bytes + Original Message Bytes)"]
-        User_Message["Original User Message (Plaintext String)"]
+    subgraph "📝 Application Data Preparation"
+        Padded_Message>"Padded User Message<br/>(Random Padding Bytes + Original Message Bytes)"]
+        User_Message[("Original User Message<br/>(Plaintext String)")]
     end
 
-    User_Message -- "UTF-8 Encode & Add Random Padding (`_add_random_padding`)" --> Padded_Message
-    Padded_Message -- "Double Ratchet Encryption (`ratchet.encrypt`)" --> DR_Message
+    User_Message -- "UTF-8 Encode & Add Random Padding<br/>(`_add_random_padding`)" --> Padded_Message
+    Padded_Message -- "Double Ratchet Encryption<br/>(`ratchet.encrypt`)" --> DR_Message
     DR_Message -- "TLS Encryption (SSL Socket)" --> TLS_Packet
     TLS_Packet -- "TCP/IP Framing (OS Network Stack)" --> TCPIP
 
-    classDef layer_app fill:#e6ffe6,stroke:#333,stroke-width:2px;
-    classDef layer_dr fill:#e6f7ff,stroke:#333,stroke-width:2px;
-    classDef layer_tls fill:#ffe6e6,stroke:#333,stroke-width:2px;
-    classDef layer_net fill:#fff0e6,stroke:#333,stroke-width:2px;
-
-    class User_Message,Padded_Message layer_app;
-    class DR_Message layer_dr;
-    class TLS_Packet layer_tls;
-    class TCPIP layer_net;
-
-    subgraph "Handshake Protocols (Establish & Secure these Layers)"
+    subgraph "🤝 Handshake Protocols (Establish & Secure Layers)"
       direction TB
-      CertEx["Certificate Exchange (`ca_services.py`)\\n(Secures TLS identity validation)"]
-      HybridKEX["Hybrid X3DH+PQ Key Exchange (`hybrid_kex.py`)\\n(Establishes root key for Double Ratchet)"]
-      DRSetup["Double Ratchet Initialization (`double_ratchet.py`)\\n(Sets up initial DR state with KEX root key)"]
-      TLSHandshake["TLS 1.3 Handshake (`tls_channel_manager.py`)\\n(Establishes secure transport channel using certificates)"]
+      CertEx["Certificate Exchange<br/>(`ca_services.py`)<br/>(Secures TLS identity)"]
+      HybridKEX["Hybrid X3DH+PQ KEX<br/>(`hybrid_kex.py`)<br/>(Establishes DR root key)"]
+      DRSetup["DR Initialization<br/>(`double_ratchet.py`)<br/>(Initial DR state)"]
+      TLSHandshake["TLS 1.3 Handshake<br/>(`tls_channel_manager.py`)<br/>(Establishes secure channel)"]
     end
     
-    CertEx -.-> TLSHandshake
-    HybridKEX -.-> DRSetup
-    DRSetup -.-> DR_Message
-    TLSHandshake -.-> TLS_Packet
+    CertEx ==> TLSHandshake
+    HybridKEX ==> DRSetup
+    DRSetup ==> DR_Message
+    TLSHandshake ==> TLS_Packet
+
+    classDef data fill:#e6ffe6,stroke:#339933,stroke-width:2px,color:#004d00;
+    classDef protocol_node fill:#e6f7ff,stroke:#3399ff,stroke-width:2px,color:#004080;
+    classDef handshake_protocol fill:#fff0b3,stroke:#ffc107,stroke-width:2px,color:#664d00;
+
+    class User_Message,Padded_Message,DR_Message,TLS_Packet,TCPIP data;
+    class CertEx,HybridKEX,DRSetup,TLSHandshake handshake_protocol;
 ```
 This layered approach ensures that even if one layer is compromised, others remain to protect the communication.
 
-## Advanced Protection Features
+---
+
+## 🚀 Advanced Protection Features
 
 ### 📊 Traffic Analysis Resistance
 
@@ -287,51 +299,55 @@ Enhances privacy and thwarts long-term tracking:
 - **Untraceable Sessions**: Each communication session can appear to originate from a new, unrelated identity, making it difficult to link sessions or build a profile of a user.
 - **Increased Anonymity**: Complements other security layers by making it harder to attribute communication to specific individuals over extended periods.
 
-## Module Breakdown & Network Stages
+---
+
+## 🧩 Module Breakdown & Network Stages
 
 The application's functionality is distributed across several Python modules:
 
-### 1. `p2p_core.py` - Base P2P Networking
+### 1. `p2p_core.py` - 🌐 Base P2P Networking
 - **Functionality**: Handles basic TCP/IPv6 networking, STUN for NAT traversal, and message framing (prefixing messages with their length).
 - **Security Feature**: Provides the foundational socket communication over which secure channels are built. Does not implement encryption itself but is essential for transport.
 - **Network Stage**: Connection discovery and raw data transport.
 
-### 2. `platform_hsm_interface.py` - Hardware Security
-- **Functionality**: Unified hardware security interface
-- **Security Feature**: TPM 2.0 integration on Windows, PKCS#11 on Linux/macOS
-- **Key Capabilities**: Hardware-backed key generation, storage, and operations
+### 2. `platform_hsm_interface.py` - 🛡️ Hardware Security Abstraction
+- **Functionality**: Unified hardware security interface.
+- **Security Feature**: TPM 2.0 integration on Windows, PKCS#11 on Linux/macOS.
+- **Key Capabilities**: Hardware-backed key generation, storage, and operations.
 
-### 3. `secure_key_manager.py` - Key Management
-- **Functionality**: Cross-platform secure key storage
-- **Security Feature**: OS-specific secure storage with multiple backends
-- **Key Features**: Process isolation, strict permissions, in-memory mode
+### 3. `secure_key_manager.py` - 🔑 Key Management
+- **Functionality**: Cross-platform secure key storage.
+- **Security Feature**: OS-specific secure storage with multiple backends.
+- **Key Features**: Process isolation, strict permissions, in-memory mode.
 
-### 4. `ca_services.py` - Certificate Management
-- **Functionality**: Certificate generation, exchange, and verification
-- **Security Feature**: ChaCha20-Poly1305 encrypted certificate exchange
-- **Key Features**: Strong certificate parameters, mutual authentication
+### 4. `ca_services.py` - 📜 Certificate Management
+- **Functionality**: Certificate generation, exchange, and verification.
+- **Security Feature**: ChaCha20-Poly1305 encrypted certificate exchange.
+- **Key Features**: Strong certificate parameters, mutual authentication.
 
-### 5. `hybrid_kex.py` - Hybrid Key Exchange
-- **Functionality**: X3DH with post-quantum enhancements
-- **Security Feature**: ML-KEM-1024 integration for quantum resistance
-- **Key Components**: Static, signed, and ephemeral keys with PQ protection
+### 5. `hybrid_kex.py` - 🗝️ Hybrid Key Exchange
+- **Functionality**: X3DH with post-quantum enhancements.
+- **Security Feature**: ML-KEM-1024 integration for quantum resistance.
+- **Key Components**: Static, signed, and ephemeral keys with PQ protection.
 
-### 6. `tls_channel_manager.py` - TLS Management
-- **Functionality**: TLS 1.3 connection establishment and management
-- **Security Feature**: Post-quantum cipher preference and enhanced verification
-- **Key Features**: Certificate pinning, strong cipher enforcement
+### 6. `tls_channel_manager.py` - 🔒 TLS Management
+- **Functionality**: TLS 1.3 connection establishment and management.
+- **Security Feature**: Post-quantum cipher preference and enhanced verification.
+- **Key Features**: Certificate pinning, strong cipher enforcement.
 
-### 7. `double_ratchet.py` - Message Encryption
-- **Functionality**: Advanced Double Ratchet implementation
-- **Security Feature**: Forward secrecy, break-in recovery, message length obfuscation
-- **Key Features**: PQ-enhanced ratchet steps, FALCON signatures
+### 7. `double_ratchet.py` - 📨 Message Encryption
+- **Functionality**: Advanced Double Ratchet implementation.
+- **Security Feature**: Forward secrecy, break-in recovery, message length obfuscation.
+- **Key Features**: PQ-enhanced ratchet steps, FALCON signatures.
 
-### 8. `secure_p2p.py` - Main Application
-- **Functionality**: Security orchestration and user interface
-- **Security Feature**: Defense-in-depth coordination
-- **Key Responsibility**: Proper sequencing and verification of security processes
+### 8. `secure_p2p.py` - 🤖 Main Application & Orchestrator
+- **Functionality**: Security orchestration and user interface.
+- **Security Feature**: Defense-in-depth coordination.
+- **Key Responsibility**: Proper sequencing and verification of security processes.
 
-## Security Flow Summary
+---
+
+## 📈 Security Flow Summary
 
 1. **STUN Discovery & Connection Establishment**
    - Peers discover public endpoints using STUN
@@ -360,7 +376,9 @@ The application's functionality is distributed across several Python modules:
    - Encrypted messages sent through TLS channel
    - Regular key rotation and ratchet steps maintain security
 
-## Setup and Running
+---
+
+## ⚙️ Setup and Running
 
 ### Prerequisites
 
@@ -411,7 +429,9 @@ The application will guide you through:
 3. Establishing a multi-layered secure connection
 4. Exchanging messages with complete security and privacy
 
-## Under The Hood
+---
+
+## 🔬 Under The Hood
 
 ### Quantum Resistance
 
@@ -439,7 +459,9 @@ The hardware security integration leverages:
 - **Protected Operations**: Key generation and signing in secure hardware
 - **Memory Protection**: Defense against cold boot and memory dumping attacks
 
-## Dependencies
+---
+
+## 🔗 Dependencies
 
 This project relies on several external Python libraries and core internal modules:
 
@@ -462,7 +484,9 @@ These modules are part of the project's codebase:
 - **`platform_hsm_interface.py`** (often imported as `cphs`): This is the core internal module that provides the cross-platform hardware security abstraction layer. It interfaces with Windows CNG/TPM and PKCS#11 for HSMs on Linux/macOS.
 - Other Python files like `secure_p2p.py`, `hybrid_kex.py`, `double_ratchet.py`, etc., constitute the main application logic and security protocols.
 
-## Potential Use Cases
+---
+
+## 🎯 Potential Use Cases
 
 - **Government & Military**: Secure communications with quantum resistance
 - **Financial Institutions**: Protected discussion of sensitive financial matters
@@ -471,35 +495,53 @@ These modules are part of the project's codebase:
 - **Healthcare**: HIPAA-compliant patient information exchange
 - **Legal Sector**: Privileged attorney-client communications
 
+---
 
-## Contributing
+## 🗺️ Roadmap
+
+> - [ ] **GUI Enhancements**: Develop a more user-friendly graphical interface.
+> - [ ] **Mobile Support**: Extend compatibility to Android and iOS platforms.
+> - [ ] **Group Chat**: Implement secure multi-party communication.
+> - [ ] **File Transfer**: Add secure end-to-end encrypted file sharing.
+> - [ ] **Anonymous Credentials**: Explore Zero-Knowledge Proofs for authentication.
+> - [ ] **Formal Security Audit**: Engage professionals for a comprehensive review.
+
+---
+
+## 🤝 Contributing
 
 Contributions welcome! Please:
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to your branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+1. Fork the repository.
+2. Create a feature branch (`git checkout -b feature/YourAmazingFeature`).
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`).
+4. Push to your branch (`git push origin feature/YourAmazingFeature`).
+5. Open a Pull Request.
 
-## Security Considerations
+---
 
-Important notes:
+## ⚠️ Security Considerations
 
-- **Research Project**: This is primarily an educational/research implementation
-- **Ongoing Development**: Some features may be conceptual or partially implemented
-- **No Formal Audit**: The code has not undergone professional security auditing
-- **Post-Quantum Evolution**: PQ algorithms continue to evolve with NIST standardization
+> **Important Notes**:
+>
+> - **Research Project**: This is primarily an educational and research implementation.
+> - **Ongoing Development**: Some features may be conceptual or partially implemented.
+> - **No Formal Audit**: The code has not undergone professional security auditing. We welcome community review and feedback.
+> - **Post-Quantum Evolution**: PQ algorithms continue to evolve with NIST standardization. The choices made reflect current best practices but may require updates as the landscape changes.
 
-## License
+---
 
-This project is available under the MIT License. See the LICENSE file for details.
+## 📄 License
 
-## Acknowledgments
+This project is available under the MIT License. See the `LICENSE` file for details.
 
-- Signal Protocol for the Double Ratchet algorithm concept
-- NIST Post-Quantum Cryptography standardization efforts
-- The open-source cryptography community
-- All contributors to this project
+---
+
+## 🙏 Acknowledgments
+
+- The Signal Protocol for the foundational Double Ratchet algorithm concept.
+- NIST for their ongoing Post-Quantum Cryptography standardization efforts.
+- The vibrant open-source cryptography community for their tools and insights.
+- All contributors who help improve and secure this project.
 
 
