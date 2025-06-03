@@ -551,18 +551,6 @@ We welcome contributions in all areas, from cryptographic research and protocol 
 
 ---
 
-## ⚠️ Security Considerations & Disclaimers
-
-> **Critical Security Advisories & Project Status**:
->
-> - **Research & Development Focus**: This platform is an advanced research and development project. It is intended to demonstrate and explore cutting-edge security concepts and should be treated as experimental.
-> - **Ongoing Evolution**: The cryptographic landscape, particularly PQC, is dynamic. Algorithms and protocols within this project may be subject to change based on new research, NIST updates, or identified vulnerabilities.
-> - **Absence of Formal Audit**: While designed with security best practices, this codebase has **not yet undergone a comprehensive, independent security audit by certified professionals.** We strongly encourage community review and responsible disclosure of any potential findings.
-> - **Use With Discretion**: Deployment in production environments requiring guaranteed security for highly sensitive data should be approached with extreme caution and ideally after an independent audit. The developers assume no liability for misuse or security breaches.
-> - **Post-Quantum Transition**: The specific post-quantum algorithms (ML-KEM, FALCON) are current NIST selections, but the PQC field is still maturing. Future updates to the PQC standards may necessitate adjustments to the cryptographic core.
-
----
-
 ## 📄 License
 
 This project is architected and shared under the **MIT License**. Consult the `LICENSE` file for comprehensive details.
