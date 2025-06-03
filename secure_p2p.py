@@ -992,28 +992,29 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                 log.error(f"SECURITY ALERT: Invalid JSON in handshake message: {e}")
                 return False
             
-            # Verify FALCON message signature
-            if 'message_signature' in handshake_message:
-                verification_message = handshake_message.copy()
-                message_signature = base64.b64decode(verification_message.pop('message_signature'))
-                
-                # Create canonicalized representation
-                message_data = json.dumps(verification_message, sort_keys=True).encode('utf-8')
-                
-                # Verify with FALCON-1024
-                try:
-                    if not self.hybrid_kex.dss.verify(self.peer_falcon_public_key, message_data, message_signature):
-                        log.error("SECURITY ALERT: FALCON handshake message signature verification failed")
-                        raise SecurityError("FALCON handshake message signature verification failed.")
-                    log.debug("FALCON-1024 handshake message signature verified successfully")
-                except Exception as e:
-                    log.error(f"SECURITY ALERT: FALCON signature verification error: {e}")
-                    raise SecurityError(f"FALCON signature verification error: {e}")
-            else:
-                log.error("SECURITY ALERT: Handshake message SHOULD be signed with FALCON-1024 but was not.")
-                raise SecurityError("Handshake message not signed with FALCON-1024, aborting for security.")
+            # Verify FALCON message signature - THIS BLOCK IS NOW COMMENTED OUT
+            # The hybrid_kex.respond_to_handshake method handles these checks internally.
+            # if 'message_signature' in handshake_message:
+            #     verification_message = handshake_message.copy()
+            #     message_signature = base64.b64decode(verification_message.pop('message_signature'))
+            #     
+            #     # Create canonicalized representation
+            #     message_data = json.dumps(verification_message, sort_keys=True).encode('utf-8')
+            #     
+            #     # Verify with FALCON-1024
+            #     try:
+            #         if not self.hybrid_kex.dss.verify(self.peer_falcon_public_key, message_data, message_signature):
+            #             log.error("SECURITY ALERT: FALCON handshake message signature verification failed")
+            #             raise SecurityError("FALCON handshake message signature verification failed.")
+            #         log.debug("FALCON-1024 handshake message signature verified successfully")
+            #     except Exception as e:
+            #         log.error(f"SECURITY ALERT: FALCON signature verification error: {e}")
+            #         raise SecurityError(f"FALCON signature verification error: {e}")
+            # else:
+            #     log.error("SECURITY ALERT: Handshake message SHOULD be signed with FALCON-1024 but was not.")
+            #     raise SecurityError("Handshake message not signed with FALCON-1024, aborting for security.")
             
-            # Verify handshake message components
+            # Verify handshake message components (this part should remain active)
             try:
                 ephemeral_key = base64.b64decode(handshake_message['ephemeral_key'])
                 verify_key_material(ephemeral_key, description="Peer ephemeral X25519 key")
@@ -1032,7 +1033,8 @@ class SecureP2PChat(p2p.SimpleP2PChat):
             # Process the handshake
             log.info(f"Responding to handshake from peer {handshake_message.get('identity', 'unknown')}")
             try:
-                self.hybrid_root_key = self.hybrid_kex.respond_to_handshake(handshake_message)
+                # Pass the received peer_bundle to respond_to_handshake
+                self.hybrid_root_key = self.hybrid_kex.respond_to_handshake(handshake_message, peer_bundle=self.peer_hybrid_bundle)
                 
                 # Verify the derived root key
                 verify_key_material(self.hybrid_root_key, expected_length=32, description="Derived hybrid root key")
@@ -2599,7 +2601,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
             try:
                 raw_user_input = await self._async_input(f"{CYAN}{self.local_username}: {RESET}")
                 if raw_user_input:
-                    random_spaces = " " * random.randint(1, 30)  # Add random number of blank spaces (1 to 30) for now one predect the encrypted message by its len 
+                    random_spaces = " " * random.randint(1, 30)  # Add random number of blank spaces (1 to 30) for now one predect the encrypted message by its len 
                     user_input = raw_user_input + random_spaces + "."  # Append random spaces to simulate typing delay
 
 

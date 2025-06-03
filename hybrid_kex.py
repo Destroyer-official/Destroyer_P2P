@@ -52,6 +52,8 @@ MIN_KEY_LIFETIME = 300       # 5 minutes minimum lifetime
 EPHEMERAL_ID_PREFIX = "eph"   # Prefix for ephemeral identities
 MAX_KEY_LIFETIME = 86400    # 24 hours in seconds maximum lifetime
 
+MLKEM1024_CIPHERTEXT_SIZE = 1568  # Expected ciphertext size for ML-KEM-1024
+
 def verify_key_material(key_material, expected_length=None, description="key material"):
     """
     Verify that cryptographic key material meets security requirements.
@@ -595,6 +597,31 @@ class HybridKeyExchange:
         verify_key_material(kem_shared_secret, description="ML-KEM shared secret")
         log.debug(f"KEM encapsulation successful: ciphertext ({len(kem_ciphertext)} bytes), shared secret ({len(kem_shared_secret)} bytes)")
         
+        # Generate ephemeral FALCON key for this handshake
+        eph_falcon_public_key, eph_falcon_private_key = self.dss.keygen()
+        verify_key_material(eph_falcon_public_key, description="Ephemeral FALCON public key")
+        verify_key_material(eph_falcon_private_key, description="Ephemeral FALCON private key")
+        log.debug(f"Generated ephemeral FALCON key for handshake: {_format_binary(eph_falcon_public_key)}")
+
+        # Sign the ephemeral FALCON public key with the main FALCON identity key
+        try:
+            eph_falcon_key_signature = self.dss.sign(self.falcon_private_key, eph_falcon_public_key)
+            verify_key_material(eph_falcon_key_signature, description="Ephemeral FALCON key signature")
+            log.debug(f"Signed ephemeral FALCON public key: {_format_binary(eph_falcon_key_signature)}")
+        except Exception as e:
+            log.error(f"SECURITY CRITICAL: Failed to sign ephemeral FALCON public key: {e}", exc_info=True)
+            raise ValueError("Failed to sign ephemeral FALCON public key")
+
+        # Create specific binding for ephemeral EC key and KEM ciphertext, signed by ephemeral FALCON key
+        binding_data = ephemeral_public + kem_ciphertext  # Concatenate raw bytes
+        try:
+            ec_pq_binding_signature = self.dss.sign(eph_falcon_private_key, binding_data)
+            verify_key_material(ec_pq_binding_signature, description="EC-PQ binding signature")
+            log.debug(f"Generated EC-PQ binding signature (with ephemeral FALCON): {_format_binary(ec_pq_binding_signature)}")
+        except Exception as e:
+            log.error(f"SECURITY CRITICAL: Failed to generate EC-PQ binding signature with ephemeral key: {e}", exc_info=True)
+            raise ValueError("Failed to generate critical EC-PQ binding signature with ephemeral key")
+
         # Combine all shared secrets with HKDF
         log.debug("Combining all shared secrets with HKDF")
         ikm = dh1 + dh2 + dh3 + dh4 + kem_shared_secret
@@ -619,25 +646,34 @@ class HybridKeyExchange:
                 encoding=serialization.Encoding.Raw,
                 format=serialization.PublicFormat.Raw
             )).decode('utf-8'),
-            'kem_ciphertext': base64.b64encode(kem_ciphertext).decode('utf-8')
+            'kem_ciphertext': base64.b64encode(kem_ciphertext).decode('utf-8'),
+            'eph_falcon_public_key': base64.b64encode(eph_falcon_public_key).decode('utf-8'),
+            'eph_falcon_key_signature': base64.b64encode(eph_falcon_key_signature).decode('utf-8'),
+            'ec_pq_binding_sig': base64.b64encode(ec_pq_binding_signature).decode('utf-8')
         }
         
         # Create a canonicalized representation for signing
         message_data = json.dumps(handshake_message, sort_keys=True).encode('utf-8')
         
-        # Sign the message with FALCON-1024
-        message_signature = self.dss.sign(self.falcon_private_key, message_data)
+        # Sign the message with the ephemeral FALCON-1024 key
+        message_signature = self.dss.sign(eph_falcon_private_key, message_data)
         handshake_message['message_signature'] = base64.b64encode(message_signature).decode('utf-8')
         
+        # Securely erase the ephemeral FALCON private key as it's no longer needed by the initiator
+        secure_erase(eph_falcon_private_key)
+
         log.info(f"Hybrid X3DH+PQ handshake initiated successfully with {peer_bundle.get('identity', 'unknown')}")
         return handshake_message, root_key
     
-    def respond_to_handshake(self, handshake_message: Dict[str, str]) -> bytes:
+    def respond_to_handshake(self, handshake_message: Dict[str, str], peer_bundle: Optional[Dict[str, str]] = None) -> bytes:
         """
         Respond to the X3DH+PQ handshake (Bob's side).
         
         Args:
             handshake_message: The handshake message from the peer (Alice)
+            peer_bundle: Optional. The public key bundle from the peer (Alice).
+                         If provided, it will be used for signature verifications.
+                         If None, self.peer_hybrid_bundle will be used.
             
         Returns:
             The derived shared secret
@@ -645,40 +681,118 @@ class HybridKeyExchange:
         try:
             log.info(f"Processing incoming handshake from: {handshake_message.get('identity', 'unknown')}")
             
-            # Verify FALCON message signature if present
+            # Use provided peer_bundle if available, otherwise fallback to instance's stored bundle
+            current_peer_bundle = peer_bundle if peer_bundle else self.peer_hybrid_bundle
+            if not current_peer_bundle:
+                log.error("SECURITY ALERT: Peer bundle not available for respond_to_handshake. Cannot verify signatures.")
+                raise ValueError("Peer bundle unavailable for signature verification")
+
+            # Extract and verify the ephemeral FALCON key first
+            if 'eph_falcon_public_key' not in handshake_message or \
+               'eph_falcon_key_signature' not in handshake_message:
+                log.error("SECURITY ALERT: Handshake message missing ephemeral FALCON key components.")
+                raise ValueError("Handshake message missing ephemeral FALCON key or its signature.")
+
+            eph_falcon_public_key_b64 = handshake_message['eph_falcon_public_key']
+            eph_falcon_public_key_bytes = base64.b64decode(eph_falcon_public_key_b64)
+            verify_key_material(eph_falcon_public_key_bytes, description="Received ephemeral FALCON public key")
+            
+            eph_falcon_key_signature_b64 = handshake_message['eph_falcon_key_signature']
+            eph_falcon_key_signature_bytes = base64.b64decode(eph_falcon_key_signature_b64)
+            verify_key_material(eph_falcon_key_signature_bytes, description="Received ephemeral FALCON key signature")
+
+            # Get the main FALCON public key from the peer's bundle to verify the ephemeral FALCON key
+            if 'falcon_public_key' not in current_peer_bundle:
+                log.error("SECURITY ALERT: Peer's main FALCON public key not found in their bundle.")
+                raise ValueError("Peer's main FALCON public key missing from bundle.")
+            
+            peer_main_falcon_public_key_b64 = current_peer_bundle['falcon_public_key']
+            peer_main_falcon_public_key = base64.b64decode(peer_main_falcon_public_key_b64)
+            verify_key_material(peer_main_falcon_public_key, description="Peer's main FALCON public key from bundle")
+
+            try:
+                if not self.dss.verify(peer_main_falcon_public_key, eph_falcon_public_key_bytes, eph_falcon_key_signature_bytes):
+                    log.error("SECURITY ALERT: Ephemeral FALCON public key signature verification failed.")
+                    raise ValueError("Invalid ephemeral FALCON public key signature.")
+                log.debug("Ephemeral FALCON public key successfully verified against main FALCON key.")
+            except Exception as e:
+                log.error(f"SECURITY ALERT: Error verifying ephemeral FALCON key signature: {e}", exc_info=True)
+                raise ValueError(f"Ephemeral FALCON key signature verification failed: {e}")
+
+            # Now, the eph_falcon_public_key_bytes can be trusted to verify other signatures in the message.
+            # Keep it as peer_verified_eph_falcon_pk for clarity
+            peer_verified_eph_falcon_pk = eph_falcon_public_key_bytes
+
+
+            # Initialize peer_falcon_public_key to None
+            peer_falcon_public_key = None
+
+            # Verify FALCON message signature if present (now using the verified ephemeral FALCON PK)
             if 'message_signature' in handshake_message:
                 verification_message = handshake_message.copy()
-                message_signature = base64.b64decode(verification_message.pop('message_signature'))
+                message_signature_b64 = verification_message.pop('message_signature')
+
+                message_signature = base64.b64decode(message_signature_b64)
                 
-                # Get public key - check if we have peer_hybrid_bundle
-                if hasattr(self, 'peer_hybrid_bundle') and self.peer_hybrid_bundle and 'falcon_public_key' in self.peer_hybrid_bundle:
-                    peer_falcon_public_key = base64.b64decode(self.peer_hybrid_bundle['falcon_public_key'])
-                    
-                    # Create canonicalized representation
-                    message_data = json.dumps(verification_message, sort_keys=True).encode('utf-8')
-                    
-                    # Verify with FALCON-1024
-                    try:
-                        if not self.dss.verify(peer_falcon_public_key, message_data, message_signature):
-                            log.error("SECURITY ALERT: FALCON message signature verification failed")
-                            raise ValueError("Invalid handshake message signature")
-                        log.debug("FALCON-1024 handshake message signature verified successfully")
-                    except Exception as e:
-                        log.error(f"SECURITY ALERT: FALCON signature verification error: {e}")
-                        raise ValueError(f"FALCON signature verification failed: {e}")
-                else:
-                    # Log as INFO because the bundle is expected later
-                    log.info("Cannot verify FALCON signature yet: peer bundle not available")
+                # Create canonicalized representation
+                message_data = json.dumps(verification_message, sort_keys=True).encode('utf-8')
                 
-            # Extract peer's public keys
+                # Verify with the trusted ephemeral FALCON-1024 public key
+                try:
+                    if not self.dss.verify(peer_verified_eph_falcon_pk, message_data, message_signature):
+                        log.error("SECURITY ALERT: FALCON message signature verification failed (using ephemeral key).")
+                        raise ValueError("Invalid handshake message signature (ephemeral key verification).")
+                    log.debug("FALCON-1024 handshake message signature verified successfully (using ephemeral key).")
+                except Exception as e:
+                    log.error(f"SECURITY ALERT: FALCON signature (ephemeral key) verification error: {e}", exc_info=True)
+                    raise ValueError(f"FALCON signature (ephemeral key) verification failed: {e}")
+            else:
+                log.warning("SECURITY WARNING: No overall message_signature found in handshake message. This is unexpected with ephemeral key scheme.")
+                # Depending on policy, this might be a hard fail. For now, raising an error.
+                raise ValueError("Handshake message missing overall message_signature.")
+
+
+            # Extract peer's public keys (ephemeral and static)
             log.debug("Extracting peer public keys from handshake message")
-            peer_ephemeral_public = X25519PublicKey.from_public_bytes(
-                base64.b64decode(handshake_message['ephemeral_key'])
-            )
+            peer_ephemeral_public_b64 = handshake_message['ephemeral_key']
+            peer_ephemeral_public_bytes = base64.b64decode(peer_ephemeral_public_b64) # Renamed for clarity
+            verify_key_material(peer_ephemeral_public_bytes, expected_length=32, description="Peer ephemeral X25519 key from handshake")
+            # Convert to X25519PublicKey object
+            peer_ephemeral_public_key = X25519PublicKey.from_public_bytes(peer_ephemeral_public_bytes)
+
+            peer_static_public_b64 = handshake_message['static_key']
             peer_static_public = X25519PublicKey.from_public_bytes(
-                base64.b64decode(handshake_message['static_key'])
+                base64.b64decode(peer_static_public_b64)
             )
-            
+            # No verify_key_material for X25519PublicKey objects directly, but it was bytes before from_public_bytes
+
+            # KEM Ciphertext and EC-PQ Binding Signature Verification
+            kem_ciphertext_b64 = handshake_message['kem_ciphertext']
+            kem_ciphertext = base64.b64decode(kem_ciphertext_b64)
+            verify_key_material(kem_ciphertext, 
+                                expected_length=MLKEM1024_CIPHERTEXT_SIZE, 
+                                description="ML-KEM ciphertext from handshake (for binding check)")
+
+            if 'ec_pq_binding_sig' in handshake_message:
+                ec_pq_binding_sig_b64 = handshake_message['ec_pq_binding_sig']
+                ec_pq_binding_signature = base64.b64decode(ec_pq_binding_sig_b64)
+                verify_key_material(ec_pq_binding_signature, description="EC-PQ binding signature from handshake")
+
+                binding_data_to_verify = peer_ephemeral_public_bytes + kem_ciphertext # Concatenate raw bytes
+
+                # Verify with the trusted ephemeral FALCON key
+                try:
+                    if not self.dss.verify(peer_verified_eph_falcon_pk, binding_data_to_verify, ec_pq_binding_signature):
+                        log.error("SECURITY ALERT: Explicit EC-PQ binding signature verification failed (using ephemeral key).")
+                        raise ValueError("Invalid EC-PQ binding signature in handshake message (ephemeral key verification).")
+                    log.debug("Explicit EC-PQ binding signature verified successfully (using ephemeral key).")
+                except Exception as e:
+                    log.error(f"SECURITY ALERT: EC-PQ binding signature (ephemeral key) verification error: {e}", exc_info=True)
+                    raise ValueError(f"EC-PQ binding signature (ephemeral key) verification failed: {e}")
+            else:
+                log.error("SECURITY ALERT: Handshake message is missing 'ec_pq_binding_sig'. This is a required field.")
+                raise ValueError("Handshake message missing ec_pq_binding_sig")
+                
             # Perform DH exchanges
             log.debug("Performing multiple Diffie-Hellman exchanges")
             
@@ -688,7 +802,7 @@ class HybridKeyExchange:
             log.debug(f"DH1 (Static-Static): {_format_binary(dh1)}")
             
             # 2. Static-Ephemeral DH
-            dh2 = self.static_key.exchange(peer_ephemeral_public)
+            dh2 = self.static_key.exchange(peer_ephemeral_public_key) # Use the key object
             verify_key_material(dh2, description="DH2: Static-Ephemeral exchange")
             log.debug(f"DH2 (Static-Ephemeral): {_format_binary(dh2)}")
             
@@ -698,16 +812,27 @@ class HybridKeyExchange:
             log.debug(f"DH3 (SPK-Static): {_format_binary(dh3)}")
             
             # 4. SPK-Ephemeral DH
-            dh4 = self.signed_prekey.exchange(peer_ephemeral_public)
+            dh4 = self.signed_prekey.exchange(peer_ephemeral_public_key) # Use the key object
             verify_key_material(dh4, description="DH4: SPK-Ephemeral exchange")
             log.debug(f"DH4 (SPK-Ephemeral): {_format_binary(dh4)}")
             
             # Perform KEM decapsulation
             log.debug("Performing ML-KEM-1024 decapsulation")
-            kem_ciphertext = base64.b64decode(handshake_message['kem_ciphertext'])
-            verify_key_material(kem_ciphertext, description="ML-KEM ciphertext")
+            # kem_ciphertext is already defined and verified above (for binding check)
+            # Verify KEM ciphertext integrity again just before decapsulation, as a final check.
+            verify_key_material(kem_ciphertext, 
+                                expected_length=MLKEM1024_CIPHERTEXT_SIZE, 
+                                description="ML-KEM ciphertext (final check before decaps)")
             
-            kem_shared_secret = self.kem.decaps(self.kem_private_key, kem_ciphertext)
+            try:
+                kem_shared_secret = self.kem.decaps(self.kem_private_key, kem_ciphertext)
+            except quantcrypt.QuantCryptError as qce: # Catch specific quantcrypt errors
+                log.error(f"SECURITY ALERT: KEM decapsulation failed due to quantcrypt error: {qce}", exc_info=True)
+                raise ValueError(f"KEM decapsulation failed: {qce}")
+            except Exception as e: # Catch any other unexpected errors during decapsulation
+                log.error(f"SECURITY ALERT: KEM decapsulation failed unexpectedly: {e}", exc_info=True)
+                raise ValueError(f"KEM decapsulation failed with an unexpected error: {e}")
+
             verify_key_material(kem_shared_secret, description="ML-KEM shared secret")
             log.debug(f"KEM decapsulation successful: shared secret ({len(kem_shared_secret)} bytes)")
             

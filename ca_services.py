@@ -410,7 +410,7 @@ class CAExchange:
                 # but as a safeguard:
                 logger.error("Certificate exchange failed: data was not successfully decrypted but secure exchange was enabled.")
                 raise ConnectionAbortedError("Certificate exchange failed due to decryption issues.")
-
+                
             logger.info(f"Received peer certificate ({len(data)} bytes).")
             
             # Validate certificate format

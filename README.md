@@ -1,7 +1,3 @@
-I'll enhance the README with more detailed features and make it more engaging for GitHub:
-
-```markdown
-# Secure P2P Chat
 
 <div align="center">
   <img src="https://img.shields.io/badge/security-maximum-brightgreen" alt="Security: Maximum">
@@ -49,6 +45,11 @@ I'll enhance the README with more detailed features and make it more engaging fo
 - [Module Breakdown & Network Stages](#module-breakdown--network-stages)
 - [Security Flow Summary](#security-flow-summary)
 - [Advanced Protection Features](#advanced-protection-features)
+  - [Traffic Analysis Resistance](#traffic-analysis-resistance)
+  - [Double Ratchet Enhancement](#double-ratchet-enhancement)
+  - [Anti-Forensic Design](#anti-forensic-design)
+  - [Security Monitoring](#security-monitoring)
+  - [Ephemeral Identities](#ephemeral-identities)
 - [Setup and Running](#setup-and-running)
 - [Under The Hood](#under-the-hood)
 - [Dependencies](#dependencies)
@@ -144,18 +145,23 @@ flowchart TB
 
 Combines traditional and post-quantum algorithms to ensure security against both classical and quantum attacks:
 
-- **Key Exchange**: X3DH (Extended Triple Diffie-Hellman) with X25519 + ML-KEM-1024
-- **Signatures**: FALCON-1024 for quantum-resistant digital signatures
-- **Benefits**: Maintains security even if either classical or quantum algorithm is compromised
+- **Key Exchange**: X3DH (Extended Triple Diffie-Hellman) with X25519 + ML-KEM-1024.
+  - **HKDF Root Key Derivation**: The initial shared secret from X3DH+PQ is processed with HKDF using a specific `info` string (`b'Hybrid X3DH+PQ Root Key'`) to produce the master root key for the session.
+  - **Post-Quantum Ciphertext Validation**: Received ML-KEM-1024 ciphertexts are validated for correct length (`MLKEM1024_CIPHERTEXT_SIZE`). The underlying `quantcrypt` library's decapsulation process further validates ciphertext integrity, with errors robustly handled.
+  - **Binding of EC & PQ Shares**: Ephemeral Elliptic Curve (EC) shares and Post-Quantum (PQ) KEM ciphertexts are cryptographically bound using an ephemeral FALCON-1024 signature (`ec_pq_binding_sig`). This signature covers the concatenation of the ephemeral EC public key and the KEM ciphertext, preventing mix-and-match attacks.
+  - **Signature Key Reuse Prevention**: Each handshake utilizes a freshly generated ephemeral FALCON-1024 key pair for signing handshake components (like the EC-PQ binding). The longer-term identity FALCON key is only used to sign these ephemeral FALCON public keys. In the default ephemeral mode, main identity keys (including the main FALCON key) are also periodically rotated.
+- **Signatures**: FALCON-1024 for quantum-resistant digital signatures.
+- **Benefits**: Maintains security even if either classical or quantum algorithm is compromised.
 
 ### 🔄 Multi-Layered Encryption
 
 Four independent encryption layers with different security properties:
 
-1. **TLS 1.3**: Transport security with PQ-enhanced cipher suites
-2. **Double Ratchet**: End-to-end encryption with forward secrecy and break-in recovery
-3. **Application-Layer Encryption**: Multiple ciphers (XChaCha20-Poly1305, AES-256-GCM)
-4. **Certificate Exchange**: Additional ChaCha20-Poly1305 encryption for certificate exchange
+1. **TLS 1.3**: Transport security with PQ-enhanced cipher suites.
+2. **Double Ratchet**: End-to-end encryption with forward secrecy and break-in recovery. (See "Double Ratchet Enhancement" for more details).
+3. **Application-Layer Encryption**: Multiple ciphers (XChaCha20-Poly1305, AES-256-GCM).
+4. **Certificate Exchange**: Additional ChaCha20-Poly1305 encryption for certificate data during exchange.
+   - **Secure Key Derivation**: The ChaCha20Poly1305 key for certificate exchange is derived using HKDF-SHA256 to ensure the correct 32-byte key length, preventing vulnerabilities from incorrect key sizes. Errors during certificate encryption/decryption are handled to abort the exchange if security cannot be guaranteed.
 
 ### 🖥️ Hardware Security Integration
 
@@ -194,10 +200,13 @@ Sophisticated techniques to prevent message length analysis:
 
 Advanced improvements to the Signal Protocol's Double Ratchet:
 
-- **Post-Quantum Integration**: ML-KEM for additional ratchet steps
-- **Quantum-Resistant Authentication**: FALCON-1024 signatures for message authentication
-- **Multiple Chain Keys**: Enhanced key derivation with additional entropy sources
-- **Memory-Hardened Storage**: Protected memory for sensitive ratchet state
+- **Post-Quantum Integration**: ML-KEM for additional ratchet steps, deriving fresh entropy.
+- **Quantum-Resistant Authentication**: FALCON-1024 signatures for authenticating messages within the Double Ratchet encrypted channel.
+- **Multiple Chain Keys & Robust Key Derivation**:
+  - **Comprehensive Domain Separation**: While the initial root key comes from the hybrid KEX, all subsequent key derivations within the Double Ratchet (for root key updates, sending/receiving chain keys, and message keys) use HKDF-SHA512 with a comprehensive set of unique, purpose-specific `info` strings. This rigorously separates cryptographic contexts (e.g., `DR_ROOT_UPDATE_HYBRID_MLKEM1024_DH_v2`, `DR_CHAIN_INIT_SEND_X25519_v2`, etc.).
+  - **Message Key Derivation**: Message keys are derived from chain keys using HMAC-SHA256 (e.g., `HMAC(chain_key, KDF_INFO_MSG, ...)`), with distinct HMAC keys (`KDF_INFO_MSG` vs. `KDF_INFO_CHAIN`) for message keys and next chain keys, ensuring their cryptographic independence without relying on simple counter concatenation for this step.
+  - **Resilience to Input Variations**: The primary KDF (`_kdf` method) uses HKDF-SHA512. It generates a salt from its `key_material` input (typically a root key) and takes its main Input Keying Material (IKM) from the outputs of DH exchanges and KEM decapsulations. This standard extract-then-expand construction of HKDF provides strong resilience against variations or potential "unusual alignments" in IKM, assuming the underlying cryptographic primitives (X25519, ML-KEM, SHA-512) are secure.
+- **Memory-Hardened Storage**: Protected memory for sensitive ratchet state.
 
 ### 🧩 Anti-Forensic Design
 
@@ -216,6 +225,15 @@ Built-in security monitoring capabilities:
 - **Canary Values**: Memory integrity checks to detect tampering
 - **Heartbeat Encryption**: Encrypted keepalive messages to maintain connection security
 - **Anomaly Detection**: Identifies potential security issues during operation
+
+### 🆔 Ephemeral Identities
+
+Enhances privacy and thwarts long-term tracking:
+
+- **Automatic Identity Rotation**: All cryptographic identifiers (keys, certificates) are automatically rotated at configurable intervals (e.g., every hour or day).
+- **No Persistent Identifiers**: The system avoids long-term static identifiers that could be used to track users over time.
+- **Untraceable Sessions**: Each communication session can appear to originate from a new, unrelated identity, making it difficult to link sessions or build a profile of a user.
+- **Increased Anonymity**: Complements other security layers by making it harder to attribute communication to specific individuals over extended periods.
 
 ## Module Breakdown & Network Stages
 
@@ -371,17 +389,26 @@ The hardware security integration leverages:
 
 ## Dependencies
 
-Core dependencies:
+This project relies on several external Python libraries and core internal modules:
+
+### External Libraries (from PyPI)
+
+These should be installed via `pip install -r requirements.txt`:
 
 ```
-cryptography>=3.4.0      # Core cryptographic operations
-keyring>=23.0.0          # OS keyring integration
-pyzmq>=22.0.0            # Process isolation for key management
+cryptography>=3.4.0      # Core cryptographic operations (AES, ChaCha20, RSA, ECC)
+keyring>=23.0.0          # Secure OS-specific credential storage (keychain, credential manager)
+pyzmq>=22.0.0            # Inter-process communication for key management isolation (POSIX)
+python-pkcs11            # PKCS#11 interface for HSMs (Linux/macOS only)
 ```
 
-Custom modules:
-- `quantcrypt` - ML-KEM and FALCON implementations
-- `cphs` - Hardware security abstraction layer
+### Core Internal Modules & Custom Libraries
+
+These modules are part of the project's codebase:
+
+- **`quantcrypt`**: A custom local library providing implementations for the post-quantum algorithms ML-KEM (for Key Encapsulation) and FALCON (for digital signatures). This module is essential for the hybrid post-quantum security features.
+- **`platform_hsm_interface.py`** (often imported as `cphs`): This is the core internal module that provides the cross-platform hardware security abstraction layer. It interfaces with Windows CNG/TPM and PKCS#11 for HSMs on Linux/macOS.
+- Other Python files like `secure_p2p.py`, `hybrid_kex.py`, `double_ratchet.py`, etc., constitute the main application logic and security protocols.
 
 ## Potential Use Cases
 
@@ -391,7 +418,6 @@ Custom modules:
 - **Corporate Security**: Protection of intellectual property discussions
 - **Healthcare**: HIPAA-compliant patient information exchange
 - **Legal Sector**: Privileged attorney-client communications
-
 
 
 ## Contributing
@@ -423,5 +449,5 @@ This project is available under the MIT License. See the LICENSE file for detail
 - NIST Post-Quantum Cryptography standardization efforts
 - The open-source cryptography community
 - All contributors to this project
-```
+
 

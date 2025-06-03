@@ -1111,11 +1111,32 @@ class DoubleRatchet:
     KEY_ROTATION_MESSAGES = 30     # Rotate keys after this many messages
     KEY_ROTATION_TIME = 3600       # Rotate keys after this many seconds (1 hour)
     
+    MLKEM1024_CIPHERTEXT_SIZE = 1568 # Expected ciphertext size for ML-KEM-1024
+
     # Domain separation strings for KDF - Enhanced with version and algorithm info
     KDF_INFO_DH = b"DR_DH_RATCHET_X25519_v2"
     KDF_INFO_CHAIN = b"DR_CHAIN_KEY_ChaCha20_v2"
     KDF_INFO_MSG = b"DR_MSG_KEY_ChaCha20Poly1305_v2"
     KDF_INFO_HYBRID = b"DR_HYBRID_MLKEM1024_DH_v2"
+    
+    # New constants for improved domain separation during DH ratchet steps
+    KDF_INFO_ROOT_UPDATE_DH = b"DR_ROOT_UPDATE_X25519_v2"
+    KDF_INFO_ROOT_UPDATE_HYBRID = b"DR_ROOT_UPDATE_HYBRID_MLKEM1024_DH_v2"
+    KDF_INFO_CHAIN_INIT_SEND_DH = b"DR_CHAIN_INIT_SEND_X25519_v2"
+    KDF_INFO_CHAIN_INIT_SEND_HYBRID = b"DR_CHAIN_INIT_SEND_HYBRID_MLKEM1024_DH_v2"
+    KDF_INFO_CHAIN_INIT_RECV_DH = b"DR_CHAIN_INIT_RECV_X25519_v2"
+    KDF_INFO_CHAIN_INIT_RECV_HYBRID = b"DR_CHAIN_INIT_RECV_HYBRID_MLKEM1024_DH_v2"
+    
+    # New constants for improved domain separation in _initialize_chain_keys
+    KDF_INFO_INIT_ROOT_STEP1_DH = b"DR_INIT_ROOT_S1_X25519_v2"
+    KDF_INFO_INIT_ROOT_STEP1_HYBRID = b"DR_INIT_ROOT_S1_HYBRID_MLKEM1024_DH_v2"
+    KDF_INFO_INIT_CHAIN_STEP1_DH = b"DR_INIT_CHAIN_S1_X25519_v2"
+    KDF_INFO_INIT_CHAIN_STEP1_HYBRID = b"DR_INIT_CHAIN_S1_HYBRID_MLKEM1024_DH_v2"
+
+    KDF_INFO_INIT_ROOT_STEP2_DH = b"DR_INIT_ROOT_S2_X25519_v2"
+    KDF_INFO_INIT_ROOT_STEP2_HYBRID = b"DR_INIT_ROOT_S2_HYBRID_MLKEM1024_DH_v2"
+    KDF_INFO_INIT_CHAIN_STEP2_DH = b"DR_INIT_CHAIN_S2_X25519_v2"
+    KDF_INFO_INIT_CHAIN_STEP2_HYBRID = b"DR_INIT_CHAIN_S2_HYBRID_MLKEM1024_DH_v2"
     
     def __init__(
         self, 
@@ -1439,23 +1460,29 @@ class DoubleRatchet:
     def _update_sending_chain(self, dh_output: bytes, 
                             kem_shared_secret: Optional[bytes] = None) -> None:
         """Update the sending chain with new key material."""
-        # Use different info string to ensure domain separation
-        info = self.KDF_INFO_HYBRID + b"_SEND" if self.enable_pq and kem_shared_secret else self.KDF_INFO_DH + b"_SEND"
         
-        # Combine DH and KEM secrets in hybrid mode
+        # Determine appropriate info strings based on PQ mode
         if self.enable_pq and kem_shared_secret:
-            # Create combined secret with domain separation
+            info_root = self.KDF_INFO_ROOT_UPDATE_HYBRID # Using same root update info, contextually it's before send/recv split
+            info_chain_seed = self.KDF_INFO_CHAIN_INIT_SEND_HYBRID
             combined_secret = hashlib.sha512(dh_output + b"||" + kem_shared_secret).digest()
         else:
+            info_root = self.KDF_INFO_ROOT_UPDATE_DH
+            info_chain_seed = self.KDF_INFO_CHAIN_INIT_SEND_DH
             combined_secret = dh_output
         
-        # Derive new root key and sending chain key
-        logger.debug(f"Updating sending chain ({len(combined_secret)} bytes)")
-        kdf_output = self._kdf(self.root_key, combined_secret, info=info)
-        self.root_key, sending_chain_seed = kdf_output[:32], kdf_output[32:]
+        # Derive new root key
+        logger.debug(f"Updating root key for sending chain ({len(combined_secret)} bytes input)")
+        new_root_key = self._kdf(self.root_key, combined_secret, info=info_root, length=self.ROOT_KEY_SIZE)
+        
+        # Derive new sending chain seed using the new root key as KDF key material
+        logger.debug(f"Deriving new sending chain seed")
+        sending_chain_seed = self._kdf(new_root_key, combined_secret, info=info_chain_seed, length=self.CHAIN_KEY_SIZE)
+
+        self.root_key = new_root_key
+        self.sending_chain_key = sending_chain_seed
         
         # Initialize sending chain with the new seed
-        self.sending_chain_key = sending_chain_seed
         self.sending_message_number = 0
         
         # Update hardware key if applicable
@@ -1511,12 +1538,18 @@ class DoubleRatchet:
             
         return next_chain_key, message_key
     
-    def _kdf(self, key_material: bytes, input_key_material: bytes, info: bytes) -> bytes:
+    def _kdf(self, key_material: bytes, input_key_material: bytes, info: bytes, length: int = 64) -> bytes:
         """
         Key derivation function based on HKDF-SHA512.
         
+        Args:
+            key_material: Key material for HKDF salt derivation.
+            input_key_material: Main input keying material for HKDF.
+            info: Context/application-specific information string.
+            length: Desired output length in bytes.
+            
         Returns:
-            64 bytes of output key material (32 for root key, 32 for chain key)
+            Output key material of the specified length.
         """
         # Verify input parameters
         verify_key_material(key_material, description="HKDF salt/key material")
@@ -1550,7 +1583,7 @@ class DoubleRatchet:
         # Use SHA-512 for post-quantum security level
         hkdf = HKDF(
             algorithm=sha512_instance,  # Use the properly instantiated SHA512 object
-            length=64,  # 64 bytes: 32 for root key, 32 for chain key
+            length=length,  # Use the specified length
             salt=salt,
             info=info
         )
@@ -1559,7 +1592,7 @@ class DoubleRatchet:
         derived_key = hkdf.derive(input_key_material)
         
         # Verify output
-        verify_key_material(derived_key, expected_length=64, description=f"HKDF output ({info})")
+        verify_key_material(derived_key, expected_length=length, description=f"HKDF output ({info})")
         
         # Record operation time for anomaly detection
         if self.anomaly_detection:
@@ -1570,7 +1603,9 @@ class DoubleRatchet:
         # Apply hardware binding if available
         if self.hsm_available and self.device_fingerprint:
             # Mix in hardware fingerprint
-            derived_key = hashlib.sha512(derived_key + self.device_fingerprint.encode()).digest()[:64]
+            # Note: If length is not SHA512_DIGEST_SIZE, this truncation/rehashing might need adjustment
+            # For now, assuming length will be appropriate for direct use or this mixing is acceptable.
+            derived_key = hashlib.sha512(derived_key + self.device_fingerprint.encode()).digest()[:length]
             
         return derived_key
 
@@ -2006,26 +2041,29 @@ class DoubleRatchet:
             return b''
             
         try:
-            # Verify ciphertext
-            verify_key_material(ciphertext, description="KEM ciphertext")
-            
-            # Perform ML-KEM decapsulation
-            logger.debug(f"Performing ML-KEM-1024 decapsulation with ciphertext ({len(ciphertext)} bytes)")
-            kem_shared_secret = self.kem.decaps(self.kem_private_key, ciphertext)
-            verify_key_material(kem_shared_secret, description="KEM shared secret")
+            # Verify KEM ciphertext integrity, including length
+            verify_key_material(ciphertext, 
+                                expected_length=self.MLKEM1024_CIPHERTEXT_SIZE, 
+                                description="KEM ciphertext for DR")
+            # Log the received KEM ciphertext
+            logger.debug(f"Received KEM ciphertext for processing: {format_binary(ciphertext)}")
+
+            # Decapsulate the KEM ciphertext
+            shared_secret = self.kem.decaps(self.kem_private_key, ciphertext)
+            verify_key_material(shared_secret, description="Decapsulated KEM shared secret")
             
             # Store the shared secret
-            self.kem_shared_secret = kem_shared_secret
-            logger.debug(f"Processed KEM ciphertext and derived shared secret ({len(kem_shared_secret)} bytes)")
+            self.kem_shared_secret = shared_secret
+            logger.debug(f"Processed KEM ciphertext and derived shared secret ({len(shared_secret)} bytes)")
             
             # If we already have DH outputs but no chains, initialize chains now
             if self.remote_dh_public_key and not self.receiving_chain_key:
                 logger.debug("Completing initialization with DH output and KEM shared secret")
                 dh_output = self.dh_private_key.exchange(self.remote_dh_public_key)
-                self._initialize_chain_keys(dh_output, kem_shared_secret)
+                self._initialize_chain_keys(dh_output, shared_secret)
                 
             # Return the shared secret for immediate use if needed
-            return kem_shared_secret
+            return shared_secret
             
         except Exception as e:
             self.last_error = f"Failed to process KEM ciphertext: {str(e)}"
@@ -2048,46 +2086,69 @@ class DoubleRatchet:
         
         # Verify inputs
         verify_key_material(dh_output, description="DH output for chain key initialization")
+        current_root_key = self.root_key # This is the shared secret from X3DH+PQ
+
         if kem_shared_secret:
             verify_key_material(kem_shared_secret, description="KEM shared secret for chain key initialization")
             
-        # Create combined secret for hybrid mode
+        # Create combined secret for hybrid mode (this is the IKM for HKDF)
         if self.enable_pq and kem_shared_secret:
-            # Use a secure combination with domain separation
             combined_secret = hashlib.sha512(b"DR_HYBRID_" + dh_output + b"_" + kem_shared_secret).digest()
             logger.debug(f"Using hybrid DH+KEM input for key derivation ({len(combined_secret)} bytes)")
+            # Info strings for Step 1 (conceptually, initiator's sending chain / responder's receiving chain)
+            info_root_s1 = self.KDF_INFO_INIT_ROOT_STEP1_HYBRID
+            info_chain_s1 = self.KDF_INFO_INIT_CHAIN_STEP1_HYBRID
+            # Info strings for Step 2 (conceptually, initiator's receiving chain / responder's sending chain)
+            info_root_s2 = self.KDF_INFO_INIT_ROOT_STEP2_HYBRID
+            info_chain_s2 = self.KDF_INFO_INIT_CHAIN_STEP2_HYBRID
         else:
             combined_secret = dh_output
             logger.debug(f"Using classical DH input for key derivation ({len(combined_secret)} bytes)")
+            # Info strings for Step 1
+            info_root_s1 = self.KDF_INFO_INIT_ROOT_STEP1_DH
+            info_chain_s1 = self.KDF_INFO_INIT_CHAIN_STEP1_DH
+            # Info strings for Step 2
+            info_root_s2 = self.KDF_INFO_INIT_ROOT_STEP2_DH
+            info_chain_s2 = self.KDF_INFO_INIT_CHAIN_STEP2_DH
+
+        # --- Step 1 Derivations ---
+        # (Corresponds to what DR_INIT_SENDING_v2 used to produce for both root and chain key)
         
-        # Different key derivation paths for initiator vs responder to ensure they
-        # derive the same keys but assign them to the correct chains
+        # Derive new root key for step 1
+        logger.debug(f"Deriving initial root key (step 1) using info: {info_root_s1.decode()}")
+        root_key_s1 = self._kdf(current_root_key, combined_secret, info=info_root_s1, length=self.ROOT_KEY_SIZE)
+        verify_key_material(root_key_s1, description="Initial root key (step 1)")
+
+        # Derive chain key for step 1, using the new root_key_s1 as HKDF key material
+        logger.debug(f"Deriving initial chain key (step 1) using info: {info_chain_s1.decode()}")
+        chain_key_s1 = self._kdf(root_key_s1, combined_secret, info=info_chain_s1, length=self.CHAIN_KEY_SIZE)
+        verify_key_material(chain_key_s1, description="Initial chain key (step 1)")
+
+        # --- Step 2 Derivations ---
+        # (Corresponds to what DR_INIT_RECEIVING_v2 used to produce for both root and chain key)
+        # The root key for this step's derivation is the output from step 1's root key derivation
+        
+        # Derive new root key for step 2
+        logger.debug(f"Deriving initial root key (step 2) using info: {info_root_s2.decode()}")
+        root_key_s2 = self._kdf(root_key_s1, combined_secret, info=info_root_s2, length=self.ROOT_KEY_SIZE)
+        verify_key_material(root_key_s2, description="Initial root key (step 2)")
+
+        # Derive chain key for step 2, using the new root_key_s2 as HKDF key material
+        logger.debug(f"Deriving initial chain key (step 2) using info: {info_chain_s2.decode()}")
+        chain_key_s2 = self._kdf(root_key_s2, combined_secret, info=info_chain_s2, length=self.CHAIN_KEY_SIZE)
+        verify_key_material(chain_key_s2, description="Initial chain key (step 2)")
+        
+        # Assign keys based on initiator/responder role
         if self.is_initiator:
-            # For initiator: sending chain = "initiator chain", receiving = "responder chain"
-            logger.debug("Deriving initiator chains")
-            
-            # Derive sending chain (initiator sends first)
-            kdf_output = self._kdf(self.root_key, combined_secret, info=b"DR_INIT_SENDING_v2")
-            self.root_key, self.sending_chain_key = kdf_output[:32], kdf_output[32:]
-            verify_key_material(self.sending_chain_key, description="Initiator sending chain")
-            
-            # Derive receiving chain
-            kdf_output = self._kdf(self.root_key, combined_secret, info=b"DR_INIT_RECEIVING_v2")
-            self.root_key, self.receiving_chain_key = kdf_output[:32], kdf_output[32:]
-            verify_key_material(self.receiving_chain_key, description="Initiator receiving chain")
-        else:
-            # For responder: sending chain = "responder chain", receiving = "initiator chain"
-            logger.debug("Deriving responder chains")
-            
-            # Derive receiving chain (from initiator's sending chain)
-            kdf_output = self._kdf(self.root_key, combined_secret, info=b"DR_INIT_SENDING_v2")
-            self.root_key, self.receiving_chain_key = kdf_output[:32], kdf_output[32:]
-            verify_key_material(self.receiving_chain_key, description="Responder receiving chain")
-            
-            # Derive sending chain
-            kdf_output = self._kdf(self.root_key, combined_secret, info=b"DR_INIT_RECEIVING_v2")
-            self.root_key, self.sending_chain_key = kdf_output[:32], kdf_output[32:]
-            verify_key_material(self.sending_chain_key, description="Responder sending chain")
+            logger.debug("Assigning Step 1 to Sending Chain, Step 2 to Receiving Chain for Initiator")
+            self.root_key = root_key_s2 # Final root key is from Step 2
+            self.sending_chain_key = chain_key_s1
+            self.receiving_chain_key = chain_key_s2
+        else: # Responder
+            logger.debug("Assigning Step 1 to Receiving Chain, Step 2 to Sending Chain for Responder")
+            self.root_key = root_key_s2 # Final root key is from Step 2
+            self.receiving_chain_key = chain_key_s1 # Responder receives on chain derived from "Step 1" context
+            self.sending_chain_key = chain_key_s2   # Responder sends on chain derived from "Step 2" context
         
         # Reset message counters
         self.sending_message_number = 0
