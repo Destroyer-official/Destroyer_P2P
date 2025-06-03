@@ -542,8 +542,8 @@ class ThreatDetection:
     def get_security_recommendations(self) -> Dict[str, Any]:
         """Get security recommendations based on threat level."""
         recommendations = {
-            "security_level": "HIGH" if self.threat_level == "normal" else 
-                             "HIGH" if self.threat_level == "elevated" else
+            "security_level": "MAXIMUM" if self.threat_level == "normal" else 
+                             "MAXIMUM" if self.threat_level == "elevated" else
                              "PARANOID"
         }
         
@@ -1146,7 +1146,7 @@ class DoubleRatchet:
         is_initiator: bool = True, 
         enable_pq: bool = True,  # PQ security enabled by default
         max_skipped_keys: int = 100,
-        security_level: str = "HIGH",  # Changed  HIGH as default
+        security_level: str = "MAXIMUM",  # Changed  HIGH as default
         threshold_security: bool = False,  # Enable key compartmentalization
         hardware_binding: bool = False,    # Enable hardware binding
         side_channel_protection: bool = True, # Enable side-channel protections
@@ -1883,85 +1883,141 @@ class DoubleRatchet:
     def _ratchet_decrypt(self, header: MessageHeader) -> bytes:
         """
         Process a message header and derive the appropriate message key for decryption.
+        Follows the logic similar to Signal Protocol for receiving messages.
         
         This method handles:
-        1. Checking for previously stored skipped message keys
-        2. Advancing the ratchet if needed based on sender's public key
-        3. Skipping message keys if the received message is ahead
+        1. Checking for previously stored skipped message keys.
+        2. Performing a DH ratchet step if the sender's DH key has changed.
+           - This includes storing skipped keys from the sender's *previous* chain.
+        3. Advancing the current receiving chain if the message is ahead, storing intermediate keys.
+        4. Deriving the message key for the current message or erroring for old/unskippable messages.
         
         Returns:
-            The correct message key for decryption
+            The correct message key for decryption.
         """
-        # Extract sender's public key information
-        remote_public_key_bytes = header.public_key.public_bytes(
+        remote_public_key_from_header_bytes = header.public_key.public_bytes(
             encoding=serialization.Encoding.Raw,
             format=serialization.PublicFormat.Raw
         )
         message_number = header.message_number
-        current_ratchet_id = self._get_public_key_fingerprint(header.public_key)
+        # This is the ratchet ID associated with the chain this message belongs to.
+        current_message_ratchet_id = self._get_public_key_fingerprint(header.public_key)
         
-        # 1. Check if this is from a skipped/cached key
-        key_tuple = (current_ratchet_id, message_number)
+        # 1. Check KSKIPPED: If key for (header.public_key, header.message_number) is stored, use it.
+        key_tuple = (current_message_ratchet_id, message_number)
         if key_tuple in self.skipped_message_keys:
-            logger.info(f"Using stored key for message #{message_number} from ratchet {format_binary(current_ratchet_id)}")
-            message_key = self.skipped_message_keys.pop(key_tuple)
-            return message_key
-        
-        # 2. Determine if we need to perform a DH ratchet step
-        perform_dh = False
-        
-        # Case 2a: First message received (no remote public key yet)
-        if self.remote_dh_public_key is None:
-            perform_dh = True
-            logger.info("First message received, initializing receiving chain")
-            
-        # Case 2b: Sender's public key has changed (they performed a ratchet step)
-        elif not self._compare_public_keys(self.remote_dh_public_key, remote_public_key_bytes):
-            perform_dh = True
-            logger.info("Detected new ratchet public key, performing DH ratchet step")
-            
-            # Before changing ratchet, store any skipped message keys from the previous chain
-            if self.receiving_chain_key:
+            logger.info(f"Using stored key for message #{message_number} (ratchet {format_binary(current_message_ratchet_id)})")
+            # Pop the key as it's now being used.
+            return self.skipped_message_keys.pop(key_tuple)
+
+        # --- Potential DH Ratchet Step --- 
+        # Check if the sender's DH public key in the header is new compared to our stored remote DH key.
+        needs_dh_ratchet = False
+        if self.remote_dh_public_key is None: # First message from this peer or session reset
+            needs_dh_ratchet = True
+            logger.info("No current remote DH public key. Assuming first message or new session, will perform DH ratchet.")
+        elif not self._compare_public_keys(self.remote_dh_public_key, remote_public_key_from_header_bytes):
+            needs_dh_ratchet = True
+            logger.info("Remote DH public key in header has changed. Performing DH ratchet step.")
+            # Before ratcheting, store any skipped message keys from the *old* receiving chain
+            # (associated with the previous self.remote_dh_public_key).
+            if self.receiving_chain_key: # If there was an active receiving chain
+                old_remote_ratchet_id = self._get_public_key_fingerprint(self.remote_dh_public_key)
+                logger.debug(f"Storing skipped keys for old ratchet {format_binary(old_remote_ratchet_id)} "
+                             f"from message #{self.receiving_message_number} up to #{header.previous_chain_length-1}.")
                 self._store_skipped_message_keys(
-                    self.receiving_chain_key, 
-                    self.receiving_message_number, 
-                    header.previous_chain_length
+                    self.receiving_chain_key,    # The CKr for the old chain
+                    self.receiving_message_number, # The Nr for the old chain
+                    header.previous_chain_length, # Pn from header (sender's old chain length)
+                    old_remote_ratchet_id        # Ratchet ID of the old chain
                 )
         
-        # 3. If needed, perform DH ratchet step and create new receiving chain
-        if perform_dh:
-            # Update the remote public key
-            self.remote_dh_public_key = header.public_key
-            
-            # Create new receiving chain
-            remote_kem_public_key = self.remote_kem_public_key if self.enable_pq else None
-            self._dh_ratchet_step(remote_public_key_bytes, remote_kem_public_key)
-            
-            # Reset receiving message number
-            self.receiving_message_number = 0
-        
-        # 4. Skip any message keys if necessary to reach the target message
+        if needs_dh_ratchet:
+            # This performs the DH exchange, updates self.root_key, self.remote_dh_public_key,
+            # self.receiving_chain_key, and resets self.receiving_message_number = 0.
+            # It also generates new sending keys for us.
+            # It needs the KEM public key associated with remote_public_key_from_header_bytes if PQ is enabled.
+            # We assume self.remote_kem_public_key was updated alongside self.remote_dh_public_key by an earlier
+            # call to set_remote_public_key or during a previous ratchet where we were the sender.
+            # If this is the first time we see this new DH key, self.remote_kem_public_key might be stale if not updated.
+            # However, the KEM secret is typically tied to the DH exchange that establishes the root key, or encapsulated
+            # by the initiator. For a DH ratchet step, the KEM part is usually an encapsulation towards the new DH key.
+            # The current _dh_ratchet_step uses self.kem.encaps(remote_kem_public_key) if remote_kem_public_key is provided.
+            # If Bob receives a new DH key from Alice, Alice should have encapsulated for it.
+            # For simplicity, we use self.remote_kem_public_key which should correspond to the *new* DH key from Alice.
+            # This implies that when Alice sends a new DH Ratchet key, she also sends a new KEM Public Key if PQ.
+            # The current logic in _dh_ratchet_step uses self.remote_kem_public_key for encapsulation if provided.
+            # Let's assume it's correctly managed by higher-level key agreement logic that remote KEM PK is available.
+            # The header itself doesn't carry the KEM PK for the ratchet step.
+            # The _dh_ratchet_step uses the *local* KEM to encapsulate towards the *remote* KEM public key.
+            # This step is when *we* receive a new key, so *we* are decapsulating if anything, or preparing *our* next send.
+
+            # The `_dh_ratchet_step` is called with the public key from the header.
+            # If PQ is enabled, it may also require the KEM public key corresponding to `remote_public_key_from_header_bytes`.
+            # The current `_dh_ratchet_step` uses `self.kem.encaps(remote_kem_public_key)` which is for *sending* a KEM ciphertext.
+            # When *receiving* a new DH key, we would use the KEM shared secret from a *received* KEM ciphertext (if any).
+            # This part of the logic might need careful review in context of hybrid key exchange for ratchet steps.
+            # For now, follow the existing structure of _dh_ratchet_step, assuming KEM aspects are handled within it.
+            # It will internally update self.remote_dh_public_key to the one from the header.
+            current_remote_kem_pk_for_ratchet = None
+            if self.enable_pq:
+                # We need the KEM public key that corresponds to remote_public_key_from_header_bytes.
+                # This is tricky as the header doesn't carry it. Assume it has been set via `set_remote_public_key`
+                # or is part of the initial handshake and `self.remote_kem_public_key` refers to it.
+                # This is a potential point of confusion if KEM keys are not tightly coupled with DH keys in the protocol.
+                # Let's assume for now that self.remote_kem_public_key refers to the KEM public key of the current communication partner.
+                 current_remote_kem_pk_for_ratchet = self.remote_kem_public_key
+
+            self._dh_ratchet_step(remote_public_key_from_header_bytes, current_remote_kem_pk_for_ratchet)
+            # After this, self.receiving_message_number = 0 for the new chain.
+            # And self.remote_dh_public_key matches header.public_key.
+
+        # --- Process message in its chain (defined by header.public_key, which now matches self.remote_dh_public_key) ---
+        # current_message_ratchet_id is the ID for the chain this message belongs to.
+        # self.receiving_message_number is Nr for this chain.
+        # message_number is N (from header) for this message.
+
+        if message_number < self.receiving_message_number:
+            # Message is older than current state for this chain AND was not in skipped_message_keys.
+            logger.error(f"SECURITY ALERT: Old message #{message_number} received for current ratchet "
+                         f"(expecting #{self.receiving_message_number} or later), not in skipped cache. "
+                         f"Ratchet ID: {format_binary(current_message_ratchet_id)}. Possible replay or severe de-sync.")
+            raise SecurityError(f"Old message #{message_number} for current ratchet (ID {format_binary(current_message_ratchet_id)}), not in skipped cache.")
+
         if message_number > self.receiving_message_number:
-            self._skip_message_keys(message_number, current_ratchet_id)
-        elif message_number < self.receiving_message_number:
-            # This is a replay or very old message - should have been handled by skipped keys
-            logger.warning(
-                f"Received message #{message_number} but already at #{self.receiving_message_number}. " +
-                f"Possible replay attack or very delayed message."
-            )
-        
-        # 5. Generate the message key for the current message
+            # Message is ahead in this chain. Skip from current self.receiving_message_number up to message_number (exclusive).
+            # _skip_message_keys will advance self.receiving_chain_key and self.receiving_message_number,
+            # and store intermediate MKs in self.skipped_message_keys (associated with current_message_ratchet_id).
+            logger.debug(f"Message #{message_number} is ahead of current receiving number #{self.receiving_message_number}. Skipping keys.")
+            self._skip_message_keys(message_number, current_message_ratchet_id)
+            # After _skip_message_keys, self.receiving_message_number should BE message_number.
+
+        # Verify synchronization: at this point, message_number should equal self.receiving_message_number
+        if message_number != self.receiving_message_number:
+            logger.critical(f"CRITICAL LOGIC ERROR: Message number {message_number} ({type(message_number)}) "
+                            f"does not match receiving chain number {self.receiving_message_number} ({type(self.receiving_message_number)}) "
+                            f"after attempt to synchronize. Ratchet ID: {format_binary(current_message_ratchet_id)}.")
+            # This indicates a flaw in _skip_message_keys or the surrounding logic.
+            raise SecurityError("Ratchet desynchronization: message number mismatch after skipping.")
+
+        # Derive Message Key for the current message_number, then advance chain state.
         if self.receiving_chain_key is None:
-            raise SecurityError("Cannot derive message key: No receiving chain exists")
+            # This should not happen if the ratchet is initialized and DH step occurred if needed.
+            logger.error("CRITICAL: Receiving chain key is None before final key derivation.")
+            raise SecurityError("Receiving chain key is unexpectedly None.")
             
-        next_chain_key, message_key = self._chain_ratchet_step(self.receiving_chain_key)
-        self.receiving_chain_key = next_chain_key
-        self.receiving_message_number = message_number + 1
+        # Get key for message_number (which is self.receiving_message_number)
+        next_chain_key_val, message_key_val = self._chain_ratchet_step(self.receiving_chain_key)
         
-        logger.debug(f"Generated message key for receiving chain message #{message_number}")
-        return message_key
+        # Advance the receiving chain state for the NEXT message
+        self.receiving_chain_key = next_chain_key_val
+        self.receiving_message_number += 1 # Increment N_r
+        
+        logger.debug(f"Derived message key for message #{message_number} (ratchet {format_binary(current_message_ratchet_id)}). "
+                     f"Receiving number advanced to {self.receiving_message_number}.")
+        return message_key_val
     
-    def _store_skipped_message_keys(self, chain_key: bytes, start: int, end: int) -> None:
+    def _store_skipped_message_keys(self, chain_key: bytes, start: int, end: int, ratchet_key_id: bytes) -> None:
         """
         Store message keys for messages we haven't received yet.
         
@@ -2314,46 +2370,59 @@ class DoubleRatchet:
         """
         Skip message keys to handle out-of-order message delivery.
         
-        Advances the receiving chain up to the specified message number,
-        storing skipped message keys securely for later use.
+        Advances the receiving chain up to the specified message number (exclusive),
+        storing skipped message keys securely for later use. Updates
+        self.receiving_chain_key and self.receiving_message_number to reflect
+        the state after skipping.
         """
         if self.receiving_chain_key is None:
-            return  # No chain key yet, nothing to skip
-            
-        current_msg_num = self.receiving_message_number
+            logger.error("Cannot skip message keys: receiving_chain_key is None.")
+            # This state should ideally be prevented if the ratchet is initialized.
+            # Depending on desired robustness, could raise SecurityError.
+            return 
+
+        start_msg_num = self.receiving_message_number
         
-        # Don't do anything if we're already at or beyond the target
-        if current_msg_num >= until_message_number:
-            return
+        if start_msg_num >= until_message_number:
+            return # Nothing to skip
+
+        logger.info(f"Attempting to skip from message #{start_msg_num} up to (but not including) #{until_message_number} " +
+                    f"for ratchet {format_binary(ratchet_key_id)}. Current skipped_keys: {len(self.skipped_message_keys)}/{self.max_skipped_message_keys}")
+
+        num_actually_skipped_and_stored = 0
+        # Loop from the current message number up to the target message number (exclusive)
+        for i in range(start_msg_num, until_message_number):
+            if len(self.skipped_message_keys) >= self.max_skipped_message_keys:
+                logger.warning(
+                    f"Maximum skipped keys limit ({self.max_skipped_message_keys}) reached. " +
+                    f"Stopping skip at message #{i} (was targeting up to #{until_message_number-1}). " +
+                    f"Message #{i} and onwards in this batch will not have their keys stored, " +
+                    f"and the receiving chain will only be advanced up to message #{i-1}."
+                )
+                # The loop will break. self.receiving_message_number and self.receiving_chain_key
+                # will reflect the state before processing message 'i'.
+                break 
+
+            # Generate message key and advance the chain state
+            # This call uses and updates self.receiving_chain_key internally FOR REAL if not careful.
+            # _chain_ratchet_step should be pure based on input chain_key.
+            # Let's ensure _chain_ratchet_step is pure. Yes, it takes chain_key as input.
             
-        # Log the skipping operation
-        logger.info(f"Skipping {until_message_number - current_msg_num} message keys " +
-                  f"(from {current_msg_num} to {until_message_number-1})")
-        
-        # Check if we're about to exceed maximum stored keys
-        if len(self.skipped_message_keys) + (until_message_number - current_msg_num) > self.max_skipped_message_keys:
-            logger.warning(
-                f"Maximum skipped keys limit approached ({self.max_skipped_message_keys}). " +
-                f"Limiting to avoid potential DoS attack."
-            )
-            # Limit the number of keys to skip
-            until_message_number = min(
-                until_message_number,
-                current_msg_num + (self.max_skipped_message_keys - len(self.skipped_message_keys))
-            )
-            
-        # Generate and store keys for all messages we're skipping
-        while current_msg_num < until_message_number:
-            # Generate message key and advance the chain
-            next_chain_key, message_key = self._chain_ratchet_step(self.receiving_chain_key)
-            self.receiving_chain_key = next_chain_key
+            next_chain_key_val, message_key_val = self._chain_ratchet_step(self.receiving_chain_key)
             
             # Store the skipped message key
-            key_tuple = (ratchet_key_id, current_msg_num)
-            self.skipped_message_keys[key_tuple] = message_key
+            key_tuple = (ratchet_key_id, i) # i is the message number being skipped
+            self.skipped_message_keys[key_tuple] = message_key_val
             
-            logger.debug(f"Stored key for skipped message {current_msg_num} from ratchet {format_binary(ratchet_key_id)}")
-            current_msg_num += 1
+            # Update the main chain key and message number to reflect this step
+            self.receiving_chain_key = next_chain_key_val
+            self.receiving_message_number = i + 1 # After processing/skipping message i, next expected is i+1
+            
+            num_actually_skipped_and_stored += 1
+            logger.debug(f"Stored key for skipped message {i} (ratchet {format_binary(ratchet_key_id)}). Receiving number is now {self.receiving_message_number}.")
+        
+        logger.info(f"Finished skipping operation. Advanced receiving chain by {num_actually_skipped_and_stored} steps. " +
+                    f"Receiving number is now {self.receiving_message_number}. Total skipped keys stored: {len(self.skipped_message_keys)}.")
     
     def _compare_public_keys(self, public_key1: X25519PublicKey, public_key2_bytes: bytes) -> bool:
         """Compare a public key object with raw public key bytes."""
@@ -2456,7 +2525,7 @@ class DoubleRatchetDefaults:
             "anti_tampering": False,         # Extra anti-tampering measures
             "secure_erasure_passes": 4       # Number of secure erasure passes
         },
-        "HIGH": {
+        "MAXIMUM": { # This was HIGH, settings updated by user
             "enable_pq": True,
             "max_skipped_keys": 5,          # Reduced skipped keys
             "key_rotation_messages": 5,     # More frequent rotation
@@ -2497,11 +2566,12 @@ class DoubleRatchetDefaults:
     }
     
     @classmethod
-    def get_defaults(cls, security_level="HIGH"):
+    def get_defaults(cls, security_level="MAXIMUM"):
         """Get default configuration for the specified security level."""
         if security_level not in cls.SECURITY_LEVELS:
-            security_level = "HIGH"
-            logger.info(f"Unknown security level '{security_level}', using HIGH")
+            original_level = security_level
+            security_level = "MAXIMUM"
+            logger.info(f"Unknown security level '{original_level}', using MAXIMUM")
         
         config = cls.SECURITY_LEVELS[security_level].copy()
         
@@ -2528,7 +2598,7 @@ class DoubleRatchetDefaults:
     @classmethod
     def get_recommended_level(cls):
         """Get recommended security level based on environment and threats."""
-        recommended = "HIGH"  # "HIGH" seems to be a good default
+        recommended = "MAXIMUM"  # Default to MAXIMUM
         
         # Check for virtual machine or container environment
         is_vm = False
@@ -2551,9 +2621,13 @@ class DoubleRatchetDefaults:
         if current_threat == "high":
             recommended = "PARANOID"
         elif current_threat == "elevated" or is_vm:
-            recommended = "HIGH"
+            # If already MAXIMUM or PARANOID, keep it. Otherwise, ensure at least MAXIMUM.
+            if recommended not in ["PARANOID"]: # "MAXIMUM" is the new base
+                recommended = "MAXIMUM" 
         elif has_hardware:
-            recommended = "HIGH"  # When hardware is available, default higher
+            # If already MAXIMUM or PARANOID, keep it. Otherwise, ensure at least MAXIMUM.
+            if recommended not in ["PARANOID"]: # "MAXIMUM" is the new base
+                recommended = "MAXIMUM"
             
         return recommended
 
