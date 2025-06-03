@@ -34,6 +34,7 @@ import gc
 import ctypes
 import time
 import selectors
+import secrets
 
 # Custom security exception
 class SecurityError(Exception):
@@ -191,6 +192,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
     # Message constraints
     MAX_MESSAGE_SIZE = 16384  # 16 KB maximum message size
     MAX_FRAME_SIZE = 65536    # 64 KB maximum frame size
+    MAX_RANDOM_PADDING_BYTES = 15 # Max *random* bytes to add, total overhead is this + 1
     
     # Security levels
     SECURITY_LEVELS = {
@@ -2442,81 +2444,93 @@ class SecureP2PChat(p2p.SimpleP2PChat):
             
         print("\033[1m\033[94m=========================================\033[0m\n")
 
-    async def _encrypt_message(self, message: str) -> bytes:
+    def _add_random_padding(self, plaintext_bytes: bytes) -> bytes:
+        """Adds random padding to plaintext before encryption.
+        Structure: [ Plaintext | Random Padding Bytes | Length of Random Padding Bytes (1 byte) ]
         """
-        Encrypt a message using the Double Ratchet algorithm.
+        if not isinstance(plaintext_bytes, bytes):
+            # Ensure input is bytes, though _encrypt_message should handle this.
+            raise TypeError("Input to padding must be bytes.")
+            
+        num_random_bytes = secrets.randbelow(self.MAX_RANDOM_PADDING_BYTES + 1) # 0 to MAX_RANDOM_PADDING_BYTES
+        random_padding = secrets.token_bytes(num_random_bytes)
+        len_byte = num_random_bytes.to_bytes(1, 'big')
         
-        Args:
-            message: The plaintext message to encrypt
-            
-        Returns:
-            The encrypted message bytes ready for transmission
-        """
-        if not self.ratchet:
-            log.error("Cannot encrypt message: Double Ratchet not initialized")
-            raise SecurityError("Double Ratchet not initialized")
-        
-        try:
-            # Convert message to bytes
-            message_bytes = message.encode('utf-8')
-            
-            # Encrypt with Double Ratchet
-            encrypted_data = self.ratchet.encrypt(message_bytes)
-            
-            # Log success (using ASCII-friendly arrow instead of Unicode)
+        log.debug(f"Added {num_random_bytes} random padding bytes + 1 length byte.")
+        return plaintext_bytes + random_padding + len_byte
 
-            log.debug(f"Message encrypted successfully: {len(message_bytes)} plaintext bytes -> {len(encrypted_data)} ciphertext bytes")
-            
-            return encrypted_data
+    def _remove_random_padding(self, padded_plaintext_bytes: bytes) -> bytes:
+        """Removes random padding from decrypted plaintext."""
+        if not padded_plaintext_bytes:
+            # This case should ideally be handled by higher-level logic (e.g., empty decrypted message)
+            # but as a safeguard for padding logic itself:
+            log.warning("Attempted to unpad an empty message.")
+            raise ValueError("Cannot unpad empty message")
+
+        if len(padded_plaintext_bytes) < 1: # Cannot read length byte
+            log.error("Padded message too short to contain padding length byte.")
+            raise ValueError("Padded message too short to contain padding info")
+
+        num_random_bytes = padded_plaintext_bytes[-1] # Last byte is the length of *random* padding
+
+        # Total padding length is num_random_bytes + 1 (for the length byte itself)
+        total_padding_length = num_random_bytes + 1
         
+        if total_padding_length > len(padded_plaintext_bytes):
+            log.error(f"Invalid padding: indicated padding length {total_padding_length} (random: {num_random_bytes}) is greater than message length {len(padded_plaintext_bytes)}.")
+            raise ValueError(f"Invalid padding: indicated padding ({total_padding_length} bytes) exceeds message length ({len(padded_plaintext_bytes)})")
+            
+        original_plaintext_end_index = len(padded_plaintext_bytes) - total_padding_length
+        
+        log.debug(f"Removed {num_random_bytes} random padding bytes + 1 length byte.")
+        return padded_plaintext_bytes[:original_plaintext_end_index]
+
+    async def _encrypt_message(self, message: str) -> bytes:
+        """Encrypts a string message using the Double Ratchet, with random padding."""
+        if not self.ratchet:
+            log.error("Double Ratchet not initialized. Cannot encrypt.")
+            raise SecurityError("Double Ratchet not initialized for encryption")
+
+        try:
+            plaintext_bytes = message.encode('utf-8')
+            log.debug(f"Original plaintext length: {len(plaintext_bytes)} bytes")
+
+            padded_bytes = self._add_random_padding(plaintext_bytes)
+            log.debug(f"Plaintext length after padding: {len(padded_bytes)} bytes")
+            
+            encrypted_data = self.ratchet.encrypt(padded_bytes)
+            log.debug(f"Encrypted message ({len(plaintext_bytes)} plaintext bytes, {len(padded_bytes)} padded bytes) to {len(encrypted_data)} ciphertext bytes")
+            return encrypted_data
         except Exception as e:
-            log.error(f"Encryption error: {e}")
-            raise SecurityError(f"Encryption failed: {e}")
+            log.error(f"Error during message encryption and padding: {e}", exc_info=True)
+            # Consider if a more specific exception should be raised or if SecurityError is appropriate
+            raise SecurityError(f"Message encryption failed: {e}") from e
 
     async def _decrypt_message(self, encrypted_data: bytes) -> str:
-        """
-        Decrypt a message using the Double Ratchet algorithm.
-        
-        This method handles the decryption of messages with integrity verification
-        and also advances the ratchet for forward secrecy.
-        
-        Args:
-            encrypted_data (bytes): The encrypted message data
-            
-        Returns:
-            str: The decrypted plaintext message
-            
-        Raises:
-            SecurityError: If decryption fails, authentication fails, or the ratchet 
-                          is not initialized
-        """
+        """Decrypts a message using the Double Ratchet and removes random padding."""
+        log.debug(f"Received {len(encrypted_data)} ciphertext bytes for decryption.") # Added log line
         if not self.ratchet:
-            log.error("Cannot decrypt message: Double Ratchet not initialized")
-            raise SecurityError("Double Ratchet not initialized")
-        
+            log.error("Double Ratchet not initialized. Cannot decrypt.")
+            raise SecurityError("Double Ratchet not initialized for decryption")
+
         try:
-            # Decrypt with Double Ratchet
-            decrypted_data = self.ratchet.decrypt(encrypted_data)
+            decrypted_padded_bytes = self.ratchet.decrypt(encrypted_data)
+            log.debug(f"Decrypted to {len(decrypted_padded_bytes)} bytes (includes padding).")
+
+            decrypted_bytes = self._remove_random_padding(decrypted_padded_bytes)
+            log.debug(f"Plaintext length after unpadding: {len(decrypted_bytes)} bytes")
             
-            # Verify that decrypted data is valid
-            if decrypted_data is None:
-                log.error("Double Ratchet decryption failed: authentication failed")
-                raise SecurityError("Decryption failed: authentication failed")
-            
-            # Convert back to string
-            message = decrypted_data.decode('utf-8')
-            
-            # Log success (using ASCII-friendly arrow instead of Unicode)
-            log.debug(f"Message decrypted successfully: {len(encrypted_data)} ciphertext bytes -> {len(decrypted_data)} plaintext bytes")
+            message = decrypted_bytes.decode('utf-8')
             return message
-        
         except UnicodeDecodeError as e:
-            log.error(f"Decryption produced invalid UTF-8: {e}")
-            raise SecurityError("Decryption failed: invalid UTF-8 data")
-        
+            log.error(f"Failed to decode message after decryption and unpadding: {e}", exc_info=True)
+            raise SecurityError(f"Message decoding failed after decryption: {e}") from e
+        except ValueError as e: # Catch padding errors
+            log.error(f"Error removing padding: {e}", exc_info=True)
+            raise SecurityError(f"Padding removal failed: {e}") from e
         except Exception as e:
-            log.error(f"Decryption error: {e}")
-            raise SecurityError(f"Decryption failed: {e}")
+            log.error(f"Error during message decryption or unpadding: {e}", exc_info=True)
+            raise SecurityError(f"Message decryption failed: {e}") from e
 
     async def _chat_session(self, is_reconnect=False):
         """Manages an active chat session after a TCP connection is established."""
@@ -2599,12 +2613,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         # Sending Loop
         while not self.stop_event.is_set() and self.is_connected:
             try:
-                raw_user_input = await self._async_input(f"{CYAN}{self.local_username}: {RESET}")
-                if raw_user_input:
-                    random_spaces = " " * random.randint(1, 30)  # Add random number of blank spaces (1 to 30) for now one predect the encrypted message by its len 
-                    user_input = raw_user_input + random_spaces + "."  # Append random spaces to simulate typing delay
-
-
+                user_input = await self._async_input(f"{CYAN}{self.local_username}: {RESET}")
                 if not user_input:
                     continue
                     

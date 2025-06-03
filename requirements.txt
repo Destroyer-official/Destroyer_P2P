@@ -3,3 +3,4 @@ quantcrypt
 keyring>=23.0.0
 pyzmq>=22.0.0
 python-pkcs11; sys_platform != "win32"
+  

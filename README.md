@@ -185,14 +185,64 @@ Advanced key storage with OS-specific best practices:
 - **Process Isolation**: Key operations in separate process on POSIX systems
 - **Memory Protection**: Secure memory wiping, canary values, and anti-debugging features
 
+### 🛡️ Layered Security Model
+
+The application employs multiple layers of security to protect data in transit. The following diagram illustrates how a user's message is encapsulated:
+
+```mermaid
+graph LR
+    subgraph "Network Transmission (OS Kernel)"
+        TCPIP["TCP/IP Frame\\n(Contains Encrypted TLS Record)"]
+    end
+    subgraph "Transport Layer Security (TLS 1.3 Channel)"
+        TLS_Packet["TLS Record\\n(Contains Encrypted Double Ratchet Message)"]
+    end
+    subgraph "End-to-End Encrypted Message (Double Ratchet Protocol)"
+        DR_Message["Double Ratchet Message\\n(Header + Encrypted Padded User Data + Signature)"]
+    end
+    subgraph "Application Data Preparation"
+        Padded_Message["Padded User Message\\n(Random Padding Bytes + Original Message Bytes)"]
+        User_Message["Original User Message (Plaintext String)"]
+    end
+
+    User_Message -- "UTF-8 Encode & Add Random Padding (`_add_random_padding`)" --> Padded_Message
+    Padded_Message -- "Double Ratchet Encryption (`ratchet.encrypt`)" --> DR_Message
+    DR_Message -- "TLS Encryption (SSL Socket)" --> TLS_Packet
+    TLS_Packet -- "TCP/IP Framing (OS Network Stack)" --> TCPIP
+
+    classDef layer_app fill:#e6ffe6,stroke:#333,stroke-width:2px;
+    classDef layer_dr fill:#e6f7ff,stroke:#333,stroke-width:2px;
+    classDef layer_tls fill:#ffe6e6,stroke:#333,stroke-width:2px;
+    classDef layer_net fill:#fff0e6,stroke:#333,stroke-width:2px;
+
+    class User_Message,Padded_Message layer_app;
+    class DR_Message layer_dr;
+    class TLS_Packet layer_tls;
+    class TCPIP layer_net;
+
+    subgraph "Handshake Protocols (Establish & Secure these Layers)"
+      direction TB
+      CertEx["Certificate Exchange (`ca_services.py`)\\n(Secures TLS identity validation)"]
+      HybridKEX["Hybrid X3DH+PQ Key Exchange (`hybrid_kex.py`)\\n(Establishes root key for Double Ratchet)"]
+      DRSetup["Double Ratchet Initialization (`double_ratchet.py`)\\n(Sets up initial DR state with KEX root key)"]
+      TLSHandshake["TLS 1.3 Handshake (`tls_channel_manager.py`)\\n(Establishes secure transport channel using certificates)"]
+    end
+    
+    CertEx -.-> TLSHandshake
+    HybridKEX -.-> DRSetup
+    DRSetup -.-> DR_Message
+    TLSHandshake -.-> TLS_Packet
+```
+This layered approach ensures that even if one layer is compromised, others remain to protect the communication.
+
 ## Advanced Protection Features
 
 ### 📊 Traffic Analysis Resistance
 
 Sophisticated techniques to prevent message length analysis:
 
-- **Variable Message Padding**: Random padding (1-30 bytes) added to each message
-- **Constant-Size Messages**: All messages padded to similar size (~1350-1420 bytes)
+- **Random Byte-Level Padding**: Each message is padded with a random number of bytes (0-15 bytes, plus a 1-byte length indicator) before encryption by `secure_p2p.py`. This further randomizes the final ciphertext length, making it harder to infer original message length from encrypted traffic.
+- **Constant-Size Messages**: Due to the overhead of Double Ratchet headers (including public keys for ratchet steps) and large FALCON signatures (approx. 1270 bytes for message authentication), most encrypted messages naturally fall into a similar size range (e.g., ~1350-1420 bytes). This makes it difficult to distinguish between short messages, heartbeats, or even moderately sized user messages based purely on network packet size.
 - **FALCON Signature Padding**: Large signatures (~1270 bytes) provide baseline size
 - **Indistinguishable Messages**: Heartbeats, short messages, and long messages all appear identical on the network
 
@@ -207,6 +257,7 @@ Advanced improvements to the Signal Protocol's Double Ratchet:
   - **Message Key Derivation**: Message keys are derived from chain keys using HMAC-SHA256 (e.g., `HMAC(chain_key, KDF_INFO_MSG, ...)`), with distinct HMAC keys (`KDF_INFO_MSG` vs. `KDF_INFO_CHAIN`) for message keys and next chain keys, ensuring their cryptographic independence without relying on simple counter concatenation for this step.
   - **Resilience to Input Variations**: The primary KDF (`_kdf` method) uses HKDF-SHA512. It generates a salt from its `key_material` input (typically a root key) and takes its main Input Keying Material (IKM) from the outputs of DH exchanges and KEM decapsulations. This standard extract-then-expand construction of HKDF provides strong resilience against variations or potential "unusual alignments" in IKM, assuming the underlying cryptographic primitives (X25519, ML-KEM, SHA-512) are secure.
 - **Memory-Hardened Storage**: Protected memory for sensitive ratchet state.
+- **Replay Attack Prevention**: Implements a replay cache (`processed_message_ids` using a `collections.deque`) to store a configurable number of recently received message IDs. If a message ID is replayed, decryption is aborted, and a `SecurityError` is raised. This prevents an attacker from replaying captured ciphertexts to cause duplicate message processing or reveal repeated plaintexts.
 
 ### 🧩 Anti-Forensic Design
 
@@ -225,6 +276,7 @@ Built-in security monitoring capabilities:
 - **Canary Values**: Memory integrity checks to detect tampering
 - **Heartbeat Encryption**: Encrypted keepalive messages to maintain connection security
 - **Anomaly Detection**: Identifies potential security issues during operation
+- **Detailed Decryption Logging**: Logs the size of incoming ciphertext before decryption, aiding in monitoring and diagnostics.
 
 ### 🆔 Ephemeral Identities
 
@@ -240,9 +292,9 @@ Enhances privacy and thwarts long-term tracking:
 The application's functionality is distributed across several Python modules:
 
 ### 1. `p2p_core.py` - Base P2P Networking
-- **Functionality**: Handles TCP/IPv6 networking, STUN for NAT traversal
-- **Security Feature**: Message framing with length obfuscation
-- **Network Stage**: Connection discovery and establishment
+- **Functionality**: Handles basic TCP/IPv6 networking, STUN for NAT traversal, and message framing (prefixing messages with their length).
+- **Security Feature**: Provides the foundational socket communication over which secure channels are built. Does not implement encryption itself but is essential for transport.
+- **Network Stage**: Connection discovery and raw data transport.
 
 ### 2. `platform_hsm_interface.py` - Hardware Security
 - **Functionality**: Unified hardware security interface
@@ -322,8 +374,8 @@ The application's functionality is distributed across several Python modules:
 1. **Clone the repository**
 
 ```bash
-git clone https://github.com/Destroyer-official/Destroyer_P2P.git
-cd Destroyer_P2P
+git clone https://github.com/yourusername/secure-p2p-chat.git
+cd secure-p2p-chat
 ```
 
 2. **Set up a virtual environment**

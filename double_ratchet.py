@@ -37,6 +37,7 @@ import sys
 import subprocess
 from typing import Dict, Tuple, Any, Optional, List, Union, Callable
 from dataclasses import dataclass
+import collections # Added import
 
 # Import the new cross-platform hardware security module
 import platform_hsm_interface as cphs
@@ -1110,6 +1111,7 @@ class DoubleRatchet:
     ROOT_KEY_SIZE = 32             # Root key size in bytes
     KEY_ROTATION_MESSAGES = 30     # Rotate keys after this many messages
     KEY_ROTATION_TIME = 3600       # Rotate keys after this many seconds (1 hour)
+    MAX_REPLAY_CACHE_SIZE = 200    # Max number of message IDs to store for replay detection
     
     MLKEM1024_CIPHERTEXT_SIZE = 1568 # Expected ciphertext size for ML-KEM-1024
 
@@ -1148,7 +1150,8 @@ class DoubleRatchet:
         threshold_security: bool = False,  # Enable key compartmentalization
         hardware_binding: bool = False,    # Enable hardware binding
         side_channel_protection: bool = True, # Enable side-channel protections
-        anomaly_detection: bool = True     # Enable anomaly detection
+        anomaly_detection: bool = True,     # Enable anomaly detection
+        max_replay_cache_size: int = MAX_REPLAY_CACHE_SIZE # Added parameter
     ):
         """
         Initialize a new Double Ratchet session.
@@ -1163,6 +1166,7 @@ class DoubleRatchet:
             hardware_binding: Enable hardware binding when available
             side_channel_protection: Enable side-channel attack protections
             anomaly_detection: Enable behavioral anomaly detection
+            max_replay_cache_size: Maximum number of message IDs to store for replay detection
         """
         # Verify the root key's security properties
         verify_key_material(root_key, expected_length=self.ROOT_KEY_SIZE, 
@@ -1181,6 +1185,9 @@ class DoubleRatchet:
         self.side_channel_protection = side_channel_protection
         self.anomaly_detection = anomaly_detection
         self.secure_memory_protection = security_level == "PARANOID"
+        
+        # Initialize replay cache
+        self.processed_message_ids = collections.deque(maxlen=max_replay_cache_size)
         
         # Load security configuration based on selected security level
         security_config = DoubleRatchetDefaults.get_defaults(security_level)
@@ -1779,6 +1786,16 @@ class DoubleRatchet:
             header_bytes = message[:MessageHeader.HEADER_SIZE]
             header = MessageHeader.decode(header_bytes)
             
+            # --- REPLAY DETECTION ---
+            # Check if this unique message ID has already been processed
+            if header.message_id in self.processed_message_ids:
+                logger.warning(
+                    f"SECURITY ALERT: Replay detected for message ID {format_binary(header.message_id)}. "
+                    f"Ratchet: {format_binary(self._get_public_key_fingerprint(header.public_key))}, MsgNum: {header.message_number}"
+                )
+                raise SecurityError("Replayed message ID detected. Potential replay attack.")
+            # --- END REPLAY DETECTION ---
+            
             # Extract signature length and signature
             signature_length_bytes = message[MessageHeader.HEADER_SIZE:MessageHeader.HEADER_SIZE+2]
             signature_length = int.from_bytes(signature_length_bytes, byteorder='big')
@@ -1823,6 +1840,9 @@ class DoubleRatchet:
             # 5. Decrypt the message
             logger.debug(f"Decrypting with message key #{header.message_number}")
             plaintext = self._decrypt_with_cipher(nonce, ciphertext, auth_data, message_key)
+            
+            # Add successfully processed message ID to replay cache
+            self.processed_message_ids.append(header.message_id)
             
             return plaintext
             
@@ -2679,5 +2699,4 @@ if __name__ == "__main__":
     example_double_ratchet(use_pq=True)
     
     # Uncomment to run with classical mode only
-    # example_double_ratchet(use_pq=False) 
-    # example_double_ratchet(use_pq=False) 
+    example_double_ratchet(use_pq=False) 
