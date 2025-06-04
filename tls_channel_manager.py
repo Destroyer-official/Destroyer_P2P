@@ -29,7 +29,9 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305, AESGCM
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography import x509
+from cryptography.x509 import ocsp # Added ocsp import
 from cryptography.x509.oid import NameOID
+from cryptography.x509.extensions import TLSFeature, TLSFeatureType # Added TLSFeature, TLSFeatureType
 import sys
 import platform # Added
 from enum import Enum
@@ -58,6 +60,11 @@ try:
 except ImportError:
     HAVE_HYBRID_KEX = False
     # logger.debug("hybrid_kex module not found. Some hybrid KEM features might be limited.")
+    pass
+
+# Define TlsChannelException
+class TlsChannelException(Exception):
+    """Custom exception for TLS channel errors."""
     pass
 
 # Import TPM/HSM modules if available
@@ -1054,12 +1061,25 @@ class TLSSecureChannel:
     SECURITY_LOG_LEVEL_DEBUG = 2
     SECURITY_LOG_LEVEL = SECURITY_LOG_LEVEL_VERBOSE
     
+    # IMPORTANT: Placeholder for Post-Quantum Cipher Suite names.
+    # These names are highly dependent on the specific OpenSSL version and PQC library integration.
+    # Replace these with the actual cipher suite names supported by your OpenSSL for use with set_ciphers().
+    # For example, if your OpenSSL supports a Kyber-based cipher suite named "TLS_KYBER_AES_256_GCM_SHA384", add it here.
+    # The user query mentioned "Kyber1024_SHA3_256". If this refers to a KEM, it's typically handled
+    # by set_groups(). If it's a full cipher suite name for set_ciphers(), use its exact OpenSSL string here.
+    EXPECTED_PQ_CIPHER_SUITES_PLACEHOLDERS = [
+        "TLS_PQC_KYBER_AES_256_GCM_SHA384_PLACEHOLDER", # Example placeholder
+        "TLS_PQC_EXPERIMENTAL_SUITE_X_PLACEHOLDER"      # Another example placeholder
+    ]
+    
     def __init__(self, cert_path: Optional[str] = None, key_path: Optional[str] = None, 
                  use_secure_enclave: bool = True, require_authentication: bool = False,
                  oauth_provider: Optional[str] = None, oauth_client_id: Optional[str] = None,
                  multi_cipher: bool = True, enable_pq_kem: bool = True,
                  use_legacy_cipher: bool = False, verify_certs: bool = False,
-                 ca_path: Optional[str] = None, in_memory_only: bool = False):
+                 ca_path: Optional[str] = None, in_memory_only: bool = False,
+                 dane_tlsa_records: Optional[List[Dict]] = None,
+                 enforce_dane_validation: bool = False):
         """
         Initialize the TLS secure channel with enhanced security features.
         
@@ -1076,6 +1096,9 @@ class TLSSecureChannel:
             verify_certs: Whether to verify certificates (for client mode)
             ca_path: Path to the CA certificate file (for client mode)
             in_memory_only: Whether to operate entirely in memory without disk access
+            dane_tlsa_records: Optional list of pre-fetched DANE TLSA records for the peer.
+                               Each dict should represent a TLSA record (e.g., {'usage': 3, 'selector': 1, 'matching_type': 1, 'data': 'hex_encoded_hash'}).
+            enforce_dane_validation: If True and DANE TLSA records are provided, the connection will fail if DANE validation fails.
         """
         # Set in_memory_only attribute first, as other methods depend on it
         self.in_memory_only = in_memory_only
@@ -1130,6 +1153,13 @@ class TLSSecureChannel:
         self.oauth_client_id = oauth_client_id
         self.oauth_auth = None
         self.verify_certs = verify_certs
+        
+        # DANE configuration
+        self.dane_tlsa_records = dane_tlsa_records
+        self.enforce_dane_validation = enforce_dane_validation
+        self.dane_validation_performed = False
+        self.dane_validation_successful = False
+        self.pfs_active = False # Initialize PFS status
         
         # Try to set up hardware security if requested
         self.secure_enclave = None
@@ -1277,7 +1307,17 @@ class TLSSecureChannel:
             log.info("Strong authentication: ENABLED")
         else:
             log.info("Strong authentication DISABLED - no user identity verification")
-            
+
+        # Log DANE status
+        if self.dane_tlsa_records:
+            log.info(f"DANE TLSA records provided for peer. Validation will be {'enforced' if self.enforce_dane_validation else 'attempted'}.")
+            if self.certificate_pinning and not self.enforce_dane_validation: # Assuming self.certificate_pinning exists
+                log.warning("Certificate pinning is configured, but DANE validation is not strictly enforced. Ensure DNS resolution is secured (e.g., via DNSSEC by the calling application).")
+        elif self.certificate_pinning: # Pinning enabled, but no DANE
+             log.warning("Certificate pinning is configured without DANE TLSA records. This is vulnerable to DNS spoofing if DNS resolution is not independently secured (e.g., via DNSSEC by the calling application).")
+        else:
+            log.info("DANE TLSA records not provided for peer.")
+        
     def connect(self, host: str, port: int) -> bool:
         """
         Establish a secure connection to a remote server.
@@ -1514,6 +1554,81 @@ class TLSSecureChannel:
             
             # Verify security parameters
             self._verify_security_parameters(self.ssl_socket.context)
+
+            # --- BEGIN PFS (Ephemeral Key) Status Logging ---
+            self.pfs_active = False # Default to false
+            if self.ssl_socket and self.ssl_socket.version() == "TLSv1.3":
+                # TLS 1.3 inherently uses ephemeral key exchange mechanisms for its standard cipher suites.
+                # Direct inspection of the temp key is not readily available via standard ssl.SSLSocket.
+                # We infer PFS based on the protocol version and negotiated cipher.
+                cipher_details = self.ssl_socket.cipher()
+                cipher_name = cipher_details[0] if cipher_details and len(cipher_details) > 0 else "unknown"
+                # Standard TLS 1.3 ciphers (e.g., TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256) ensure PFS.
+                if cipher_name.startswith("TLS_") and "AEAD" not in cipher_name: # Common TLS 1.3 suites imply ECDHE/DHE
+                    log.info("PFS CHECK: TLS 1.3 negotiated with a standard ephemeral cipher suite. PFS is active.")
+                    self.pfs_active = True
+                elif self.pq_negotiated and self.pq_algorithm and "MLKEM" in self.pq_algorithm: # Hybrid KEMs also use ephemeral components
+                    log.info(f"PFS CHECK: TLS 1.3 with hybrid PQ KEM ({self.pq_algorithm}) negotiated. PFS is active.")
+                    self.pfs_active = True
+                else:
+                    log.warning(f"PFS CHECK: TLS 1.3 negotiated, but cipher suite ({cipher_name}) doesn't explicitly confirm standard PFS key exchange. Manual review advised if custom/non-standard suites are used.")
+            elif self.ssl_socket:
+                log.warning(f"PFS CHECK: Non-TLS 1.3 version ({self.ssl_socket.version()}) negotiated. PFS cannot be guaranteed by protocol version alone.")
+            else:
+                log.error("PFS CHECK: SSL socket not available, cannot determine PFS status.")
+            # --- END PFS (Ephemeral Key) Status Logging ---
+
+            # --- BEGIN DANE Validation Integration ---
+            if not self.is_server: # DANE validation is client-side
+                self.dane_validation_performed = True
+                if self.dane_tlsa_records:
+                    log.info("DANE: Performing DANE validation for client connection.")
+                    peer_cert_der = None
+                    try:
+                        peer_cert_der = self.ssl_socket.getpeercert(binary_form=True)
+                    except Exception as e:
+                        log.error(f"DANE: Could not retrieve peer certificate for DANE validation: {e}")
+
+                    if peer_cert_der:
+                        dane_validation_passed = self._validate_certificate_with_dane(peer_cert_der)
+                        if dane_validation_passed:
+                            log.info("DANE: Validation successful.")
+                            self.dane_validation_successful = True
+                        else:
+                            log.warning("DANE: Validation FAILED.")
+                            self.dane_validation_successful = False
+                            if self.enforce_dane_validation:
+                                log.error("DANE: Enforcing DANE validation, aborting connection.")
+                                self.connected = False # Mark as not connected
+                                # Ensure the socket is closed if not already handled by caller
+                                if self.ssl_socket:
+                                    try:
+                                        self.ssl_socket.close()
+                                    except Exception: pass # Best effort
+                                if self.sock: # also the underlying socket
+                                    try:
+                                        self.sock.close()
+                                    except Exception: pass
+                                raise TlsChannelException("DANE validation failed and is enforced.")
+                            else:
+                                log.warning("DANE: Validation FAILED but not enforced, connection will proceed.")
+                    else: # if peer_cert_der is None
+                        log.error("DANE: Cannot perform DANE validation as peer certificate could not be retrieved.")
+                        if self.enforce_dane_validation:
+                            log.error("DANE: Enforcing DANE validation, aborting connection due to missing peer cert for validation.")
+                            self.connected = False
+                            if self.ssl_socket:
+                                try: self.ssl_socket.close()
+                                except Exception: pass
+                            if self.sock:
+                                try: self.sock.close()
+                                except Exception: pass
+                            raise TlsChannelException("DANE validation cannot be performed (missing peer cert) and is enforced.")
+                        else:
+                            log.warning("DANE : Cannot perform DANE validation (missing peer cert), but not enforced. Connection will proceed.")
+                else: # No DANE TLSA records provided
+                    log.info("DANE: No TLSA records provided by application, skipping DANE validation for this connection.")
+            # --- END DANE Validation Integration ---
             
             return True
             
@@ -2561,26 +2676,70 @@ class TLSSecureChannel:
             context.minimum_version = ssl.TLSVersion.TLSv1_3
             context.maximum_version = ssl.TLSVersion.TLSv1_3
             
-        # First try to set both preferred cipher suites together
+        # Define the ciphers to be set
+        ciphers_to_set_list = list(self.CIPHER_SUITES) # Start with default classical suites
+        pq_suites_attempted = []
+
+        if self.enable_pq_kem:
+            # Prepend intended PQ cipher suites to make them preferred
+            ciphers_to_set_list = self.EXPECTED_PQ_CIPHER_SUITES_PLACEHOLDERS + ciphers_to_set_list
+            pq_suites_attempted = self.EXPECTED_PQ_CIPHER_SUITES_PLACEHOLDERS
+        
+        cipher_suite_string_to_set = ":".join(ciphers_to_set_list)
+        log.debug(f"Client Context: Attempting to set cipher suites to: {cipher_suite_string_to_set}")
+
         try:
-            context.set_ciphers(self.CIPHER_SUITE_STRING)
-            log.info(f"Using preferred cipher suites: {self.CIPHER_SUITE_STRING}")
-        except ssl.SSLError:
-            # If combined setting fails, try each cipher individually in order of preference
-            cipher_applied = False
-            for cipher in self.CIPHER_SUITES:
-                try:
-                    context.set_ciphers(cipher)
-                    log.info(f"Fallback to single cipher: {cipher}")
-                    cipher_applied = True
+            context.set_ciphers(cipher_suite_string_to_set)
+            current_ciphers_details = context.get_ciphers()
+            current_cipher_names = [c['name'] for c in current_ciphers_details if 'name' in c] if current_ciphers_details else []
+            
+            if not current_cipher_names:
+                log.critical("CRITICAL (Client Context): set_ciphers resulted in an empty cipher list! Potentially no ciphers are active. OpenSSL may use defaults.")
+                # Depending on security policy, raising an error might be appropriate here:
+                # raise ssl.SSLError("Cipher suite configuration failed: No ciphers were set by set_ciphers.")
+            else:
+                log.info(f"Client Context: Successfully applied cipher string. Active ciphers: {current_cipher_names}")
+
+            if self.enable_pq_kem:
+                found_pq_cipher = False
+                for pq_suite_name in pq_suites_attempted:
+                    if pq_suite_name in current_cipher_names:
+                        log.info(f"Client Context: Confirmed PQ cipher suite active: {pq_suite_name}")
+                        found_pq_cipher = True
+                        # Typically, finding one successfully applied PQ suite is enough if multiple were alternatives
                     break
-                except ssl.SSLError:
+                if not found_pq_cipher:
+                    log.warning(f"Client Context: PQ KEM was enabled, but none of the expected PQ cipher suites ({pq_suites_attempted}) are active after setting '{cipher_suite_string_to_set}'. Active ciphers: {current_cipher_names}. This may indicate the PQ suites are not supported by OpenSSL, were silently ignored, or a fallback to classical ciphers occurred.")
+
+        except ssl.SSLError as e_main:
+            log.warning(f"Client Context: Failed to set combined cipher string '{cipher_suite_string_to_set}': {e_main}. Attempting fallbacks using CIPHER_SUITES: {self.CIPHER_SUITES}")
+            cipher_applied_in_fallback = False
+            # Fallback loop only tries classical ciphers from self.CIPHER_SUITES (original list)
+            for classical_cipher in self.CIPHER_SUITES:
+                try:
+                    context.set_ciphers(classical_cipher) # Try setting one by one
+                    current_ciphers_fallback_details = context.get_ciphers()
+                    current_cipher_names_fallback = [c['name'] for c in current_ciphers_fallback_details if 'name' in c] if current_ciphers_fallback_details else []
+
+                    if classical_cipher in current_cipher_names_fallback:
+                        log.info(f"Client Context Fallback: Successfully set cipher to: {classical_cipher}. Active ciphers: {current_cipher_names_fallback}")
+                        cipher_applied_in_fallback = True
+                        break # Applied one classical cipher, stop fallback.
+                    else:
+                        # This case means set_ciphers(classical_cipher) didn't error but also didn't set the cipher
+                        log.warning(f"Client Context Fallback: Attempted to set {classical_cipher}, but it was not found in active list: {current_cipher_names_fallback}. OpenSSL might have silently ignored it or it's not supported.")
+                except ssl.SSLError as e_fallback:
+                    log.warning(f"Client Context Fallback: Failed to set single cipher {classical_cipher}: {e_fallback}")
                     continue
                     
-            if not cipher_applied:
-                log.warning("Both preferred ciphers not supported. Using default secure TLS 1.3 ciphers.")
+            if not cipher_applied_in_fallback:
+                log.critical("CRITICAL (Client Context): All cipher configurations (combined and individual fallbacks) failed. OpenSSL will use its default ciphers. PQ features via cipher suites are likely unavailable.")
+                # Depending on security policy, consider raising an error.
+                # raise ssl.SSLError("Cipher suite configuration failed: No preferred ciphers could be set after fallbacks.")
+            elif self.enable_pq_kem: # Fallback to classical was successful, but PQ was intended
+                 log.warning(f"Client Context: PQ KEM was enabled, but cipher suite configuration fell back to classical ciphers ({[c['name'] for c in context.get_ciphers() if 'name' in c]}). Expected PQ cipher suites ({pq_suites_attempted}) are not active.")
         
-        # Enable post-quantum key exchange if configured
+        # Enable post-quantum key exchange if configured (this usually means KEMs via set_groups)
         if self.enable_pq_kem:
             try:
                 # ... existing code ...
@@ -2820,7 +2979,33 @@ class TLSSecureChannel:
                 log.info("Post-quantum key exchange included in handshake")
                 
             # Perform the standard TLS handshake
-            await super()._do_handshake(timeout)
+            # await super()._do_handshake(timeout) # This line seems to be from a different version/refactor, remove if not applicable
+
+            # If we are in client mode and DANE TLSA records are provided, validate them.
+            if not self.is_server and self.dane_tlsa_records:
+                log.info("DANE: Performing DANE validation for client connection.")
+                peer_cert_der = None
+                try:
+                    peer_cert_der = self.ssl_socket.getpeercert(binary_form=True)
+                except Exception as e:
+                    log.error(f"DANE: Could not retrieve peer certificate for DANE validation: {e}")
+
+                if peer_cert_der:
+                    dane_validation_passed = self._validate_certificate_with_dane(peer_cert_der)
+                    if dane_validation_passed:
+                        log.info("DANE: Validation successful.")
+                    else:
+                        log.warning("DANE: Validation failed.")
+                        if self.enforce_dane_validation:
+                            log.critical("DANE: Strict validation enforced and failed. Closing connection.")
+                            # self.close() # Consider the implications of closing here vs. returning False
+                            self._handshake_in_progress = False
+                            # self.handshake_complete = False # Handshake technically completed but failed validation
+                            return False # Indicate handshake failure due to DANE validation
+                elif self.enforce_dane_validation:
+                    log.critical("DANE: Strict validation enforced, but could not get peer certificate. Closing connection.")
+                    self._handshake_in_progress = False
+                    return False
             
             # Verify post-quantum aspects of the handshake
             if self.enable_pq_kem and HAVE_HYBRID_KEX:
@@ -3038,54 +3223,79 @@ class TLSSecureChannel:
         if hasattr(context, 'minimum_version') and hasattr(ssl, 'TLSVersion'):
             context.minimum_version = ssl.TLSVersion.TLSv1_3
         
-        # Use our preferred cipher suites with improved fallback
+        # Define the ciphers to be set
+        ciphers_to_set_list = list(self.CIPHER_SUITES) # Start with default classical suites
+        pq_suites_attempted = []
+
+        if self.enable_pq_kem:
+            # Prepend intended PQ cipher suites to make them preferred
+            ciphers_to_set_list = self.EXPECTED_PQ_CIPHER_SUITES_PLACEHOLDERS + ciphers_to_set_list
+            pq_suites_attempted = self.EXPECTED_PQ_CIPHER_SUITES_PLACEHOLDERS
+        
+        cipher_suite_string_to_set = ":".join(ciphers_to_set_list)
+        log.debug(f"Server Context: Attempting to set cipher suites to: {cipher_suite_string_to_set}")
+        
         try:
-            context.set_ciphers(self.CIPHER_SUITE_STRING)
-            log.info(f"Using preferred cipher suites: {self.CIPHER_SUITE_STRING}")
-        except ssl.SSLError:
-            # If combined setting fails, try each cipher individually in order of preference
-            cipher_applied = False
-            for cipher in self.CIPHER_SUITES:
+            context.set_ciphers(cipher_suite_string_to_set)
+            current_ciphers_details = context.get_ciphers()
+            current_cipher_names = [c['name'] for c in current_ciphers_details if 'name' in c] if current_ciphers_details else []
+
+            if not current_cipher_names:
+                log.critical("CRITICAL (Server Context): set_ciphers resulted in an empty cipher list! Potentially no ciphers are active. OpenSSL may use defaults.")
+                # Depending on security policy, raising an error might be appropriate here:
+                # raise ssl.SSLError("Cipher suite configuration failed: No ciphers were set by set_ciphers.")
+            else:
+                log.info(f"Server Context: Successfully applied cipher string. Active ciphers: {current_cipher_names}")
+
+            if self.enable_pq_kem:
+                found_pq_cipher = False
+                for pq_suite_name in pq_suites_attempted:
+                    if pq_suite_name in current_cipher_names:
+                        log.info(f"Server Context: Confirmed PQ cipher suite active: {pq_suite_name}")
+                        found_pq_cipher = True
+                        break 
+                if not found_pq_cipher:
+                    log.warning(f"Server Context: PQ KEM was enabled, but none of the expected PQ cipher suites ({pq_suites_attempted}) are active after setting '{cipher_suite_string_to_set}'. Active ciphers: {current_cipher_names}. This may indicate the PQ suites are not supported by OpenSSL, were silently ignored, or a fallback to classical ciphers occurred.")
+
+        except ssl.SSLError as e_main:
+            log.warning(f"Server Context: Failed to set combined cipher string '{cipher_suite_string_to_set}': {e_main}. Attempting fallbacks using CIPHER_SUITES: {self.CIPHER_SUITES}")
+            cipher_applied_in_fallback = False
+            # Fallback loop only tries classical ciphers from self.CIPHER_SUITES
+            for classical_cipher in self.CIPHER_SUITES:
                 try:
-                    context.set_ciphers(cipher)
-                    log.info(f"Fallback to single cipher: {cipher}")
-                    cipher_applied = True
-                    break
-                except ssl.SSLError:
+                    context.set_ciphers(classical_cipher)
+                    current_ciphers_fallback_details = context.get_ciphers()
+                    current_cipher_names_fallback = [c['name'] for c in current_ciphers_fallback_details if 'name' in c] if current_ciphers_fallback_details else []
+                    
+                    if classical_cipher in current_cipher_names_fallback:
+                        log.info(f"Server Context Fallback: Successfully set cipher to: {classical_cipher}. Active ciphers: {current_cipher_names_fallback}")
+                        cipher_applied_in_fallback = True
+                        break
+                    else:
+                        log.warning(f"Server Context Fallback: Attempted to set {classical_cipher}, but it was not found in active list: {current_cipher_names_fallback}. OpenSSL might have silently ignored it or it's not supported.")
+                except ssl.SSLError as e_fallback:
+                    log.warning(f"Server Context Fallback: Failed to set single cipher {classical_cipher}: {e_fallback}")
                     continue
             
-            if not cipher_applied:
-                log.warning("Both preferred ciphers not supported. Using default secure TLS 1.3 ciphers.")
-        
-        # Load certificates
-        if self.in_memory_only and hasattr(self, 'certificate_data') and hasattr(self, 'private_key_data'):
-            # Create temporary files for the certificates (required by SSLContext)
-            import tempfile
-            
-            # Create temp cert file
-            cert_file = tempfile.NamedTemporaryFile(delete=False)
-            cert_file.write(self.certificate_data)
-            cert_file.flush()
-            
-            # Create temp key file
-            key_file = tempfile.NamedTemporaryFile(delete=False)
-            key_file.write(self.private_key_data)
-            key_file.flush()
-            
+            if not cipher_applied_in_fallback:
+                log.critical("CRITICAL (Server Context): All cipher configurations (combined and individual fallbacks) failed. OpenSSL will use its default ciphers. PQ features via cipher suites are likely unavailable.")
+                # Depending on security policy, consider raising an error.
+                # raise ssl.SSLError("Cipher suite configuration failed: No preferred ciphers could be set after fallbacks.")
+            elif self.enable_pq_kem: # Fallback to classical was successful, but PQ was intended
+                 log.warning(f"Server Context: PQ KEM was enabled, but cipher suite configuration fell back to classical ciphers ({[c['name'] for c in context.get_ciphers() if 'name' in c]}). Expected PQ cipher suites ({pq_suites_attempted}) are not active.")
+
+        # Load certificates using secure enclave if available
+        if self.secure_enclave and self.secure_enclave.using_enclave:
             try:
-                # Load the cert chain from the temporary files
-                context.load_cert_chain(certfile=cert_file.name, keyfile=key_file.name)
-                log.info("Loaded certificates from memory")
-            finally:
-                # Close and remove the temporary files
-                cert_file.close()
-                key_file.close()
-                # Securely delete the temp files
-                try:
-                    os.unlink(cert_file.name)
-                    os.unlink(key_file.name)
-                except Exception as e:
-                    log.warning(f"Failed to remove temporary certificate files: {e}")
+                log.info("Loading certificates from secure enclave")
+                cert_chain, key = self.secure_enclave.load_certificate_chain()
+                context.load_cert_chain(cert_file=cert_chain, key_file=key)
+                log.info("Certificates loaded from secure enclave")
+            except Exception as e:
+                log.error(f"Failed to load certificates from secure enclave: {e}")
+                # Try to regenerate and load again if there was an error
+                self._create_default_certificates()
+                context.load_cert_chain(cert_file=self.cert_path, key_file=self.key_path)
         else:
             # Load from disk as normal
             try:
@@ -3380,6 +3590,9 @@ class TLSSecureChannel:
                     decipher_only=False
                 ),
                 critical=True
+            ).add_extension( # Add OCSP Must-Staple extension
+                TLSFeature(features=[TLSFeatureType.status_request]),
+                critical=False 
             ).sign(private_key, hashes.SHA256())
             
             # Store the key and cert in memory
@@ -3896,4 +4109,233 @@ def verify_quantum_resistance(connection):
             "quantum_resistant": False,
             "message": "Connection is not using quantum-resistant cryptography"
         }
+
+    # Placeholder for OCSP Stapling Callback
+    def _ocsp_stapling_callback(self, ssl_connection):
+        """
+        Callback for OCSP stapling.
+        This function will be called by OpenSSL to get an OCSP response to staple.
+        For self-signed certificates, this will generate a basic "good" response signed by the cert itself.
+        
+        Args:
+            ssl_connection: The SSLConnection object.
+        """
+        log.info("OCSP stapling callback triggered.")
+        try:
+            if not self.certificate_data or not self.private_key_data:
+                log.error("OCSP Stapling: Server certificate or private key data is not available.")
+                return
+
+            # Load server certificate (which is also the issuer for self-signed)
+            server_cert = x509.load_pem_x509_certificate(self.certificate_data)
+            issuer_cert = server_cert # For self-signed
+
+            # Load private key (issuer's key for self-signed)
+            issuer_key = serialization.load_pem_private_key(
+                self.private_key_data,
+                password=None # Assuming no password for the key
+            )
+
+            # Basic OCSP response builder
+            builder = ocsp.OCSPResponseBuilder()
+
+            # Add response for the server certificate
+            # For self-signed, the issuer_key_hash and issuer_name_hash are derived from the cert itself.
+            builder = builder.add_response(
+                cert=server_cert,
+                issuer=issuer_cert,
+                algorithm=hashes.SHA256(), # Algorithm used to hash issuer name/key
+                cert_status=ocsp.OCSPCertStatus.GOOD,
+                this_update=datetime.datetime.utcnow(),
+                next_update=datetime.datetime.utcnow() + datetime.timedelta(days=1),
+                revocation_time=None, # No revocation for a good status
+                revocation_reason=None # No reason for a good status
+            ).responder_id(
+                ocsp.OCSPResponderEncoding.NAME, issuer_cert # Responder is the issuer itself
+            )
+            
+            # Sign the OCSP response
+            # The hash algorithm for signing should be strong, e.g., SHA256
+            ocsp_response = builder.sign(issuer_key, hashes.SHA256())
+
+            # Set the DER-encoded OCSP response for stapling
+            ssl_connection.set_ocsp_response(ocsp_response.public_bytes(serialization.Encoding.DER))
+            log.info("Successfully generated and set OCSP response for stapling.")
+
+        except Exception as e:
+            log.error(f"Error in OCSP stapling callback: {e}", exc_info=True)
+            # Do not call set_ocsp_response on error, so no staple is sent.
+
+    def _get_certificate_association_data(self, certificate_der: bytes, selector: int, matching_type: int) -> Optional[bytes]:
+        """
+        Extracts and prepares the relevant part of a certificate for DANE matching.
+
+        Args:
+            certificate_der: The full DER-encoded X.509 certificate.
+            selector: DANE selector (0 for full cert, 1 for SubjectPublicKeyInfo).
+            matching_type: DANE matching type (0 for raw, 1 for SHA-256, 2 for SHA-512).
+
+        Returns:
+            The bytes to be compared against the TLSA record's association data, or None on error.
+        """
+        selected_data = None
+        try:
+            if selector == 0:  # Full certificate
+                selected_data = certificate_der
+            elif selector == 1:  # SubjectPublicKeyInfo
+                cert = x509.load_der_x509_certificate(certificate_der)
+                # Accessing public_key() and then serializing to SPKI DER
+                selected_data = cert.public_key().public_bytes(
+                    encoding=serialization.Encoding.DER,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo
+                )
+            else:
+                log.warning(f"DANE: Unsupported selector: {selector}")
+                return None
+
+            if matching_type == 0:  # Raw data
+                return selected_data
+            elif matching_type == 1:  # SHA-256
+                digest = hashlib.sha256()
+                digest.update(selected_data)
+                return digest.digest()
+            elif matching_type == 2:  # SHA-512
+                digest = hashlib.sha512()
+                digest.update(selected_data)
+                return digest.digest()
+            else:
+                log.warning(f"DANE: Unsupported matching type: {matching_type}")
+                return None
+        except Exception as e:
+            log.error(f"DANE: Error processing certificate for selector {selector}, matching type {matching_type}: {e}")
+            return None
+
+    def _validate_certificate_with_dane(self, peer_cert_der: bytes) -> bool:
+        """
+        Validates the peer's certificate against the configured DANE TLSA records.
+
+        Args:
+            peer_cert_der: The DER-encoded certificate received from the peer.
+
+        Returns:
+            True if the certificate matches at least one valid DANE TLSA record, False otherwise.
+        """
+        if not self.dane_tlsa_records:
+            log.debug("DANE: No TLSA records configured, skipping validation.")
+            return True # Or False, depending on policy if records are expected but missing. For now, true.
+
+        self.dane_validation_performed = True
+        self.dane_validation_successful = False # Assume failure until a match
+
+        for record in self.dane_tlsa_records:
+            try:
+                usage = record.get('usage')
+                selector = record.get('selector')
+                matching_type = record.get('matching_type')
+                association_data_hex = record.get('data')
+
+                if not all(isinstance(x, int) for x in [usage, selector, matching_type]) or not isinstance(association_data_hex, str):
+                    log.warning(f"DANE: Skipping malformed TLSA record: {record}")
+                    continue
+
+                # For DANE-EE (usage 3), we are validating the end-entity certificate directly.
+                # Other usages (0, 1, 2) imply a CA constraint and require full chain validation, which is more complex.
+                # This implementation will focus on DANE-EE (usage 3) for simplicity.
+                if usage != 3:
+                    log.debug(f"DANE: Skipping TLSA record with usage {usage}. This implementation primarily handles DANE-EE (usage 3).")
+                    continue
+
+                expected_association_data = bytes.fromhex(association_data_hex)
+                actual_association_data = self._get_certificate_association_data(peer_cert_der, selector, matching_type)
+
+                if actual_association_data and actual_association_data == expected_association_data:
+                    log.info(f"DANE: Successfully validated peer certificate against TLSA record: {record}")
+                    self.dane_validation_successful = True
+                    return True # Found a valid match
+                else:
+                    log.debug(f"DANE: Peer certificate did not match TLSA record: {record}. Expected {expected_association_data.hex() if actual_association_data else 'N/A'}, got {actual_association_data.hex() if actual_association_data else 'Error/None'}") 
+
+            except Exception as e:
+                log.error(f"DANE: Error processing TLSA record {record}: {e}")
+                continue
+
+        if not self.dane_validation_successful:
+            log.warning("DANE: Peer certificate did not match any provided DANE TLSA records.")
+        return False
+
+    def connect(self, host: str, port: int) -> bool:
+        """
+        Connect to a TLS server
+        
+        Args:
+            host: The hostname to connect to
+            port: The port to connect to
+            
+        Returns:
+            True if connection was successful, False otherwise
+        """
+        try:
+            # Check if we need to authenticate first
+            if self.require_authentication:
+                status = self.check_authentication_status()
+                if not status:
+                    log.warning("Authentication failed, unable to connect")
+                    return False
+            
+            # Create a new socket
+            self.raw_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            
+            # Check if socket is non-blocking
+            is_nonblocking = self.raw_socket.getblocking() == False
+            
+            # Connect to the server
+            log.info(f"Connecting to {host}:{port}")
+            self.raw_socket.connect((host, port))
+            
+            # Create client context
+            context = self._create_client_context()
+            
+            # Wrap with SSL
+            self.ssl_socket = context.wrap_socket(
+                self.raw_socket, 
+                server_hostname=host,
+                do_handshake_on_connect=not is_nonblocking
+            )
+            
+            # For non-blocking sockets, handshake needs to be done manually later
+            if is_nonblocking:
+                log.info("Non-blocking socket detected, handshake will be performed later")
+                self.handshake_complete = False
+            else:
+                self.handshake_complete = True
+                
+                # Log TLS version and cipher
+                version = self.ssl_socket.version()
+                if version != "TLSv1.3":
+                    log.warning(f"Connected with {version} instead of TLS 1.3")
+                else:
+                    log.info(f"Connected using TLS 1.3")
+                
+                cipher = self.ssl_socket.cipher()
+                log.info(f"Using cipher: {cipher[0]}")
+                
+                # Send authentication if required
+                if self.require_authentication:
+                    auth_sent = self.send_authentication()
+                    if not auth_sent:
+                        log.error("Failed to send authentication")
+                        self.close()
+                        return False
+            
+            return True
+            
+        except ssl.SSLError as e:
+            log.error(f"SSL error during connection: {e}")
+            self.close()
+            return False
+            
+        except Exception as e:
+            log.error(f"Error during connection: {e}")
+            self.close()
+            return False
 

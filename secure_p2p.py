@@ -590,6 +590,17 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                 finally:
                     self.tls_channel = None # Ensure nullified
         
+        # Clean up SecureKeyManager
+        if hasattr(self, 'key_manager') and self.key_manager:
+            try:
+                if hasattr(self.key_manager, 'cleanup'):
+                    log.debug("cleanup(): Calling self.key_manager.cleanup()")
+                    self.key_manager.cleanup()
+            except Exception as e:
+                log.error(f"Error during SecureKeyManager cleanup in main cleanup: {e}")
+            finally:
+                self.key_manager = None # Ensure nullified
+
         # Clean up CAExchange persisted files if any
         if hasattr(self, 'ca_exchange'):
             try:

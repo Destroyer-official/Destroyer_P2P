@@ -23,6 +23,9 @@ from typing import Optional, Dict, Union, Tuple
 # Import the new cross-platform hardware security module
 import platform_hsm_interface as cphs
 
+# Import secure_erase for in-memory key wiping
+from double_ratchet import secure_erase
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s')
 log = logging.getLogger(__name__)
@@ -836,6 +839,16 @@ if __name__ == "__main__":
         # In-memory mode: delete from memory dictionary
         if self.in_memory_only:
             if key_name in self.memory_keys:
+                key_data_b64_str = self.memory_keys.get(key_name)
+                if key_data_b64_str:
+                    # Securely erase the content before deleting the reference
+                    try:
+                        # Ensure we are erasing the byte representation of the string
+                        secure_erase(key_data_b64_str.encode('utf-8'))
+                        log.debug(f"Securely erased in-memory key data for {key_name}")
+                    except Exception as e:
+                        log.warning(f"Failed to securely erase in-memory key data for {key_name}: {e}")
+                
                 del self.memory_keys[key_name]
                 log.debug(f"Key {key_name} deleted from memory")
                 return True
@@ -968,6 +981,21 @@ if __name__ == "__main__":
             except:
                 pass
             self.context = None
+
+        # Securely erase any keys remaining in memory_keys
+        if self.in_memory_only and hasattr(self, 'memory_keys') and self.memory_keys:
+            log.debug(f"Cleaning up {len(self.memory_keys)} in-memory keys.")
+            # Iterate over a copy of items in case secure_erase modifies the dict or list during iteration (though unlikely here)
+            for key_name, key_data_b64_str in list(self.memory_keys.items()):
+                if key_data_b64_str:
+                    try:
+                        secure_erase(key_data_b64_str.encode('utf-8'))
+                        log.debug(f"Securely erased in-memory key data for {key_name} during cleanup.")
+                    except Exception as e:
+                        log.warning(f"Failed to securely erase in-memory key data for {key_name} during cleanup: {e}")
+            self.memory_keys.clear()
+            log.info("All in-memory keys securely erased and cleared.")
+
     
     def __del__(self):
         """Destructor to ensure cleanup."""

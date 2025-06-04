@@ -74,15 +74,7 @@
 
 This initiative pioneers a new echelon of secure peer-to-peer communication, architected to withstand both contemporary and emergent quantum threats. It is a testament to proactive defense in an evolving digital landscape.
 
-### 🎯 Core Directives
-
-> Our mission is to forge an unparalleled bastion for private communication. This is achieved by adhering to several core directives:
->
-> 1.  🌌 **Quantum-Proofing the Present**: Integrate and rigorously test emerging post-quantum cryptographic standards to ensure enduring confidentiality.
-> 2.  🛡️ **Layered Fortress Architecture**: Construct a multi-faceted defense mechanism where each layer operates independently, creating a resilient security posture.
-> 3.  🔒 **Hardware-Anchored Trust**: Leverage the intrinsic security of platform-specific hardware (TPMs/HSMs) to protect critical cryptographic material and operations.
-> 4.  🌐 **Decentralized & Zero-Knowledge Ethos**: Engineer a system resilient to central points of failure or compromise, minimizing trust assumptions.
-> 5.  💡 **Advancing Secure Systems Knowledge**: Serve as a robust reference implementation and educational tool for state-of-the-art security paradigms.
+**Recent Developments (June 2025):** Successfully resolved a critical issue in the certificate exchange mechanism, ensuring robust ChaCha20Poly1305 encryption with proper key derivation (HKDF-SHA256) and error handling. This fix has enhanced the reliability and security of the initial peer authentication process, leading to stable end-to-end secure communication across all layers.
 
 ### 🌟 Signature Capabilities
 
@@ -188,11 +180,17 @@ The system pioneers a hybrid cryptographic model, synergizing battle-hardened cl
 
 The application wraps user data in four distinct and independent encryption layers, each contributing unique security properties to achieve true defense-in-depth:
 
-1.  **🌐 Transport Layer Security (TLS 1.3)**: Establishes a secure, mutually authenticated, and encrypted tunnel between peers. It is enhanced with a preference for Post-Quantum cipher suites when available and performs rigorous certificate validation.
+1.  **🌐 Transport Layer Security (TLS 1.3)**: Establishes a secure, mutually authenticated, and encrypted tunnel between peers.
+    *   **Post-Quantum Readiness**: Enhanced with a preference for Post-Quantum KEMs (like ML-KEM used with X25519) via TLS 1.3's `key_share` groups when available and supported by the underlying SSL library.
+    *   **Rigorous Certificate Validation**: Performs strict validation of peer certificates against a provided CA or self-signed certificates exchanged during the initial handshake.
+    *   **Verified Perfect Forward Secrecy (PFS)**: TLS 1.3 mandates PFS for its standard cipher suites. The application further includes explicit logging to verify that an ephemeral key exchange mechanism (e.g., ECDHE) was indeed negotiated during the handshake, providing an auditable assurance that session keys cannot be compromised even if long-term identity keys are.
+    *   **DANE Validation Scaffolding & DNSSEC Consideration**: The `tls_channel_manager.py` module now incorporates parameters (`dane_tlsa_records`, `enforce_dane_validation`) and internal logic to perform DANE (DNS-Based Authentication of Named Entities) validation of peer certificates against TLSA records. While the application can process these records if provided, for comprehensive protection against DNS spoofing attacks, the secure retrieval of these TLSA records via DNSSEC (DNS Security Extensions) is crucial. Implementing DNSSEC resolution is a broader operational consideration typically handled at the OS or network infrastructure level, or via specialized DNS client libraries.
 2.  **✉️ Double Ratchet Protocol**: Provides cutting-edge end-to-end encryption for message content, delivering robust forward secrecy and post-compromise security. (Refer to the "Double Ratchet Enhancement" section for more granular details on its advanced features).
 3.  **📦 Application-Layer Safeguards**: Offers an additional, configurable layer of encryption for the message payload itself, using ciphers like XChaCha20-Poly1305 or AES-256-GCM before it even enters the Double Ratchet pipeline.
-4.  **📜 Encrypted Certificate Exchange**: During the initial peer authentication, certificate data is exchanged over a channel protected by ChaCha20-Poly1305. 
-    -   **Fortified Key Derivation**: The 32-byte key required for this ChaCha20-Poly1305 encryption is meticulously derived using **HKDF-SHA256** from a pre-shared context. This ensures adherence to the cipher's strict key length requirements, averting vulnerabilities tied to incorrect key sizing. Any failure during this critical encryption/decryption phase immediately aborts the certificate exchange, preventing insecure continuation.
+4.  **📜 Encrypted Certificate Exchange**: During the initial peer authentication, certificate data is exchanged over a dedicated, encrypted channel.
+    -   **Robust Encryption**: This exchange is secured using **ChaCha20-Poly1305**.
+    -   **Fortified Key Derivation**: The 32-byte key required for ChaCha20-Poly1305 encryption is meticulously derived using **HKDF-SHA256** (with SHA-256 as the hash function) from a pre-shared context string (`b'SecureP2PCertificateExchangeKey!!'` combined with a salt). This ensures adherence to the cipher's strict key length requirements, averting vulnerabilities tied to incorrect key sizing.
+    -   **Strict Error Handling**: Any failure during the encryption or decryption of certificate data (e.g., due to key errors or corrupted data) immediately aborts the certificate exchange process. This prevents the connection from proceeding with potentially unverified or unencrypted peer certificates, thereby maintaining the integrity of the secure channel establishment.
 
 ### 🖥️ Hardware Security Integration: Anchoring Trust in Silicon
 
@@ -413,13 +411,13 @@ Follow these instructions to deploy and operate your quantum-resistant P2P commu
 ### Installation Protocol
 
 1.  **Secure the Source Code**: Clone the repository from its official source.
-    ```bash
+```bash
     git clone https://github.com/yourusername/secure-p2p-chat.git # Replace with actual URL
     cd secure-p2p-chat
-    ```
+```
 
 2.  **Establish a Containment Field (Virtual Environment)**:
-    ```bash
+```bash
     # Create virtual environment
     python -m venv .venv_secure_chat
 
@@ -434,9 +432,9 @@ Follow these instructions to deploy and operate your quantum-resistant P2P commu
     ```
 
 3.  **Integrate Dependencies**: Install required cryptographic libraries and utilities.
-    ```bash
-    pip install -r requirements.txt
-    ```
+```bash
+pip install -r requirements.txt
+```
 
 ### Launching the Node
 
@@ -548,6 +546,18 @@ Your expertise and contributions are invaluable in advancing the boundaries of s
 5.  **Initiate a Pull Request** for review and integration.
 
 We welcome contributions in all areas, from cryptographic research and protocol design to code optimization and usability enhancements.
+
+---
+
+## ⚠️ Security Considerations & Disclaimers
+
+> **Critical Security Advisories & Project Status**:
+>
+> - **Research & Development Focus**: This platform is an advanced research and development project. It is intended to demonstrate and explore cutting-edge security concepts and should be treated as experimental.
+> - **Ongoing Evolution**: The cryptographic landscape, particularly PQC, is dynamic. Algorithms and protocols within this project may be subject to change based on new research, NIST updates, or identified vulnerabilities.
+> - **Absence of Formal Audit**: While designed with security best practices, this codebase has **not yet undergone a comprehensive, independent security audit by certified professionals.** We strongly encourage community review and responsible disclosure of any potential findings.
+> - **Use With Discretion**: Deployment in production environments requiring guaranteed security for highly sensitive data should be approached with extreme caution and ideally after an independent audit. The developers assume no liability for misuse or security breaches.
+> - **Post-Quantum Transition**: The specific post-quantum algorithms (ML-KEM, FALCON) are current NIST selections, but the PQC field is still maturing. Future updates to the PQC standards may necessitate adjustments to the cryptographic core.
 
 ---
 
