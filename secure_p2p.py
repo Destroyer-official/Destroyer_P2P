@@ -35,6 +35,10 @@ import ctypes
 import time
 import selectors
 import secrets
+import platform # Added for platform detection
+import hashlib # Ensure hashlib is imported
+from cryptography.hazmat.primitives import hashes as crypto_hashes # For HKDF
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF # For HKDF
 
 # Custom security exception
 class SecurityError(Exception):
@@ -89,6 +93,9 @@ class KeyEraser:
     def __init__(self, key_material=None, description="sensitive key"):
         self.key_material = key_material
         self.description = description
+        self._locked_address = None
+        self._locked_length = 0
+        self._locked_platform = None
         
     def __enter__(self):
         log.debug(f"KeyEraser: Handling {self.description}")
@@ -101,44 +108,169 @@ class KeyEraser:
         """Set the key material to be managed."""
         self.key_material = key_material
         
+    def _pin_memory(self, material: bytearray):
+        if not isinstance(material, bytearray) or len(material) == 0:
+            return False
+
+        address = ctypes.addressof(ctypes.c_byte.from_buffer(material))
+        length = len(material)
+        
+        current_platform = platform.system()
+        locked = False
+
+        if current_platform == "Windows":
+            try:
+                # PAGE_READWRITE is 0x04. We need to ensure the memory is readable/writable.
+                # VirtualLock locks pages in physical RAM.
+                if ctypes.windll.kernel32.VirtualLock(ctypes.c_void_p(address), ctypes.c_size_t(length)):
+                    self._locked_address = address
+                    self._locked_length = length
+                    self._locked_platform = "Windows"
+                    locked = True
+                    log.debug(f"KeyEraser: Successfully VirtualLock'ed memory for {self.description} (len: {length})")
+                else:
+                    # GetLastError can give more info: ctypes.WinError(ctypes.get_last_error())
+                    log.warning(f"KeyEraser: VirtualLock failed for {self.description}. Error: {ctypes.get_last_error()}")
+            except Exception as e:
+                log.error(f"KeyEraser: Exception during VirtualLock for {self.description}: {e}")
+        elif current_platform in ["Linux", "Darwin"]: # Darwin is macOS
+            try:
+                libc = ctypes.CDLL(None) # Tries to find libc, e.g. libc.so.6 on Linux, libSystem.dylib on macOS
+                # mlock requires pages to be mapped. bytearray memory is typically page-aligned.
+                # Ensure memory is readable/writable (usually true for bytearray from Python)
+                if libc.mlock(ctypes.c_void_p(address), ctypes.c_size_t(length)) == 0:
+                    self._locked_address = address
+                    self._locked_length = length
+                    self._locked_platform = "POSIX"
+                    locked = True
+                    log.debug(f"KeyEraser: Successfully mlock'ed memory for {self.description} (len: {length})")
+                else:
+                    # errno can be checked via ctypes.get_errno()
+                    errno = ctypes.get_errno()
+                    log.warning(f"KeyEraser: mlock failed for {self.description}. Errno: {errno} ({os.strerror(errno)})")
+            except Exception as e:
+                log.error(f"KeyEraser: Exception during mlock for {self.description}: {e}")
+        else:
+            log.info(f"KeyEraser: Memory pinning (mlock/VirtualLock) not supported on this platform: {current_platform} for {self.description}")
+        
+        return locked
+
+    def _unpin_memory(self):
+        if self._locked_address is None or self._locked_length == 0:
+            return
+
+        try:
+            if self._locked_platform == "Windows":
+                if ctypes.windll.kernel32.VirtualUnlock(ctypes.c_void_p(self._locked_address), ctypes.c_size_t(self._locked_length)):
+                    log.debug(f"KeyEraser: Successfully VirtualUnlock'ed memory for {self.description}")
+                else:
+                    log.warning(f"KeyEraser: VirtualUnlock failed for {self.description}. Error: {ctypes.get_last_error()}")
+            elif self._locked_platform == "POSIX":
+                libc = ctypes.CDLL(None)
+                if libc.munlock(ctypes.c_void_p(self._locked_address), ctypes.c_size_t(self._locked_length)) == 0:
+                    log.debug(f"KeyEraser: Successfully munlock'ed memory for {self.description}")
+                else:
+                    errno = ctypes.get_errno()
+                    log.warning(f"KeyEraser: munlock failed for {self.description}. Errno: {errno} ({os.strerror(errno)})")
+        except Exception as e:
+            log.error(f"KeyEraser: Exception during memory unpinning for {self.description}: {e}")
+        finally:
+            self._locked_address = None
+            self._locked_length = 0
+            self._locked_platform = None
+
     def secure_erase(self):
         """Securely erase the key material from memory."""
         if self.key_material is None:
+            log.debug(f"KeyEraser: No key material to erase for {self.description} (was None).")
             return
-            
+
         try:
-            # Overwrite with zeros
-            if isinstance(self.key_material, bytes):
-                buffer = bytearray(self.key_material)
-                for i in range(len(buffer)):
-                    buffer[i] = 0
-                    
-            # Handle bytearray directly    
-            elif isinstance(self.key_material, bytearray):
-                for i in range(len(self.key_material)):
-                    self.key_material[i] = 0
-                    
-            # Use zeroize method if available
-            elif hasattr(self.key_material, 'zeroize'):
-                self.key_material.zeroize()
+            key_type = type(self.key_material).__name__
+            key_len = len(self.key_material) if hasattr(self.key_material, '__len__') else 'N/A'
+            memory_pinned = False
+
+            if isinstance(self.key_material, bytearray):
+                if key_len == 0:
+                    log.debug(f"KeyEraser: {self.description} is an empty bytearray. No wipe needed.")
+                else:
+                    memory_pinned = self._pin_memory(self.key_material)
+                    try:
+                        # Ensure key_material is not accessed after this point if it becomes None
+                        # Python's ctypes.memset can be faster for large arrays
+                        # For simplicity and direct manipulation, the loop is fine
+                        # For CPython, direct assignment to bytearray elements is efficient.
+                        ctypes.memset(ctypes.addressof(ctypes.c_byte.from_buffer(self.key_material)), 0, key_len)
+                        log.debug(f"KeyEraser: Zeroized mutable bytearray (len {key_len}) for {self.description} using memset. Memory pinned: {memory_pinned}")
+                    except Exception as e_wipe:
+                         log.error(f"KeyEraser: Error during bytearray zeroization for {self.description}: {e_wipe}")
+                         # Fallback to loop if memset fails for some reason, though unlikely with bytearray
+                         # This also ensures self.key_material is iterated if memset fails.
+                         if self.key_material: # Check if still valid
+                            for i in range(len(self.key_material)):
+                                self.key_material[i] = 0
+                            log.debug(f"KeyEraser: Zeroized mutable bytearray (len {key_len}) for {self.description} using loop fallback. Memory pinned: {memory_pinned}")
+                    finally:
+                        if memory_pinned:
+                            self._unpin_memory()
                 
-            # For other objects, try to clear attributes
-            elif hasattr(self.key_material, '__dict__'):
-                for attr in self.key_material.__dict__:
-                    if isinstance(self.key_material.__dict__[attr], (bytes, bytearray)):
-                        self.key_material.__dict__[attr] = None
+                self.key_material = None # KeyEraser is done, clear its own reference
+                gc.collect() # Suggest GC
+                return # Explicitly return after handling bytearray
+
+            if isinstance(self.key_material, bytes):
+                # Immutable bytes objects cannot be zeroized in-place.
+                # Log this as info, as it's an expected limitation.
+                log.info(
+                    f"KeyEraser: {self.description} (key_material of type {key_type}, length {key_len}) "
+                    f"cannot be zeroized in-place as it is immutable. The original bytes object in "
+                    f"memory is NOT wiped by this operation. Only this KeyEraser\\'s reference to it "
+                    f"will be cleared. The caller must ensure no other references to this sensitive "
+                    f"immutable data exist if secure wiping is critical."
+                )
+                # Clear our reference to it
+                self.key_material = None
+                log.debug(f"KeyEraser: Cleared reference to immutable bytes for {self.description}.")
+                return # Explicitly return as no further in-place action is possible on the original bytes
+
+            if hasattr(self.key_material, 'zeroize'):
+                log.debug(f"KeyEraser: Attempting to call .zeroize() method for {self.description} (type {key_type}).")
+                try:
+                    self.key_material.zeroize()
+                    log.debug(f"KeyEraser: Successfully called .zeroize() method for {self.description}.")
+                except Exception as e_zeroize:
+                    log.error(f"KeyEraser: Error calling .zeroize() for {self.description}: {e_zeroize}")
+                finally:
+                    self.key_material = None # Clear KeyEraser's reference
+                    gc.collect()
+                return # Explicitly return
+
+            if hasattr(self.key_material, '__dict__'):
+                log.debug(f"KeyEraser: {self.description} (type {key_type}) does not have a .zeroize() method and is not bytearray/bytes. "
+                          f"Attempting to clear attributes (best-effort).")
+                for attr_name in list(self.key_material.__dict__.keys()):
+                    attr_value = getattr(self.key_material, attr_name, None)
+                    if isinstance(attr_value, (bytes, bytearray, str)):
+                        try:
+                            setattr(self.key_material, attr_name, None)
+                            log.debug(f"KeyEraser: Cleared attribute '{attr_name}' for {self.description}.")
+                        except AttributeError:
+                            log.debug(f"KeyEraser: Could not clear read-only attribute '{attr_name}' for {self.description}.")
+                    elif isinstance(attr_value, list):
+                         attr_value.clear()
+                         log.debug(f"KeyEraser: Cleared list attribute '{attr_name}' for {self.description}.")
+                    elif isinstance(attr_value, dict):
+                         attr_value.clear()
+                         log.debug(f"KeyEraser: Cleared dict attribute '{attr_name}' for {self.description}.")
             
-            # Set to None to release reference
-            self.key_material = None
-            
-            # Try to prevent memory optimization
-            gc.collect()
-            
-            log.debug(f"KeyEraser: Securely erased {self.description}")
+            log.debug(f"KeyEraser: Finished best-effort cleanup for {self.description} (type {key_type}). Clearing KeyEraser\\'s reference.")
+            self.key_material = None # Ensure reference is cleared in all paths
+            gc.collect() # Suggest GC
+
         except Exception as e:
-            log.error(f"KeyEraser: Error while erasing {self.description}: {e}")
-            # Still set to None to release reference
+            log.error(f"KeyEraser: Error during secure_erase for {self.description} (type: {type(self.key_material).__name__}): {e}", exc_info=True)
             self.key_material = None
+            gc.collect()
 
 def secure_memory_wipe(address, length):
     """
@@ -191,9 +323,10 @@ class SecureP2PChat(p2p.SimpleP2PChat):
     USERNAME_REGEX = r"^.*$"
     
     # Message constraints
-    MAX_MESSAGE_SIZE = 16384  # 16 KB maximum message size
-    MAX_FRAME_SIZE = 65536    # 64 KB maximum frame size
-    MAX_RANDOM_PADDING_BYTES = 15 # Max *random* bytes to add, total overhead is this + 1
+    MAX_MESSAGE_SIZE = 65536  # 16 KB maximum message size
+    MAX_FRAME_SIZE = 131072    # 64 KB maximum frame size
+    MAX_RANDOM_PADDING_BYTES = 32 # Max *random* bytes to add (1 to 32 bytes)
+    MAX_POST_ENCRYPTION_SIZE = 10240 # Max size for the final encrypted payload
     
     # Security levels
     SECURITY_LEVELS = {
@@ -765,7 +898,69 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                 raise SecurityError("Failed to send handshake message during client key exchange.")
             
             log.info(f"Hybrid X3DH+PQ handshake completed, derived shared secret: {_format_binary(self.hybrid_root_key)}")
-            
+
+            # --- BEGIN: Authenticate hybrid_root_key ---
+            log.info("Authenticating derived hybrid_root_key with peer...")
+            try:
+                data_to_auth = hashlib.sha256(self.hybrid_root_key).digest()
+                
+                # Client signs and sends
+                client_signature = self.hybrid_kex.dss.sign(self.hybrid_kex.falcon_private_key, data_to_auth)
+                auth_payload = {
+                    "data_hash": base64.b64encode(data_to_auth).decode('utf-8'),
+                    "signature": base64.b64encode(client_signature).decode('utf-8')
+                }
+                log.debug(f"Sending hybrid_root_key auth data (client): hash={_format_binary(data_to_auth)}, sig={_format_binary(client_signature)}")
+                success = await p2p.send_framed(self.tcp_socket, json.dumps(auth_payload).encode('utf-8'))
+                if not success:
+                    raise SecurityError("Failed to send hybrid_root_key authentication data.")
+
+                # Client receives and verifies server's signature
+                log.debug("Waiting for server's hybrid_root_key authentication data...")
+                server_auth_data_raw = await asyncio.wait_for(
+                    p2p.receive_framed(self.tcp_socket),
+                    timeout=self.CONNECTION_TIMEOUT  # Corrected timeout attribute
+                )
+                if not server_auth_data_raw:
+                    raise SecurityError("Failed to receive server's hybrid_root_key authentication data.")
+                
+                server_auth_payload = json.loads(server_auth_data_raw.decode('utf-8'))
+                server_signature_b64 = server_auth_payload.get("signature")
+                if not server_signature_b64:
+                    raise SecurityError("Server's hybrid_root_key auth data missing signature.")
+                
+                server_signature = base64.b64decode(server_signature_b64)
+                
+                log.debug(f"Received server's hybrid_root_key auth: sig={_format_binary(server_signature)}")
+
+                if not self.hybrid_kex.dss.verify(self.peer_falcon_public_key, data_to_auth, server_signature):
+                    log.error("SECURITY ALERT: Server's signature on hybrid_root_key is INVALID.")
+                    raise SecurityError("Server's signature on hybrid_root_key verification failed.")
+                
+                log.info("Successfully verified server's signature on hybrid_root_key.")
+                log.info("End-to-end authentication of hybrid_root_key successful.")
+
+            except asyncio.TimeoutError:
+                log.error("Timed out during hybrid_root_key authentication.")
+                secure_erase(self.hybrid_root_key)
+                self.hybrid_root_key = None
+                raise SecurityError("Timed out during hybrid_root_key authentication.")
+            except json.JSONDecodeError as e:
+                log.error(f"SECURITY ALERT: Invalid JSON in hybrid_root_key auth data: {e}")
+                secure_erase(self.hybrid_root_key)
+                self.hybrid_root_key = None
+                raise SecurityError(f"Invalid JSON in hybrid_root_key auth data: {e}")
+            except Exception as e:
+                log.error(f"SECURITY ALERT: Error during hybrid_root_key authentication: {e}")
+                secure_erase(self.hybrid_root_key) # Ensure key is wiped on any error
+                self.hybrid_root_key = None
+                # Re-raise as SecurityError to ensure connection teardown
+                if not isinstance(e, SecurityError):
+                    raise SecurityError(f"An unexpected error occurred during root key authentication: {e}")
+                else:
+                    raise
+            # --- END: Authenticate hybrid_root_key ---
+
             # Initialize the Double Ratchet as the initiator
             self.is_ratchet_initiator = True  # Client is the initiator
             try:
@@ -1055,7 +1250,83 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                 log.debug(f"Generated root key: {_format_binary(self.hybrid_root_key)}")
                 
                 log.info(f"Hybrid X3DH+PQ handshake completed, derived shared secret: {_format_binary(self.hybrid_root_key)}")
-                
+
+                # --- BEGIN: Authenticate hybrid_root_key ---
+                log.info("Authenticating derived hybrid_root_key with peer...")
+                try:
+                    # Server receives client's auth data first
+                    log.debug("Waiting for client's hybrid_root_key authentication data...")
+                    client_auth_data_raw = await asyncio.wait_for(
+                        p2p.receive_framed(self.tcp_socket),
+                        timeout=self.CONNECTION_TIMEOUT  # Corrected timeout attribute
+                    )
+                    if not client_auth_data_raw:
+                        raise SecurityError("Failed to receive client's hybrid_root_key authentication data.")
+                    
+                    client_auth_payload = json.loads(client_auth_data_raw.decode('utf-8'))
+                    client_data_hash_b64 = client_auth_payload.get("data_hash")
+                    client_signature_b64 = client_auth_payload.get("signature")
+
+                    if not client_data_hash_b64 or not client_signature_b64:
+                        raise SecurityError("Client's hybrid_root_key auth data missing hash or signature.")
+
+                    client_data_hash = base64.b64decode(client_data_hash_b64)
+                    client_signature = base64.b64decode(client_signature_b64)
+                    
+                    log.debug(f"Received client's hybrid_root_key auth: hash={_format_binary(client_data_hash)}, sig={_format_binary(client_signature)}")
+
+                    # Server verifies client's data
+                    # 1. Compute local hash of its own hybrid_root_key
+                    data_to_auth_local = hashlib.sha256(self.hybrid_root_key).digest()
+                    
+                    # 2. Ensure client's hash matches server's computed hash
+                    if client_data_hash != data_to_auth_local:
+                        log.error(
+                            f"SECURITY ALERT: Client's proclaimed hash of hybrid_root_key ({_format_binary(client_data_hash)}) "
+                            f"does not match server's locally computed hash ({_format_binary(data_to_auth_local)})."
+                        )
+                        raise SecurityError("Client's hybrid_root_key hash mismatch.")
+                    
+                    # 3. Verify client's signature on that hash
+                    if not self.hybrid_kex.dss.verify(self.peer_falcon_public_key, data_to_auth_local, client_signature):
+                        log.error("SECURITY ALERT: Client's signature on hybrid_root_key is INVALID.")
+                        raise SecurityError("Client's signature on hybrid_root_key verification failed.")
+                    
+                    log.info("Successfully verified client's signature on hybrid_root_key.")
+
+                    # Server signs and sends its signature
+                    server_signature = self.hybrid_kex.dss.sign(self.hybrid_kex.falcon_private_key, data_to_auth_local)
+                    auth_payload_server = {
+                        "signature": base64.b64encode(server_signature).decode('utf-8')
+                    }
+                    log.debug(f"Sending hybrid_root_key auth data (server): sig={_format_binary(server_signature)}")
+                    success = await p2p.send_framed(self.tcp_socket, json.dumps(auth_payload_server).encode('utf-8'))
+                    if not success:
+                        raise SecurityError("Failed to send server's hybrid_root_key authentication signature.")
+                    
+                    log.info("End-to-end authentication of hybrid_root_key successful.")
+
+                except asyncio.TimeoutError:
+                    log.error("Timed out during hybrid_root_key authentication.")
+                    secure_erase(self.hybrid_root_key)
+                    self.hybrid_root_key = None
+                    raise SecurityError("Timed out during hybrid_root_key authentication.")
+                except json.JSONDecodeError as e:
+                    log.error(f"SECURITY ALERT: Invalid JSON in hybrid_root_key auth data: {e}")
+                    secure_erase(self.hybrid_root_key)
+                    self.hybrid_root_key = None
+                    raise SecurityError(f"Invalid JSON in hybrid_root_key auth data: {e}")
+                except Exception as e:
+                    log.error(f"SECURITY ALERT: Error during hybrid_root_key authentication: {e}")
+                    secure_erase(self.hybrid_root_key) # Ensure key is wiped on any error
+                    self.hybrid_root_key = None
+                    # Re-raise as SecurityError to ensure connection teardown
+                    if not isinstance(e, SecurityError):
+                        raise SecurityError(f"An unexpected error occurred during root key authentication: {e}")
+                    else:
+                        raise
+                # --- END: Authenticate hybrid_root_key ---
+
                 # Initialize the Double Ratchet as the responder
                 try:
                     log.debug("Initializing Double Ratchet as responder")
@@ -2459,12 +2730,16 @@ class SecureP2PChat(p2p.SimpleP2PChat):
     def _add_random_padding(self, plaintext_bytes: bytes) -> bytes:
         """Adds random padding to plaintext before encryption.
         Structure: [ Plaintext | Random Padding Bytes | Length of Random Padding Bytes (1 byte) ]
+        Padding length is 1 to MAX_RANDOM_PADDING_BYTES (inclusive).
         """
         if not isinstance(plaintext_bytes, bytes):
             # Ensure input is bytes, though _encrypt_message should handle this.
             raise TypeError("Input to padding must be bytes.")
             
-        num_random_bytes = secrets.randbelow(self.MAX_RANDOM_PADDING_BYTES + 1) # 0 to MAX_RANDOM_PADDING_BYTES
+        # Generate 1 to MAX_RANDOM_PADDING_BYTES of random padding
+        # secrets.randbelow(N) returns 0 to N-1. So randbelow(MAX_RANDOM_PADDING_BYTES) gives 0 to 31.
+        # Adding 1 makes it 1 to 32.
+        num_random_bytes = secrets.randbelow(self.MAX_RANDOM_PADDING_BYTES) + 1
         random_padding = secrets.token_bytes(num_random_bytes)
         len_byte = num_random_bytes.to_bytes(1, 'big')
         
@@ -2512,6 +2787,11 @@ class SecureP2PChat(p2p.SimpleP2PChat):
             
             encrypted_data = self.ratchet.encrypt(padded_bytes)
             log.debug(f"Encrypted message ({len(plaintext_bytes)} plaintext bytes, {len(padded_bytes)} padded bytes) to {len(encrypted_data)} ciphertext bytes")
+
+            if len(encrypted_data) > self.MAX_POST_ENCRYPTION_SIZE:
+                log.error(f"CRITICAL: Encrypted message size ({len(encrypted_data)} bytes) exceeds maximum allowed payload size ({self.MAX_POST_ENCRYPTION_SIZE} bytes). Aborting send.")
+                raise ValueError(f"Encrypted message exceeds maximum allowed payload size of {self.MAX_POST_ENCRYPTION_SIZE} bytes.")
+
             return encrypted_data
         except Exception as e:
             log.error(f"Error during message encryption and padding: {e}", exc_info=True)

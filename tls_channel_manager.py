@@ -22,6 +22,9 @@ import base64
 import hashlib
 import struct
 import math
+import ctypes # Added import
+import gc # Added import
+import tempfile # Added import
 from typing import Optional, Tuple, Union, Any, Dict, List, Callable
 from cryptography.hazmat.primitives.asymmetric import x25519, rsa, ed25519, ec
 from cryptography.hazmat.primitives import hashes, hmac, serialization
@@ -4342,4 +4345,291 @@ def verify_quantum_resistance(connection):
             log.error(f"Error during connection: {e}")
             self.close()
             return False
+
+    def _secure_wipe_memory(self, data_bytes: Optional[Union[bytes, bytearray]], description: str):
+        """
+        Securely wipes a mutable bytearray object in-place using memset and attempts to pin memory.
+        If an immutable bytes object is passed, logs a warning and does not wipe it,
+        as immutable objects cannot be changed in-place. The caller is responsible
+        for managing the lifecycle of immutable bytes objects.
+        Logs a warning if data_bytes is None or empty.
+        """
+        if not data_bytes:
+            logger.debug(f"No data to wipe for {description} (data is None/empty).")
+            return
+
+        if isinstance(data_bytes, bytes) and not isinstance(data_bytes, bytearray):
+            logger.warning(f"_secure_wipe_memory: {description} is an immutable bytes object. Cannot wipe in-place. "
+                           f"The original bytes object remains in memory until garbage collected. "
+                           f"Ensure no references to the original object are retained if it contained sensitive data.")
+            return
+
+        if not isinstance(data_bytes, bytearray):
+            logger.error(f"_secure_wipe_memory: {description} is not a bytearray. Cannot wipe. Type: {type(data_bytes)}")
+            return
+
+        key_len = len(data_bytes)
+        if key_len == 0:
+            logger.debug(f"Zero length bytearray for {description}, no wipe needed.")
+            return
+
+        locked_address = None
+        locked_length = 0
+        locked_platform_type = None # To store if it's 'Windows' or 'POSIX' for unlocking
+        memory_pinned = False
+
+        try:
+            # 1. Attempt to pin memory
+            current_os = platform.system()
+            if key_len > 0:
+                try:
+                    address = ctypes.addressof(ctypes.c_byte.from_buffer(data_bytes))
+                    if current_os == "Windows":
+                        if ctypes.windll.kernel32.VirtualLock(ctypes.c_void_p(address), ctypes.c_size_t(key_len)):
+                            locked_address, locked_length, locked_platform_type = address, key_len, "Windows"
+                            memory_pinned = True
+                            logger.debug(f"_secure_wipe_memory: VirtualLock successful for {description}.")
+                        else:
+                            logger.warning(f"_secure_wipe_memory: VirtualLock failed for {description}. Error: {ctypes.get_last_error()}")
+                    elif current_os in ["Linux", "Darwin"]:
+                        libc = ctypes.CDLL(None) # Auto-finds libc
+                        if libc.mlock(ctypes.c_void_p(address), ctypes.c_size_t(key_len)) == 0:
+                            locked_address, locked_length, locked_platform_type = address, key_len, "POSIX"
+                            memory_pinned = True
+                            logger.debug(f"_secure_wipe_memory: mlock successful for {description}.")
+                        else:
+                            errno = ctypes.get_errno()
+                            logger.warning(f"_secure_wipe_memory: mlock failed for {description}. Errno: {errno} ({os.strerror(errno)})")
+                    else:
+                        logger.info(f"_secure_wipe_memory: Memory pinning not supported on this platform ({current_os}) for {description}.")
+                except Exception as e_pin:
+                    logger.error(f"_secure_wipe_memory: Exception during memory pinning for {description}: {e_pin}")
+
+            # 2. Zeroize memory (memset)
+            ctypes.memset(ctypes.addressof(ctypes.c_byte.from_buffer(data_bytes)), 0, key_len)
+            logger.debug(f"Securely zeroized {key_len} bytes for: {description} (bytearray). Memory pinned: {memory_pinned}")
+
+        except Exception as e_wipe:
+            logger.error(f"Failed to zeroize memory for {description} (bytearray) using ctypes: {e_wipe}", exc_info=True)
+            # Fallback manual overwrite
+            try:
+                for i in range(key_len):
+                    data_bytes[i] = 0
+                logger.debug(f"Fallback manual overwrite for {description} (bytearray) completed. Memory pinned: {memory_pinned}")
+            except Exception as e_fallback:
+                logger.error(f"Fallback manual overwrite for {description} (bytearray) also failed: {e_fallback}")
+        finally:
+            # 3. Unpin memory if it was locked
+            if locked_address and locked_length > 0:
+                try:
+                    if locked_platform_type == "Windows":
+                        if not ctypes.windll.kernel32.VirtualUnlock(ctypes.c_void_p(locked_address), ctypes.c_size_t(locked_length)):
+                            logger.warning(f"_secure_wipe_memory: VirtualUnlock failed for {description}. Error: {ctypes.get_last_error()}")
+                    elif locked_platform_type == "POSIX":
+                        libc = ctypes.CDLL(None)
+                        if libc.munlock(ctypes.c_void_p(locked_address), ctypes.c_size_t(locked_length)) != 0:
+                            errno = ctypes.get_errno()
+                            logger.warning(f"_secure_wipe_memory: munlock failed for {description}. Errno: {errno} ({os.strerror(errno)})")
+                except Exception as e_unpin:
+                    logger.error(f"_secure_wipe_memory: Exception during memory unpinning for {description}: {e_unpin}")
+            
+            gc.collect() # Suggest garbage collection
+
+    def _create_client_context(self):
+        """Create an SSL context for client-side TLS connections with enhanced security."""
+        # PROTOCOL_TLS_CLIENT requires OpenSSL 1.1.0g+ or LibreSSL 2.9.1+
+        # PROTOCOL_TLS is deprecated but more general for older versions.
+        # We aim for TLS 1.3, so PROTOCOL_TLS_CLIENT is appropriate.
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+        # Set preferred ciphers for TLS 1.3 (and 1.2 if unavoidable)
+        # Order matters: stronger/preferred ciphers first.
+        # This also helps in selecting PQ ciphers if supported and named correctly.
+        try:
+            # Combine primary and PQ placeholder ciphers if PQ is enabled
+            cipher_list_to_set = self.CIPHER_SUITES
+            if self.enable_pq_kem:
+                # Prepend expected PQ suites - order might matter for negotiation preference
+                cipher_list_to_set = self.EXPECTED_PQ_CIPHER_SUITES_PLACEHOLDERS + cipher_list_to_set
+            
+            context.set_ciphers(':'.join(cipher_list_to_set))
+            if self.SECURITY_LOG_LEVEL >= self.SECURITY_LOG_LEVEL_VERBOSE:
+                log.debug(f"Client Ciphers set to: {context.get_ciphers()}")
+        except ssl.SSLError as e:
+            log.error(f"Failed to set client ciphers: {e}. This may lead to insecure or failed connections.")
+            # Potentially fall back to a default or a known safe subset if specific ciphers fail
+
+        # Set options for security
+        context.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1 | ssl.OP_NO_TLSv1_2 # Require TLS 1.3 effectively
+        context.options |= ssl.OP_NO_COMPRESSION
+        context.options |= ssl.OP_SINGLE_DH_USE
+        context.options |= ssl.OP_SINGLE_ECDH_USE
+        # Consider ssl.OP_NO_RENEGOTIATION if issues arise, though secure renegotiation is preferred.
+
+        # Post-quantum groups (curves) for key exchange
+        if self.enable_pq_kem and hasattr(context, 'set_ecdh_curves'): # OpenSSL 1.1.1+
+            try:
+                # Correct method for setting groups in OpenSSL 1.1.1+ for TLS 1.3 is set_groups
+                # set_ecdh_curves is for older TLS versions or specific ECDH context setup.
+                if hasattr(context, 'set_groups'):
+                    context.set_groups(self.HYBRID_PQ_GROUPS)
+                    log.info(f"Client KEM groups set to: {self.HYBRID_PQ_GROUPS}")
+                else: # Fallback for slightly older OpenSSL 1.1.1 versions that might only have set_ecdh_curves for this
+                    context.set_ecdh_curves(self.HYBRID_PQ_GROUPS)
+                    log.info(f"Client ECDH curves (acting as groups) set to: {self.HYBRID_PQ_GROUPS}")                    
+            except Exception as e:
+                log.error(f"Failed to set post-quantum key exchange groups for client: {e}")
+
+        # Load private key if specified (for client certificate authentication)
+        if self.cert_path and self.key_path: # Check if paths for client cert/key are provided
+            try:
+                if self.in_memory_only and self.private_key_data and self.certificate_data:
+                    # Client is using an in-memory cert and key to authenticate itself
+                    context.load_pem_private_key(self.private_key_data, password=None)
+                    self._secure_wipe_memory(self.private_key_data, "in-memory client private key data")
+                    self.private_key_data = None 
+                    
+                    temp_cert_file_client = None
+                    try:
+                        with tempfile.NamedTemporaryFile(delete=False, mode='wb') as tmp_cert:
+                            tmp_cert.write(self.certificate_data)
+                            temp_cert_file_client = tmp_cert.name
+                        context.load_cert_chain(certfile=temp_cert_file_client)
+                    finally:
+                        if temp_cert_file_client and os.path.exists(temp_cert_file_client):
+                            os.unlink(temp_cert_file_client)
+                    log.info("Loaded in-memory client certificate and wiped private key.")
+
+                elif not self.in_memory_only and os.path.exists(self.key_path) and os.path.exists(self.cert_path):
+                    context.load_cert_chain(certfile=self.cert_path, keyfile=self.key_path)
+                    log.info(f"Loaded client certificate and key from disk: {self.cert_path}, {self.key_path}")
+                # else: Client not configured to use a certificate to authenticate itself.
+            except Exception as e:
+                log.error(f"Failed to load client certificate/key for client authentication: {e}", exc_info=True)
+
+        # Configure server certificate verification
+        if self.verify_certs:
+            if self.ca_path and os.path.exists(self.ca_path):
+                context.verify_mode = ssl.CERT_REQUIRED
+                context.check_hostname = True 
+                context.load_verify_locations(self.ca_path)
+                log.info(f"Server certificate verification enabled using CA: {self.ca_path}")
+            elif self.ca_path and not os.path.exists(self.ca_path):
+                log.error(f"CA path {self.ca_path} specified for server cert verification, but file does not exist. Falling back to default CAs.")
+                context.verify_mode = ssl.CERT_REQUIRED
+                context.check_hostname = True
+                context.load_default_certs(ssl.Purpose.SERVER_AUTH)
+                log.info("Server certificate verification enabled using default system CAs (specified CA not found).")
+            else: # No specific CA path, use system default CAs
+                context.verify_mode = ssl.CERT_REQUIRED
+                context.check_hostname = True
+                context.load_default_certs(ssl.Purpose.SERVER_AUTH)
+                log.info("Server certificate verification enabled using default system CAs.")
+        else:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            log.warning("Server certificate verification is DISABLED. This is insecure for production environments.")
+        
+        # OCSP Must-Staple callback configuration for client
+        if hasattr(context, 'stapled_ocsp_response_cb') and self.ocsp_stapling:
+            context.stapled_ocsp_response_cb = self._ocsp_stapling_callback
+            log.debug("OCSP Must-Staple callback configured for client context.")
+            
+        return context
+
+    def _create_server_context(self) -> ssl.SSLContext:
+        """Create an SSL context for server-side TLS connections with enhanced security."""
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        
+        # Set preferred ciphers
+        try:
+            cipher_list_to_set = self.CIPHER_SUITES
+            if self.enable_pq_kem:
+                cipher_list_to_set = self.EXPECTED_PQ_CIPHER_SUITES_PLACEHOLDERS + cipher_list_to_set
+            context.set_ciphers(':'.join(cipher_list_to_set))
+            if self.SECURITY_LOG_LEVEL >= self.SECURITY_LOG_LEVEL_VERBOSE:
+                log.debug(f"Server Ciphers set to: {context.get_ciphers()}")
+        except ssl.SSLError as e:
+            log.error(f"Failed to set server ciphers: {e}. This may lead to insecure or failed connections.")
+
+        context.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1 | ssl.OP_NO_TLSv1_2
+        context.options |= ssl.OP_NO_COMPRESSION
+        context.options |= ssl.OP_SINGLE_DH_USE
+        context.options |= ssl.OP_SINGLE_ECDH_USE
+
+        # Post-quantum groups for key exchange
+        if self.enable_pq_kem and hasattr(context, 'set_ecdh_curves'): # OpenSSL 1.1.1+
+            try:
+                if hasattr(context, 'set_groups'):
+                    context.set_groups(self.HYBRID_PQ_GROUPS)
+                    log.info(f"Server KEM groups set to: {self.HYBRID_PQ_GROUPS}")
+                else:
+                    context.set_ecdh_curves(self.HYBRID_PQ_GROUPS)
+                    log.info(f"Server ECDH curves (acting as groups) set to: {self.HYBRID_PQ_GROUPS}")
+            except Exception as e:
+                log.error(f"Failed to set post-quantum key exchange groups for server: {e}")
+
+        # Ensure cert and key are available, generate if necessary
+        if self.in_memory_only or \
+           not self.cert_path or not self.key_path or \
+           (not os.path.exists(self.cert_path) or not os.path.exists(self.key_path)):
+            if not self.in_memory_only:
+                 log.warning("Certificate or key file not found or not specified for disk mode. Generating default self-signed certificate.")
+            self._create_default_certificates() # Populates self.private_key_data and self.certificate_data
+
+        # Load certificates for the server
+        try:
+            if self.in_memory_only and self.private_key_data and self.certificate_data:
+                context.load_pem_private_key(self.private_key_data, password=None)
+                self._secure_wipe_memory(self.private_key_data, "in-memory server private key data")
+                self.private_key_data = None 
+                
+                temp_cert_file_server = None
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, mode='wb') as tmp_cert:
+                        tmp_cert.write(self.certificate_data)
+                        temp_cert_file_server = tmp_cert.name
+                    context.load_cert_chain(certfile=temp_cert_file_server)
+                finally:
+                    if temp_cert_file_server and os.path.exists(temp_cert_file_server):
+                        os.unlink(temp_cert_file_server) 
+                log.info("Loaded in-memory server certificate and wiped private key.")
+
+            elif not self.in_memory_only and self.cert_path and self.key_path and os.path.exists(self.cert_path) and os.path.exists(self.key_path):
+                context.load_cert_chain(certfile=self.cert_path, keyfile=self.key_path)
+                log.info(f"Loaded server certificates from disk: {self.cert_path}")
+            else:
+                # This path should ideally not be hit if _create_default_certificates works or paths are valid for disk mode.
+                # If we are in_memory_only and private_key_data is None here, _create_default_certificates failed.
+                missing_reason = "files not found on disk" if not self.in_memory_only else "in-memory data not generated"
+                log.critical(f"Server certificate and key could not be loaded ({missing_reason}). Cannot create server context.")
+                raise TlsChannelException(f"Server certificate/key material unavailable ({missing_reason}).")
+
+        except Exception as e:
+            log.critical(f"CRITICAL: Failed to load or establish server certificates: {e}", exc_info=True)
+            raise TlsChannelException(f"Failed to load/establish server certificates: {e}") from e
+        
+        # Configure client certificate verification (mutual TLS)
+        if self.verify_certs: # In server context, verify_certs means require and verify client cert
+            if self.ca_path and os.path.exists(self.ca_path):
+                context.verify_mode = ssl.CERT_REQUIRED
+                context.load_verify_locations(self.ca_path)
+                log.info(f"Client certificate verification enabled using CA: {self.ca_path}")
+            else:
+                # If ca_path is not specified or doesn't exist, but verify_certs is true,
+                # it implies we might want to use system default CAs for client certs, 
+                # or it's a misconfiguration. For explicit client cert requirement, a CA is usually specific.
+                # For now, log a warning if no CA is provided for client cert verification.
+                log.warning("Client certificate verification (verify_certs=True) requested for server, but no CA path provided or CA file not found. Client certs will not be verified against a specific CA.")
+                context.verify_mode = ssl.CERT_OPTIONAL # Or CERT_NONE if no CA means no verification
+        else:
+            context.verify_mode = ssl.CERT_NONE
+            log.info("Client certificate verification DISABLED for server.")
+            
+        # Enable OCSP Must-Staple for server
+        if self.ocsp_stapling:
+            context.ocsp_stapling_cb = self._ocsp_stapling_callback
+            log.debug("OCSP Must-Staple callback configured for server context.")
+
+        return context
 

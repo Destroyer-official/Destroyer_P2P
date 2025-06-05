@@ -76,6 +76,25 @@ This initiative pioneers a new echelon of secure peer-to-peer communication, arc
 
 **Recent Developments (June 2025):** Successfully resolved a critical issue in the certificate exchange mechanism, ensuring robust ChaCha20Poly1305 encryption with proper key derivation (HKDF-SHA256) and error handling. This fix has enhanced the reliability and security of the initial peer authentication process, leading to stable end-to-end secure communication across all layers.
 
+### 🛡️ Recent Security Fortifications (Post-June 2025 Audit)
+
+Following a comprehensive security review, several key enhancements have been integrated to further bolster the application's defenses:
+
+1.  **Enhanced Secure Key Wiping**:
+    *   **Accurate Handling of Immutable Keys**: The `KeyEraser` (in `secure_p2p.py`) and `_secure_wipe_memory` (in `tls_channel_manager.py`) now correctly distinguish between mutable `bytearray` and immutable `bytes` objects. For `bytes`, they log an informational message about the inability to wipe in-place, preventing a false sense of security.
+    *   **Memory Pinning for Sensitive Data**: For mutable `bytearray` objects containing key material, the system now employs `mlock()` (on POSIX systems) or `VirtualLock()` (on Windows) to pin the memory region in RAM. This significantly reduces the risk of sensitive key data being swapped to disk before it can be securely zeroized. Zeroization is performed using `ctypes.memset` for efficiency, followed by unpinning the memory.
+
+2.  **End-to-End Authentication of Key Exchange**:
+    *   **Addressing "No Authentication of First Message"**: A critical step has been added to authenticate the final derived `hybrid_root_key` (from the Hybrid X3DH+PQ exchange) before the Double Ratchet protocol is instantiated.
+    *   **Mechanism**: Both client and server now:
+        *   Hash their locally derived `hybrid_root_key` using SHA256.
+        *   Sign this hash using their long-term FALCON-1024 digital signature private key.
+        *   Exchange these hashes and signatures.
+        *   Verify the peer's signature on the hash, and critically, verify that the peer's hash matches their own locally computed hash of the `hybrid_root_key`.
+    *   **Impact**: This ensures that both parties have cryptographically agreed upon the same `hybrid_root_key` and that this agreement is bound to their authenticated long-term identities, mitigating sophisticated Man-in-the-Middle (MitM) attacks that could target the key exchange process itself.
+
+These updates substantially strengthen the application's security posture against advanced threats, particularly concerning key management in memory and the integrity of the cryptographic handshake.
+
 ### 🌟 Signature Capabilities
 
 This platform distinguishes itself through a potent combination of advanced security technologies:
