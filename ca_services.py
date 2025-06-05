@@ -15,6 +15,30 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
+# Attempt to import XChaCha20Poly1305 from tls_channel_manager
+# This assumes tls_channel_manager.py is in a location where it can be imported
+# and that it doesn't create circular dependencies with ca_services.py
+try:
+    from tls_channel_manager import XChaCha20Poly1305
+    HAVE_XCHACHA = True
+except ImportError as e:
+    # Fallback or error handling if XChaCha20Poly1305 cannot be imported
+    # For now, we'll log a warning and a simple fallback will occur later if XCHACHA isn't available
+    # In a real scenario, this might need a more robust fallback or be a fatal error
+    # For this specific change, we assume XChaCha20Poly1305 will be available.
+    # If not, the original ChaCha20Poly1305 would need to be used with stricter nonce handling,
+    # or the application might need to halt if XChaCha20 is essential.
+    # Given the request, we are upgrading to XChaCha20.
+    # If it's not found, the existing code would have used the basic ChaCha20Poly1305
+    # which we are trying to replace due to nonce concerns with the fixed key.
+    # So, ideally, this import should succeed or the application should have a clear strategy.
+    # For now, we'll rely on it being present.
+    HAVE_XCHACHA = False # This will be checked later
+    # logger.warning(f"Could not import XChaCha20Poly1305 from tls_channel_manager: {e}. Certificate exchange security may be reduced if it falls back.")
+    # Re-import basic ChaCha20Poly1305 for a potential (less ideal) fallback if needed,
+    # though the goal is to use XChaCha20Poly1305.
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
 # Configure logging
 logger = logging.getLogger("CAExchange")
 
@@ -50,7 +74,8 @@ class CAExchange:
                  buffer_size: int = 65536,
                  validity_days: int = 7,
                  key_type: str = "rsa4096",
-                 secure_exchange: bool = True):  # Changed to True by default for maximum security
+                 secure_exchange: bool = True,
+                 base_shared_secret: bytes = b'SecureP2PCertificateExchangeKey!!'):  # Changed to True by default for maximum security
         """
         Initialize the CAExchange module with enhanced security options
         
@@ -60,6 +85,7 @@ class CAExchange:
             validity_days: Certificate validity period in days
             key_type: Type of key to use ("ec521" for ECC P-521, "rsa4096" for RSA-4096)
             secure_exchange: Whether to encrypt certificate exchange with a pre-shared key (default: True)
+            base_shared_secret: The shared secret used for key derivation
         """
         self.exchange_port_offset = exchange_port_offset
         self.buffer_size = buffer_size
@@ -90,13 +116,55 @@ class CAExchange:
                 info=b'chacha20poly1305-exchange-key',
                 backend=default_backend()
             )
-            self.exchange_key = hkdf.derive(b'SecureP2PCertificateExchangeKey!!')
+            self.exchange_key = hkdf.derive(base_shared_secret)
             logger.debug(f"Derived 32-byte exchange key using HKDF: {self.exchange_key.hex()}")
 
         else:
             self.exchange_key = None
             
         logger.debug("CAExchange module initialized with enhanced security options")
+        
+        # Holds the exchange key for ChaCha20Poly1305 or XChaCha20Poly1305
+        # This key is derived once and used for the lifetime of this instance.
+        self.exchange_key: Optional[bytes] = None
+        self.xchacha_cipher: Optional[XChaCha20Poly1305] = None # For XChaCha20Poly1305
+
+        if self.secure_exchange:
+            # Derive a consistent key for encrypting the certificate exchange
+            # Using a fixed salt and info string for HKDF
+            hkdf = HKDF(
+                algorithm=hashes.SHA256(),
+                length=32, # ChaCha20Poly1305 and XChaCha20Poly1305 use a 32-byte key
+                salt=b'p2p-cert-exchange-salt-v1', 
+                info=b'chacha20poly1305-exchange-key', # Keep info generic as key is for an AEAD
+            )
+            # Ensure the input key material is bytes
+            base_key_material = base_shared_secret
+            if isinstance(base_key_material, str):
+                base_key_material = base_key_material.encode('utf-8')
+            
+            self.exchange_key = hkdf.derive(base_key_material)
+            
+            # Initialize XChaCha20Poly1305 cipher if available
+            if HAVE_XCHACHA:
+                try:
+                    self.xchacha_cipher = XChaCha20Poly1305(self.exchange_key)
+                    logger.debug("CAExchange initialized with XChaCha20Poly1305 for cert exchange.")
+                except Exception as e:
+                    logger.error(f"Failed to initialize XChaCha20Poly1305: {e}. Falling back to direct key usage (if unencrypted).")
+                    # This is a critical failure for secure exchange if XCHACHA was expected.
+                    # Depending on policy, might need to raise an error or disable secure_exchange.
+                    self.xchacha_cipher = None # Ensure it's None
+                    # Potentially: self.secure_exchange = False
+            else:
+                # This path should ideally not be taken if XChaCha20 is the goal.
+                # If HAVE_XCHACHA is False, it means the import failed.
+                # The original code might have used ChaCha20Poly1305 directly here.
+                # For this upgrade, lack of XChaCha20 is a problem for the intended security level.
+                logger.warning("XChaCha20Poly1305 not available. Certificate exchange may be insecure or fail if encryption is required.")
+                # self.cipher = ChaCha20Poly1305(self.exchange_key) # Old way
+
+        self.cert_store = {}
     
     def generate_self_signed(self) -> Tuple[bytes, bytes]:
         """
@@ -207,43 +275,64 @@ class CAExchange:
         
         return key_pem_bytes, cert_pem_bytes
         
-    def _encrypt_data(self, data: bytes) -> bytes:
-        """Encrypt data using ChaCha20-Poly1305 for secure exchange"""
-        if not self.exchange_key:
-            return data
-            
-        try:
-            # Generate random nonce
-            nonce = secrets.token_bytes(12)
-            
-            # Encrypt with ChaCha20-Poly1305
-            cipher = ChaCha20Poly1305(self.exchange_key)
-            encrypted = cipher.encrypt(nonce, data, None)
-            
-            # Return nonce + ciphertext
-            return nonce + encrypted
-        except Exception as e:
-            logger.error(f"Encryption failed: {e}, returning plaintext")
-            raise ValueError(f"Encryption failed during certificate exchange: {e}")
-        
-    def _decrypt_data(self, data: bytes) -> bytes:
-        """Decrypt data using ChaCha20-Poly1305 from secure exchange"""
-        if not self.exchange_key or len(data) <= 12:
-            return data
-            
-        try:
-            # Extract nonce and ciphertext
-            nonce = data[:12]
-            ciphertext = data[12:]
-            
-            # Decrypt with ChaCha20-Poly1305
-            cipher = ChaCha20Poly1305(self.exchange_key)
-            decrypted = cipher.decrypt(nonce, ciphertext, None)
-            return decrypted
-        except Exception as e:
-            logger.error(f"Failed to decrypt exchange data: {e}")
-            # Return original data if decryption fails
-            raise ValueError(f"Decryption failed during certificate exchange: {e}")
+    def _encrypt_data(self, data: bytes, associated_data: Optional[bytes] = None) -> bytes:
+        """Encrypt data using XChaCha20-Poly1305 (preferred) or raw for secure exchange"""
+        if not self.exchange_key or not self.secure_exchange:
+            logger.warning("Exchange key not set or secure_exchange is False. Returning plaintext.")
+            return data # Should not happen if secure_exchange is True as intended
+
+        if self.xchacha_cipher:
+            try:
+                # XChaCha20Poly1305.encrypt handles nonce generation and prepends it
+                logger.debug(f"Encrypting with XChaCha20Poly1305. AAD: {associated_data is not None}")
+                return self.xchacha_cipher.encrypt(data=data, associated_data=associated_data)
+            except Exception as e:
+                logger.error(f"XChaCha20Poly1305 encryption failed (AAD: {associated_data is not None}): {e}")
+                raise ValueError(f"Encryption failed during certificate exchange (AAD: {associated_data is not None}): {e}")
+        else:
+            # Fallback to ChaCha20Poly1305 if XChaCha20 is not available (less ideal due to nonce management for fixed key)
+            # This path indicates a setup issue or failed import of XChaCha20Poly1305.
+            # For the purpose of this fix, we are focusing on XChaCha20.
+            # A robust implementation would need to decide if this fallback is acceptable
+            # or if it should raise an error.
+            logger.warning("Attempting fallback to basic ChaCha20Poly1305 for encryption - this is not the target state.")
+            try:
+                # Manual nonce generation for basic ChaCha20Poly1305
+                nonce = secrets.token_bytes(12) # Standard 96-bit nonce
+                cipher = ChaCha20Poly1305(self.exchange_key)
+                encrypted = cipher.encrypt(nonce, data, associated_data)
+                return nonce + encrypted
+            except Exception as e:
+                logger.error(f"Fallback ChaCha20Poly1305 encryption failed: {e}")
+                raise ValueError(f"Fallback encryption failed: {e}")
+
+    def _decrypt_data(self, enc_data: bytes, associated_data: Optional[bytes] = None) -> bytes:
+        """Decrypt data using XChaCha20-Poly1305 (preferred) or raw for secure exchange"""
+        if not self.exchange_key or not self.secure_exchange:
+            logger.warning("Exchange key not set or secure_exchange is False. Assuming plaintext.")
+            return enc_data # Should not happen
+
+        if self.xchacha_cipher:
+            try:
+                # XChaCha20Poly1305.decrypt expects nonce to be prepended to enc_data
+                logger.debug(f"Decrypting with XChaCha20Poly1305. AAD: {associated_data is not None}")
+                return self.xchacha_cipher.decrypt(data=enc_data, associated_data=associated_data)
+            except Exception as e: # Catch specific crypto errors if possible, e.g., InvalidTag
+                logger.error(f"XChaCha20Poly1305 decryption failed (AAD: {associated_data is not None}): {e}")
+                raise ValueError(f"Decryption failed during certificate exchange (AAD: {associated_data is not None}): {e}")
+        else:
+            # Fallback to ChaCha20Poly1305 (less ideal)
+            logger.warning("Attempting fallback to basic ChaCha20Poly1305 for decryption - this is not the target state.")
+            try:
+                if len(enc_data) < 12: # Nonce + data
+                    raise ValueError("Encrypted data too short for ChaCha20Poly1305 (missing nonce).")
+                nonce = enc_data[:12]
+                ciphertext = enc_data[12:]
+                cipher = ChaCha20Poly1305(self.exchange_key)
+                return cipher.decrypt(nonce, ciphertext, associated_data)
+            except Exception as e:
+                logger.error(f"Fallback ChaCha20Poly1305 decryption failed: {e}")
+                raise ValueError(f"Fallback decryption failed: {e}")
 
     def exchange_certs(self, role: str, host: str, port: int) -> bytes:
         """
@@ -316,9 +405,13 @@ class CAExchange:
             
             # Only encrypt if secure exchange is enabled
             encrypted_payload = cert_data # Assume plaintext initially
+            current_aad = None
             if self.secure_exchange:
                 try:
-                    encrypted_payload = self._encrypt_data(cert_data)
+                    # Construct AAD from the connection context
+                    current_aad = f"{role}:{host}:{exchange_port}:cert-exchange".encode('utf-8')
+                    logger.debug(f"Using AAD for cert encryption: {current_aad.decode('utf-8', errors='ignore')}")
+                    encrypted_payload = self._encrypt_data(cert_data, associated_data=current_aad)
                 except ValueError as e:
                     logger.error(f"Failed to encrypt certificate for exchange: {e}")
                     peer_sock.close()
@@ -386,7 +479,15 @@ class CAExchange:
             decrypted_successfully = False
             if self.secure_exchange:
                 try:
-                    decrypted_payload = self._decrypt_data(data)
+                    # Construct AAD for decryption, should match the one used for encryption
+                    # Note: We use the *expected* peer role, host, and port for AAD construction.
+                    # For a server, the host is its listening IP. For a client, it's the peer's IP.
+                    # This implies both sides must agree on these context parameters for AAD to match.
+                    # The `host` parameter to exchange_certs is the relevant one.
+                    current_aad_for_decryption = f"{'client' if role == 'server' else 'server'}:{host}:{exchange_port}:cert-exchange".encode('utf-8')
+                    logger.debug(f"Using AAD for cert decryption: {current_aad_for_decryption.decode('utf-8', errors='ignore')}")
+
+                    decrypted_payload = self._decrypt_data(data, associated_data=current_aad_for_decryption)
                     # Verify this looks like a PEM certificate
                     if b"-----BEGIN CERTIFICATE-----" in decrypted_payload:
                         data = decrypted_payload

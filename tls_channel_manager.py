@@ -226,9 +226,11 @@ class XChaCha20Poly1305:
         # Derive a subkey using HChaCha20
         subkey = self._hchacha20(self.key, nonce[:16])
         
-        # Use the subkey with ChaCha20-Poly1305 and the remaining 8 bytes of nonce
+        # Use the subkey with ChaCha20-Poly1305 and the remaining 8 bytes of nonce,
+        # prepended with 4 zero bytes to make a 12-byte nonce.
+        internal_nonce = b'\x00\x00\x00\x00' + nonce[16:]
         chacha = ChaCha20Poly1305(subkey)
-        ciphertext = chacha.encrypt(nonce[16:], data, associated_data)
+        ciphertext = chacha.encrypt(internal_nonce, data, associated_data)
     
         # Return nonce + ciphertext for complete encryption result
         return nonce + ciphertext
@@ -254,9 +256,11 @@ class XChaCha20Poly1305:
         # Derive a subkey using HChaCha20
         subkey = self._hchacha20(self.key, nonce[:16])
         
-        # Use the subkey with ChaCha20-Poly1305 and the remaining 8 bytes of nonce
+        # Use the subkey with ChaCha20-Poly1305 and the remaining 8 bytes of nonce,
+        # prepended with 4 zero bytes to make a 12-byte nonce.
+        internal_nonce = b'\x00\x00\x00\x00' + nonce[16:]
         chacha = ChaCha20Poly1305(subkey)
-        return chacha.decrypt(nonce[16:], ciphertext, associated_data)
+        return chacha.decrypt(internal_nonce, ciphertext, associated_data)
     
     def _hchacha20(self, key: bytes, nonce: bytes) -> bytes:
         """
@@ -3535,7 +3539,7 @@ class TLSSecureChannel:
                         )
                 else:
                     # Fallback to software key generation
-                    log.info("Hardware key generation not supported, using software")
+                    log.warning(f"HSM/TPM key generation failed or was declined (e.g., no user interaction for authorization, or hardware error). Falling back to software-based key generation.")
                     private_key = rsa.generate_private_key(
                         public_exponent=65537,
                         key_size=3072,  # Increased from 2048 for stronger security

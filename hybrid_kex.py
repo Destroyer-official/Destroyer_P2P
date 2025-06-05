@@ -885,6 +885,14 @@ class HybridKeyExchange:
             if self.falcon_private_key:
                 secure_erase(self.falcon_private_key)
             
+            # Store old identity information for potential file deletion
+            old_identity_for_file_deletion = None
+            old_key_file_path = None
+
+            if self.ephemeral_mode and not self.in_memory_only and self.keys_dir and self.identity:
+                old_identity_for_file_deletion = self.identity # Capture current identity before it changes
+                old_key_file_path = os.path.join(self.keys_dir, f"{old_identity_for_file_deletion}_hybrid_keys.json")
+
             # Generate new identity if in ephemeral mode
             if self.ephemeral_mode:
                 random_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
@@ -894,7 +902,20 @@ class HybridKeyExchange:
             # Generate all new keys
             self._generate_keys()
             
+            # Delete the old key file *after* new keys are generated (or attempt to)
+            # but *before* saving new ones, to minimize window of no keys if save fails.
+            # More robustly, could delete after successful save of new key.
+            # For now, delete here.
+            if old_key_file_path and os.path.exists(old_key_file_path):
+                try:
+                    os.remove(old_key_file_path)
+                    log.info(f"Successfully deleted old ephemeral key file: {old_key_file_path}")
+                except OSError as e:
+                    log.warning(f"Could not delete old ephemeral key file {old_key_file_path}: {e}")
+            
             # Save keys if not in ephemeral or in-memory mode
+            # Note: _save_keys itself checks for self.ephemeral_mode and self.in_memory_only
+            # and will not save if either is true. This call is mainly for persistent identities.
             if not self.ephemeral_mode and not self.in_memory_only:
                 self._save_keys()
                 

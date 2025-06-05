@@ -27,8 +27,36 @@ import platform_hsm_interface as cphs
 from double_ratchet import secure_erase
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s')
+logging.basicConfig(
+    level=logging.DEBUG,  # Set root logger level to DEBUG for console output
+    format='%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)] # Explicitly use stdout
+)
 log = logging.getLogger(__name__)
+log.setLevel(logging.DEBUG) # Ensure DEBUG messages from this module are processed
+
+# Create a file handler for logging
+try:
+    # Attempt to create a log directory if it doesn't exist, relative to the script or CWD
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    log_file_path = log_dir / "secure_key_manager.log"
+except Exception as e_log_dir:
+    # Fallback to current working directory if logs subdir fails
+    log_file_path = Path("secure_key_manager.log")
+    log.warning(f"Could not create logs directory, saving log to current directory: {log_file_path}. Error: {e_log_dir}")
+
+file_handler = logging.FileHandler(log_file_path, mode='a', encoding='utf-8')
+file_handler.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s')
+file_handler.setFormatter(formatter)
+log.addHandler(file_handler)
+# If other modules also add handlers to the root logger, this module's logs will also go there.
+# To prevent duplicate console logging if root already has StreamHandler from elsewhere,
+# we can set propagate to False, but for this module, it's fine to let it propagate.
+# log.propagate = False
+
+log.info(f"SecureKeyManager logging initialized. Console level: DEBUG, File level: DEBUG. Log file: {log_file_path.resolve()}")
 
 # Try to import optional dependencies
 try:
@@ -425,11 +453,12 @@ class KeyService:
     def secure_store(self, key_id, key_data):
         if HAVE_KEYRING:
             try:
-                keyring.set_password(SERVICE_APP_NAME, key_id, key_data)
-                log.debug(f"Key '{{key_id}}' stored in OS keyring for '{{SERVICE_APP_NAME}}'.")
-                return True
-            except NoKeyringError:
-                log.warning("No OS keyring backend found for key storage.")
+                # Get keyring backend name for logging, handle potential errors if get_keyring() is None
+                keyring_backend_name = "Unknown"
+                if keyring.get_keyring():
+                    keyring_backend_name = keyring.get_keyring().__class__.__name__
+                
+                log.warning(f"SECURITY NOTICE (KeyService): Storing key \'{{key_id}}\' in OS keyring for app \'{{SERVICE_APP_NAME}}\'. \"\n                            f"Backend: {{keyring_backend_name}}. \"\n                            "OS keyring security depends on user account security. Consider implications if account is compromised.")\n                keyring.set_password(SERVICE_APP_NAME, key_id, key_data)\n                log.debug(f"Key \'{{key_id}}\' stored in OS keyring for \'{{SERVICE_APP_NAME}}\'.")\n                return True\n            except NoKeyringError:\n                log.warning("No OS keyring backend found for key storage.")
             except Exception as e_keyring_set:
                 log.error(f"Keyring storage failed for key '{{key_id}}': {{e_keyring_set}}")
         
@@ -726,12 +755,18 @@ if __name__ == "__main__":
             except Exception as e:
                 log.error(f"Error communicating with key service: {e}")
         
+        # Fallback to direct OS keyring or file storage if ZMQ service fails or is not used
+        log.warning(f"Attempting fallback storage for key '{key_name}' (OS keyring or file). ZMQ service might be unavailable or failed.")
         try:
             if HAVE_KEYRING:
+                log.warning(f"SECURITY NOTICE: Storing key '{key_name}' in OS keyring for app '{self.app_name}'. "
+                            f"Backend: {keyring.get_keyring().__class__.__name__ if HAVE_KEYRING and keyring.get_keyring() else 'Unknown'}. "
+                            "OS keyring security depends on user account security. Consider implications if account is compromised.")
                 keyring.set_password(self.app_name, key_name, key_data)
-                log.info(f"Key {key_name} stored in OS keyring under app_name '{self.app_name}'")
+                log.info(f"Key {key_name} stored in OS keyring under app_name '{self.app_name}' (fallback).")
                 return True
             
+            # Fallback to file storage if keyring is not available or fails (this part is simplified)
             key_path = self.secure_dir / f"{key_name}.key"
             
             # Ensure the parent directory exists with correct permissions before writing

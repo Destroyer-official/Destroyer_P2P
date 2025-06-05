@@ -55,8 +55,9 @@ import secure_key_manager
 from ca_services import CAExchange  # Import the new CAExchange module
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s') # Ensure DEBUG level
 log = logging.getLogger(__name__)
+log.setLevel(logging.DEBUG) # Ensure DEBUG level for the main logger
 
 # Set up file handler for security logs
 try:
@@ -64,10 +65,10 @@ try:
     os.makedirs(logs_dir, exist_ok=True)
     
     file_handler = logging.FileHandler(os.path.join(logs_dir, 'secure_p2p_security.log'))
-    file_handler.setLevel(logging.DEBUG)
+    file_handler.setLevel(logging.DEBUG) # Ensure DEBUG level for file handler
     file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] [%(funcName)s] %(message)s'))
     log.addHandler(file_handler)
-    log.setLevel(logging.DEBUG)
+    # log.setLevel(logging.DEBUG) # This line is redundant as it's set above
 except Exception as e:
     log.warning(f"Could not set up security logging: {e}")
 
@@ -600,7 +601,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                 log.error(f"Error during SecureKeyManager cleanup in main cleanup: {e}")
             finally:
                 self.key_manager = None # Ensure nullified
-
+        
         # Clean up CAExchange persisted files if any
         if hasattr(self, 'ca_exchange'):
             try:
