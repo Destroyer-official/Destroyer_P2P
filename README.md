@@ -43,7 +43,7 @@
 ## 📜 Table of Contents
 
 - [About The Project](#about-the-project-engineering-digital-sovereignty)
-- [Architecture](#architecture-a-blueprint-for-unbreakable-trust)
+- [Architecture](#%EF%B8%8F-architecture-a-blueprint-for-unbreakable-trust)
 - [Security Features In-Depth](#security-features-in-depth-pillars-of-a-quantum-resistant-fortress)
   - [Hybrid Post-Quantum Cryptography](#hybrid-post-quantum-cryptography-bridging-classical--quantum-resilience)
   - [Multi-Layered Encryption](#multi-layered-encryption-a-concentric-shield-of-confidentiality)
