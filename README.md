@@ -1,124 +1,166 @@
+# ⚡ SECURE P2P CHAT ⚡
+
 <div align="center">
-  <img src="https://img.shields.io/badge/security-maximum-brightgreen" alt="Security: Maximum">
-  <img src="https://img.shields.io/badge/encryption-hybrid_post_quantum-blue" alt="Encryption: Hybrid Post-Quantum">
-  <img src="https://img.shields.io/badge/protocol-multi_layered-orange" alt="Protocol: Multi-Layered">
-  <img src="https://img.shields.io/badge/platform-cross_platform-purple" alt="Platform: Cross-Platform">
-  <img src="https://img.shields.io/badge/hardware_security-TPM_HSM-red" alt="Hardware Security: TPM/HSM">
-  <img src="https://img.shields.io/badge/license-MIT-yellow" alt="License: MIT">
+  <img src="https://img.shields.io/badge/SECURITY-MAXIMUM-brightgreen?style=for-the-badge" alt="Security: Maximum">
+  <img src="https://img.shields.io/badge/ENCRYPTION-QUANTUM_RESISTANT-blue?style=for-the-badge" alt="Encryption: Quantum-Resistant">
+  <img src="https://img.shields.io/badge/PROTOCOL-MULTI_LAYERED-orange?style=for-the-badge" alt="Protocol: Multi-Layered">
+  <img src="https://img.shields.io/badge/PLATFORM-CROSS_PLATFORM-purple?style=for-the-badge" alt="Platform: Cross-Platform">
+  <img src="https://img.shields.io/badge/HARDWARE-TPM_HSM-red?style=for-the-badge" alt="Hardware: TPM/HSM">
+  <img src="https://img.shields.io/badge/LICENSE-MIT-yellow?style=for-the-badge" alt="License: MIT">
 </div>
 
-<br />
+<div align="center">
+  <h3>
+    <em>[ QUANTUM-RESISTANT COMMUNICATION MATRIX ]</em>
+  </h3>
+  <p>
+    <code>Fortified with next-generation cryptographic shields • ML-KEM-1024 • FALCON-1024 • Zero-footprint operation</code>
+  </p>
+  <hr style="width:75%;border:1px solid #3a3a3a;">
+</div>
+
+## ◢◤ SYSTEM NAVIGATION ◢◤
 
 <div align="center">
-  <h1 align="center">🔐 Secure P2P Chat 🌌</h1>
-  <p align="center">
-    <em>Quantum-resistant, military-grade P2P communication with multi-layered cryptographic protection. Your digital sanctum in the post-quantum era.</em>
-    <br />
-    <br />
-    <a href="#🏗️-architecture"><strong>Dive into the Architecture »</strong></a>
-    <br />
-    <br />
-    <a href="#⚙️-setup-and-running">Launch Guide</a>
-    ·
-    <a href="#📈-security-flow-summary">Decipher the Flow</a>
-    ·
-    <a href="#🧩-module-breakdown--network-stages">Explore Modules</a>
+  <table>
+    <tr>
+      <td align="center"><a href="#-system-overview-"><b>🔍 OVERVIEW</b></a></td>
+      <td align="center"><a href="#-core-capabilities-"><b>⚔️ CAPABILITIES</b></a></td>
+      <td align="center"><a href="#-security-architecture-"><b>🏗️ ARCHITECTURE</b></a></td>
+      <td align="center"><a href="#-deployment-protocol-"><b>⚡ DEPLOYMENT</b></a></td>
+    </tr>
+    <tr>
+      <td align="center"><a href="#-defense-mechanisms-"><b>🛡️ DEFENSES</b></a></td>
+      <td align="center"><a href="#-module-matrix-"><b>🧩 MODULES</b></a></td>
+      <td align="center"><a href="#-encryption-flow-"><b>🔒 ENCRYPTION</b></a></td>
+      <td align="center"><a href="#-operation-guide-"><b>🖥️ OPERATION</b></a></td>
+    </tr>
+    <tr>
+      <td align="center"><a href="#-technical-specifications-"><b>📊 SPECS</b></a></td>
+      <td align="center"><a href="#-application-vectors-"><b>🎯 USE CASES</b></a></td>
+      <td align="center"><a href="#-future-expansion-"><b>🚀 ROADMAP</b></a></td>
+      <td align="center"><a href="#-security-advisories-"><b>⚠️ ADVISORIES</b></a></td>
+    </tr>
+  </table>
+</div>
+
+<details>
+<summary><b>DETAILED NAVIGATION MATRIX</b></summary>
+
+- [🔍 SYSTEM OVERVIEW](#-system-overview-)
+- [⚔️ CORE CAPABILITIES](#-core-capabilities-)
+- [🏗️ SECURITY ARCHITECTURE](#-security-architecture-)
+- [🔐 SECURITY COMPONENTS](#-security-components-)
+  - [Quantum-Resistant Cryptography](#quantum-resistant-cryptography)
+  - [Multi-Layer Encryption Shield](#multi-layer-encryption-shield)
+  - [Silicon-Level Security](#silicon-level-security)
+  - [Advanced Key Management](#advanced-key-management)
+- [🧩 MODULE MATRIX](#-module-matrix-)
+- [🔒 ENCRYPTION FLOW](#-encryption-flow-)
+- [🛡️ DEFENSE MECHANISMS](#-defense-mechanisms-)
+  - [Anti-Analysis Protection](#anti-analysis-protection)
+  - [Next-Gen Secure Messaging](#next-gen-secure-messaging)
+  - [Digital Trace Elimination](#digital-trace-elimination)
+  - [Continuous Security Monitoring](#continuous-security-monitoring)
+  - [Identity Obfuscation](#identity-obfuscation)
+- [⚡ SECURITY ENHANCEMENTS](#-security-enhancements-)
+  - [AEAD Nonce Protocol](#aead-nonce-protocol)
+  - [Memory Protection Matrix](#memory-protection-matrix)
+  - [Replay Attack Countermeasures](#replay-attack-countermeasures)
+  - [Signature Verification Hardening](#signature-verification-hardening)
+  - [TLS Protocol Enforcement](#tls-protocol-enforcement)
+- [⚙️ DEPLOYMENT PROTOCOL](#-deployment-protocol-)
+- [🖥️ OPERATION GUIDE](#-operation-guide-)
+- [📊 TECHNICAL SPECIFICATIONS](#-technical-specifications-)
+- [🎯 APPLICATION VECTORS](#-application-vectors-)
+- [🚀 FUTURE EXPANSION](#-future-expansion-)
+- [🔧 CONTRIBUTION PROTOCOL](#-contribution-protocol-)
+- [⚠️ SECURITY ADVISORIES](#-security-advisories-)
+- [📜 LICENSE](#-license-)
+- [🔗 ACKNOWLEDGMENTS](#-acknowledgments-)
+
+</details>
+
+## 🔍 SYSTEM OVERVIEW 🔍
+
+<div style="background-color:#0a0a0a; padding:15px; border-radius:5px; border-left:3px solid #3498db;">
+  <p>
+    <span style="color:#3498db; font-weight:bold;">SECURE P2P CHAT</span> establishes a quantum-resistant communication matrix using advanced cryptographic algorithms and multi-layered security protocols. The system creates a hardened communication channel that defends against both conventional and post-quantum threats, ensuring data confidentiality, integrity, and authenticity.
   </p>
 </div>
 
----
+### 📡 SYSTEM STATUS
 
-## ✨ Highlights
+| VERSION | STATUS | SECURITY LEVEL | LAST UPDATE |
+|:-------:|:------:|:--------------:|:-----------:|
+| 2.5.3   | ACTIVE | MAXIMUM        | JUNE 2025   |
 
-- **🛡️ Quantum-Hardened Cryptography**: Fortified with X25519, ML-KEM-1024, and FALCON-1024 for next-generation threat resilience.
-- **🧅 Deep Encryption Layers (4x)**: Independent strata of protection including TLS 1.3, Double Ratchet, application-specific ciphers, and encrypted certificate exchange.
-- **👁️‍🗨️ Advanced Anonymity Shield**: Sophisticated traffic analysis countermeasures and message length obfuscation.
-- **⚙️ Seamless Hardware Security**: Integrates with platform-native secure elements like TPM (Windows) and HSMs (Linux/macOS).
-- **🔑 Unyielding Forward Secrecy & Post-Compromise Security**: Employs automatic key rotation and robust break-in recovery protocols.
-- **💨 Ephemeral Zero-Trace Mode**: Optional in-memory operation ensures no persistent data footprint.
-- **💻 Universal Platform Compatibility**: Engineered for flawless operation across Windows, macOS, and Linux ecosystems.
+**⚠️ CRITICAL SECURITY NOTICE [JUNE 2025]:** Certificate exchange mechanism has been hardened with improved ChaCha20Poly1305 implementation, proper HKDF-SHA256 key derivation, and enhanced error handling. This reinforcement addresses potential vulnerabilities in the peer authentication process, providing verified end-to-end security across all communication layers.
 
----
+## ⚔️ CORE CAPABILITIES ⚔️
 
-## 📜 Table of Contents
+<div class="capability-grid">
+  <div class="capability-card">
+    <h3>🔮 QUANTUM SHIELD</h3>
+    <p>Hybrid cryptographic armor utilizing X25519 with ML-KEM-1024 key encapsulation and FALCON-1024 digital signatures, creating a defense matrix impervious to quantum computational attacks</p>
+  </div>
+  
+  <div class="capability-card">
+    <h3>🧅 ONION ENCRYPTION</h3>
+    <p>Quadruple-layer encryption protocol: TLS 1.3 transport security, Double Ratchet message encryption, application-specific cipher protection, and encrypted certificate exchange</p>
+  </div>
+  
+  <div class="capability-card">
+    <h3>👻 DIGITAL PHANTOM</h3>
+    <p>Advanced traffic obfuscation, dynamic padding, and uniform packet sizing make communications resistant to pattern analysis, metadata extraction, and traffic fingerprinting</p>
+  </div>
+  
+  <div class="capability-card">
+    <h3>🔒 SILICON FORTRESS</h3>
+    <p>Cryptographic operations anchored in hardware security elements (TPM 2.0/HSM) for key protection beyond software vulnerability domains</p>
+  </div>
+  
+  <div class="capability-card">
+    <h3>⏳ TEMPORAL ARMOR</h3>
+    <p>Forward secrecy and post-compromise security through continuous key evolution, automatic rotation protocols, and break-in recovery mechanisms</p>
+  </div>
+  
+  <div class="capability-card">
+    <h3>💨 ZERO FOOTPRINT</h3>
+    <p>Ephemeral mode operates exclusively in secured memory regions with aggressive memory wiping, leaving no persistent data artifacts for forensic discovery</p>
+  </div>
+  
+  <div class="capability-card">
+    <h3>🌐 UNIVERSAL DEPLOYMENT</h3>
+    <p>Cross-platform operation across Windows, macOS, and Linux with consistent security guarantees and hardware security integration</p>
+  </div>
+</div>
 
-- [About The Project](#-about-the-project-engineering-digital-sovereignty)
-- [Architecture](#%EF%B8%8F-architecture-a-blueprint-for-unbreakable-trust)
-- [Security Features In-Depth](#%EF%B8%8F-security-features-in-depth-pillars-of-a-quantum-resistant-fortress)
-  - [Hybrid Post-Quantum Cryptography](#%EF%B8%8F-hybrid-post-quantum-cryptography-bridging-classical--quantum-resilience)
-  - [Multi-Layered Encryption](#-multi-layered-encryption-a-concentric-shield-of-confidentiality)
-  - [Hardware Security Integration](#%EF%B8%8F-hardware-security-integration-anchoring-trust-in-silicon)
-  - [Secure Key Management](#-secure-key-management-a-vault-for-cryptographic-secrets)
-  - [Layered Security Model Diagram](#%EF%B8%8F-layered-security-model-diagram-visualizing-the-defense-cascade)
-- [Module Breakdown & Network Stages](#module-breakdown--network-stages-deconstructing-the-digital-fortress)
-- [Security Flow Summary](#security-flow-summary-the-journey-of-a-protected-message)
-- [Advanced Protection Features](#-advanced-protection-features-securing-the-unseen--unforeseen)
-  - [Traffic Analysis Resistance](#-traffic-analysis-resistance-cloaking-digital-footprints)
-  - [Double Ratchet Enhancement](#-double-ratchet-enhancement-next-generation-secure-messaging-core)
-  - [Anti-Forensic Design](#-anti-forensic-design-vanishing-digital-traces)
-  - [Security Monitoring](#-security-monitoring-vigilant-sentinel-protocols)
-  - [Ephemeral Identities](#-ephemeral-identities-dynamic-anonymity--untraceability)
-- [Setup and Running](#%EF%B8%8F-setup-and-running-igniting-your-secure-channel)
-- [Under The Hood: Technical Deep Dive](#-under-the-hood-technical-deep-dive)
-- [Dependencies](#-dependencies-the-building-blocks-of-security)
-- [Potential Use Cases](#-potential-use-cases-securing-tomorrows-sensitive-communications)
-- [Roadmap: The Future Unveiled](#%EF%B8%8F-roadmap-the-future-unveiled)
-- [Contributing to the Frontier](#-contributing-to-the-frontier)
-- [Security Considerations & Disclaimers](#security-considerations--disclaimers)
-- [License](#license)
-- [Acknowledgments & Inspirations](#-acknowledgments--inspirations)
+<style>
+.capability-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 20px;
+}
+.capability-card {
+  background: linear-gradient(145deg, #0a0a14 0%, #141428 100%);
+  border-left: 3px solid #3498db;
+  padding: 15px;
+  border-radius: 5px;
+}
+.capability-card h3 {
+  color: #3498db;
+  margin-top: 0;
+}
+</style>
 
----
+## 🏗️ SECURITY ARCHITECTURE 🏗️
 
-## 🚀 About The Project: Engineering Digital Sovereignty
-
-This initiative pioneers a new echelon of secure peer-to-peer communication, architected to withstand both contemporary and emergent quantum threats. It is a testament to proactive defense in an evolving digital landscape.
-
-**Recent Developments (June 2025):** Successfully resolved a critical issue in the certificate exchange mechanism, ensuring robust ChaCha20Poly1305 encryption with proper key derivation (HKDF-SHA256) and error handling. This fix has enhanced the reliability and security of the initial peer authentication process, leading to stable end-to-end secure communication across all layers.
-
-### ✨ Recent Security Improvements
-
-Following a comprehensive security review, several key enhancements have been integrated to further bolster the application's defenses:
-
-*   **Standardized Cryptographic Primitives**: Where possible, the project is moving away from custom cryptographic implementations in favor of well-vetted, standard libraries to enhance security and maintainability.
-*   **Robust Certificate Exchange**: The certificate exchange process has been hardened. It now uses `ChaCha20-Poly1305` for encryption, with keys properly derived using `HKDF` to ensure the correct key length. Error handling has been improved to abort the connection if any part of the certificate exchange fails, preventing fail-open vulnerabilities.
-*   **Careful Key Derivation**: Throughout the application, key derivation functions (`HKDF`) are used with domain separation to ensure that keys are used only for their intended purpose.
-
-### 🛡️ Recent Security Fortifications (Post-June 2025 Audit)
-
-Following a comprehensive security review, several key enhancements have been integrated to further bolster the application's defenses:
-
-1.  **Enhanced Secure Key Wiping**:
-    *   **Accurate Handling of Immutable Keys**: The `KeyEraser` (in `secure_p2p.py`) and `_secure_wipe_memory` (in `tls_channel_manager.py`) now correctly distinguish between mutable `bytearray` and immutable `bytes` objects. For `bytes`, they log an informational message about the inability to wipe in-place, preventing a false sense of security.
-    *   **Memory Pinning for Sensitive Data**: For mutable `bytearray` objects containing key material, the system now employs `mlock()` (on POSIX systems) or `VirtualLock()` (on Windows) to pin the memory region in RAM. This significantly reduces the risk of sensitive key data being swapped to disk before it can be securely zeroized. Zeroization is performed using `ctypes.memset` for efficiency, followed by unpinning the memory.
-
-2.  **End-to-End Authentication of Key Exchange**:
-    *   **Addressing "No Authentication of First Message"**: A critical step has been added to authenticate the final derived `hybrid_root_key` (from the Hybrid X3DH+PQ exchange) before the Double Ratchet protocol is instantiated.
-    *   **Mechanism**: Both client and server now:
-        *   Hash their locally derived `hybrid_root_key` using SHA256.
-        *   Sign this hash using their long-term FALCON-1024 digital signature private key.
-        *   Exchange these hashes and signatures.
-        *   Verify the peer's signature on the hash, and critically, verify that the peer's hash matches their own locally computed hash of the `hybrid_root_key`.
-    *   **Impact**: This ensures that both parties have cryptographically agreed upon the same `hybrid_root_key` and that this agreement is bound to their authenticated long-term identities, mitigating sophisticated Man-in-the-Middle (MitM) attacks that could target the key exchange process itself.
-
-These updates substantially strengthen the application's security posture against advanced threats, particularly concerning key management in memory and the integrity of the cryptographic handshake.
-
-### 🌟 Signature Capabilities
-
-This platform distinguishes itself through a potent combination of advanced security technologies:
-
-*   **Core Cryptographic Shield**:
-    *   **Hybrid X3DH+PQ Key Exchange**: Merges the battle-tested X3DH with the quantum-resistant ML-KEM-1024, establishing a forward-secret and quantum-hardened initial shared secret.
-    *   **FALCON-1024 Signatures**: Provides high-assurance, quantum-resistant authentication for identities and critical data.
-*   **Resilience & Confidentiality**:
-    *   **Multi-Strata Encryption**: Deploys distinct encryption across TLS 1.3, the Double Ratchet, application data, and certificate exchanges.
-    *   **Dynamic Identity Management**: Features automatic rotation of cryptographic identities for enhanced anonymity and untraceability.
-*   **Stealth & Evasion**:
-    *   **Advanced Obfuscation Techniques**: Implements sophisticated measures to resist traffic analysis and conceal message metadata.
-    *   **Zero-Footprint Operation**: Offers an optional in-memory mode that leaves no data on persistent storage.
-*   **Platform & Integration**:
-    *   **Universal HSM/TPM Interface**: Abstracts hardware security operations for seamless cross-platform functionality.
-    *   **Robust Memory Safeguards**: Incorporates security-hardened memory management, including canary values and secure wiping.
+<div style="background-color:#0a0a0a; padding:15px; border-radius:5px; border-left:3px solid #00cc99;">
+  <p>
+    The system employs a hyper-modular defense-in-depth strategy with specialized security components working in concert to create an impenetrable communications matrix. Each module is precision-engineered to fulfill a specific security function while contributing to the integrated protection ecosystem.
+  </p>
+</div>
 
 ---
 
@@ -463,19 +505,57 @@ Follow these instructions to deploy and operate your quantum-resistant P2P commu
 pip install -r requirements.txt
 ```
 
-### Launching the Node
+## Usage Guide
 
-Initiate the secure P2P chat application:
+### Launching the Application
+
+To start the secure P2P chat application:
 
 ```bash
 python secure_p2p.py
 ```
 
-The application will autonomously guide you through the following phases:
-1.  **NAT Traversal**: Discovering your public network presence using STUN.
-2.  **Role Assignment**: Choose to operate as a listening server node or an initiating client node.
-3.  **Quantum-Secure Handshake**: Establishment of a multi-layered, end-to-end encrypted, and mutually authenticated channel.
-4.  **Secure Communication**: Exchange messages safeguarded by next-generation cryptographic protocols.
+### Connection Process
+
+The application guides you through these steps:
+
+1. **Network Discovery**
+   - STUN protocol automatically discovers your public IP address and port
+   - NAT traversal capabilities are configured
+   - Your public endpoint is displayed (IPv4 or IPv6)
+
+2. **Connection Mode Selection**
+   - Option 1: Wait for incoming connections (Server mode)
+   - Option 2: Connect to a peer (Client mode)
+   - Option 3: Retry STUN discovery if needed
+   - Option 4: Exit the application
+
+3. **Establishing Secure Connection**
+   - **As Server**: Your public endpoint is displayed - share this with your peer
+   - **As Client**: Enter the server's endpoint address and port
+
+4. **Multi-Layer Security Handshake**
+   - Certificate exchange and verification
+   - Hybrid X3DH+PQ key agreement with quantum resistance
+   - Double Ratchet protocol initialization
+   - TLS 1.3 channel establishment
+
+5. **Secure Messaging**
+   - Enter a username to identify yourself
+   - Exchange end-to-end encrypted messages
+   - Type 'exit' to end the session
+   - '/help' displays available commands
+
+### Security Features in Action
+
+During the connection process, you'll see real-time security information:
+- Active post-quantum algorithms
+- TLS cipher and version confirmation
+- Certificate verification status
+- Key agreement protocols in use
+- Hardware security availability
+
+All messages are automatically protected with multiple encryption layers, padding, and authentication without requiring any additional user configuration.
 
 ---
 
