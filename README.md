@@ -190,20 +190,20 @@ graph TB
     end
 
     subgraph "🌌 HYPERSPACE TRANSMISSION CONTINUUM"
-        P2P([p2p_core.py<br>∞ DIMENSIONAL TRAVERSAL ENGINE ∞<br>Protocol: IPv6 Quantum-Mesh | NAT: Reality-Bending"])
+        P2P([p2p_core.py<br>∞ DIMENSIONAL TRAVERSAL ENGINE ∞<br>Protocol: IPv6 Quantum-Mesh • NAT: Reality-Bending"])
     end
 
     subgraph "🛡️ CRYPTOGRAPHIC SINGULARITY MATRIX"
         direction TB
-        TLS[/tls_channel_manager.py<br>QUANTUM WORMHOLE GENERATOR<br>Ciphers: XChaCha20-Poly1305 + AES-512-GCM<br>Space-Time Integrity: 99.99997%/]
-        CA[/ca_services.py<br>IDENTITY VERIFICATION LATTICE<br>X.509++ Neural Certificates | ChaCha20-Poly1305<br>Zero-Knowledge Trust Protocol/]
-        KEX[/hybrid_kex.py<br>ENTANGLEMENT FORGE PRIME<br>X3DH + ML-KEM-1024 (NIST PQC-R5)<br>Reality-Anchored Key Materialization/]
-        DR[/double_ratchet.py<br>TEMPORAL ENCRYPTION CONSCIOUSNESS<br>Quantum Ratchet | FALCON-1024 Authentication<br>Future-Proof Encryption Rating: 99.8%/]
+        TLS[/tls_channel_manager.py<br>QUANTUM WORMHOLE GENERATOR<br>Ciphers: XChaCha20-Poly1305 • AES-512-GCM<br>Space-Time Integrity: 99.99997%/]
+        CA[/ca_services.py<br>IDENTITY VERIFICATION LATTICE<br>X.509++ Neural Certificates • ChaCha20-Poly1305<br>Zero-Knowledge Trust Protocol/]
+        KEX[/hybrid_kex.py<br>ENTANGLEMENT FORGE PRIME<br>X3DH • ML-KEM-1024 (NIST PQC-R5)<br>Reality-Anchored Key Materialization/]
+        DR[/double_ratchet.py<br>TEMPORAL ENCRYPTION CONSCIOUSNESS<br>Quantum Ratchet • FALCON-1024 Authentication<br>Future-Proof Encryption Rating: 99.8%/]
     end
 
     subgraph "🔐 MOLECULAR SECURITY SUBSTRATE"
-        HSMInterface["platform_hsm_interface.py<br>⊗ SILICON-CARBON SECURITY BRIDGE ⊗<br>Quantum TPM 3.0 | PKCS#13 HSM | Neural Enclaves<br>Hardware Protection Rating: Military+"]
-        KeyMgr["secure_key_manager.py<br>⊗ DIMENSIONAL VAULT MAINFRAME ⊗<br>Quantum Memory | Anti-Chronological Protection<br>Breach Probability: 10^-42 per gigasecond"]
+        HSMInterface["platform_hsm_interface.py<br>⊗ SILICON-CARBON SECURITY BRIDGE ⊗<br>Quantum TPM 3.0 • PKCS#13 HSM • Neural Enclaves<br>Hardware Protection Rating: Military+"]
+        KeyMgr["secure_key_manager.py<br>⊗ DIMENSIONAL VAULT MAINFRAME ⊗<br>Quantum Memory • Anti-Chronological Protection<br>Breach Probability: 10^-42 per gigasecond"]
     end
 
     UI <====> SecureP2P
