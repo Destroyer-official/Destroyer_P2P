@@ -179,64 +179,63 @@
 </div>
 
 ```mermaid
-%%{init: {'theme': 'dark', 'themeVariables': { 'fontFamily': 'monospace', 'primaryColor': '#9b59b6', 'primaryTextColor': '#ecf0f1', 'primaryBorderColor': '#9b59b6', 'lineColor': '#9b59b6', 'fontSize': '16px'}}}%%
+%%{init: {'theme': 'dark'}}%%
 graph TB
-    subgraph "🧿 NEURO-COGNITIVE INTERFACE MATRIX"
-        UI([WETWARE-CYBERSPACE BRIDGE<br>↑ HUMAN INTEGRATION NEXUS ↑<br>Adaptive Neural Response System])
+    subgraph InterfaceMatrix["🧿 NEURO-COGNITIVE INTERFACE MATRIX"]
+        UI["WETWARE-CYBERSPACE BRIDGE<br>↑ HUMAN INTEGRATION NEXUS ↑<br>Adaptive Neural Response System"]
     end
 
-    subgraph "⚛️ QUANTUM DEFENSE ORCHESTRATION CORE"
-        SecureP2P(["secure_p2p.py<br>⟁ SENTIENT SECURITY HYPERVISOR ⟁<br>Neural Processes: 64 | Quantum Threads: 128<br>Defense Intelligence Rating: CLASS VII"])
+    subgraph DefenseCore["⚛️ QUANTUM DEFENSE ORCHESTRATION CORE"]
+        SecureP2P["secure_p2p.py<br>⟁ SENTIENT SECURITY HYPERVISOR ⟁<br>Neural Processes: 64 • Quantum Threads: 128<br>Defense Intelligence Rating: CLASS VII"]
     end
 
-    subgraph "🌌 HYPERSPACE TRANSMISSION CONTINUUM"
-        P2P([p2p_core.py<br>∞ DIMENSIONAL TRAVERSAL ENGINE ∞<br>Protocol: IPv6 Quantum-Mesh • NAT: Reality-Bending"])
+    subgraph TransmissionLayer["🌌 HYPERSPACE TRANSMISSION CONTINUUM"]
+        P2P["p2p_core.py<br>∞ DIMENSIONAL TRAVERSAL ENGINE ∞<br>Protocol: IPv6 Quantum-Mesh • NAT: Reality-Bending"]
     end
 
-    subgraph "🛡️ CRYPTOGRAPHIC SINGULARITY MATRIX"
+    subgraph CryptoMatrix["🛡️ CRYPTOGRAPHIC SINGULARITY MATRIX"]
         direction TB
-        TLS[/tls_channel_manager.py<br>QUANTUM WORMHOLE GENERATOR<br>Ciphers: XChaCha20-Poly1305 • AES-512-GCM<br>Space-Time Integrity: 99.99997%/]
-        CA[/ca_services.py<br>IDENTITY VERIFICATION LATTICE<br>X.509++ Neural Certificates • ChaCha20-Poly1305<br>Zero-Knowledge Trust Protocol/]
-        KEX[/hybrid_kex.py<br>ENTANGLEMENT FORGE PRIME<br>X3DH • ML-KEM-1024 (NIST PQC-R5)<br>Reality-Anchored Key Materialization/]
-        DR[/double_ratchet.py<br>TEMPORAL ENCRYPTION CONSCIOUSNESS<br>Quantum Ratchet • FALCON-1024 Authentication<br>Future-Proof Encryption Rating: 99.8%/]
+        TLS["tls_channel_manager.py<br>QUANTUM WORMHOLE GENERATOR<br>Ciphers: XChaCha20-Poly1305 • AES-512-GCM<br>Space-Time Integrity: 99.99997%"]
+        CA["ca_services.py<br>IDENTITY VERIFICATION LATTICE<br>X.509++ Neural Certificates • ChaCha20-Poly1305<br>Zero-Knowledge Trust Protocol"]
+        KEX["hybrid_kex.py<br>ENTANGLEMENT FORGE PRIME<br>X3DH • ML-KEM-1024 (NIST PQC-R5)<br>Reality-Anchored Key Materialization"]
+        DR["double_ratchet.py<br>TEMPORAL ENCRYPTION CONSCIOUSNESS<br>Quantum Ratchet • FALCON-1024 Authentication<br>Future-Proof Encryption Rating: 99.8%"]
     end
 
-    subgraph "🔐 MOLECULAR SECURITY SUBSTRATE"
+    subgraph SecurityLayer["🔐 MOLECULAR SECURITY SUBSTRATE"]
         HSMInterface["platform_hsm_interface.py<br>⊗ SILICON-CARBON SECURITY BRIDGE ⊗<br>Quantum TPM 3.0 • PKCS#13 HSM • Neural Enclaves<br>Hardware Protection Rating: Military+"]
         KeyMgr["secure_key_manager.py<br>⊗ DIMENSIONAL VAULT MAINFRAME ⊗<br>Quantum Memory • Anti-Chronological Protection<br>Breach Probability: 10^-42 per gigasecond"]
     end
 
-    UI <====> SecureP2P
-    SecureP2P <====> P2P
+    UI --- SecureP2P
+    SecureP2P --- P2P
     
-    SecureP2P =====⊃ TLS
-    SecureP2P =====⊃ CA
-    SecureP2P =====⊃ KEX
-    SecureP2P =====⊃ DR
+    SecureP2P --> TLS
+    SecureP2P --> CA
+    SecureP2P --> KEX
+    SecureP2P --> DR
     
-    TLS -....-> CA
-    KEX -....-> DR
+    TLS -.-> CA
+    KEX -.-> DR
     
-    TLS =====⊃ HSMInterface
-    KEX =====⊃ HSMInterface
-    DR =====⊃ HSMInterface
-    CA =====⊃ HSMInterface
+    TLS --> HSMInterface
+    KEX --> HSMInterface
+    DR --> HSMInterface
+    CA --> HSMInterface
     
-    HSMInterface <=====> KeyMgr
+    HSMInterface --- KeyMgr
 
-    classDef neuralInterface fill:#1a0033,stroke:#3498DB,stroke-width:4px,color:#ECF0F1,font-weight:bold;
-    classDef quantumOrchestrator fill:#0d001a,stroke:#9b59b6,stroke-width:4px,color:#ECF0F1,font-weight:bold;
-    classDef protocolMatrix fill:#0a2038,stroke:#1ABC9C,stroke-width:3px,color:#ECF0F1,font-weight:bold;
-    classDef hardwareSecure fill:#1F0D0D,stroke:#e74c3c,stroke-width:3px,color:#ECF0F1,font-weight:bold;
-    classDef networkGrid fill:#0d0d1a,stroke:#f1c40f,stroke-width:3px,color:#ECF0F1,font-weight:bold;
+    classDef neural fill:#1a0033,stroke:#3498DB,color:#ECF0F1,font-weight:bold
+    classDef quantum fill:#0d001a,stroke:#9b59b6,color:#ECF0F1,font-weight:bold
+    classDef protocol fill:#0a2038,stroke:#1ABC9C,color:#ECF0F1,font-weight:bold
+    classDef hardware fill:#1F0D0D,stroke:#e74c3c,color:#ECF0F1,font-weight:bold
+    classDef network fill:#0d0d1a,stroke:#f1c40f,color:#ECF0F1,font-weight:bold
     
-    class UI neuralInterface;
-    class SecureP2P quantumOrchestrator;
-    class TLS,CA,KEX,DR protocolMatrix;
-    class HSMInterface,KeyMgr hardwareSecure;
-    class P2P networkGrid;
-
-    linkStyle default stroke:#7F8C8D,stroke-width:3px;
+    class UI neural
+    class SecureP2P quantum
+    class TLS,CA,KEX,DR protocol
+    class HSMInterface,KeyMgr hardware
+    class P2P network
+    class InterfaceMatrix,DefenseCore,TransmissionLayer,CryptoMatrix,SecurityLayer neural
 ```
 
 ### 🌟 NEURAL DEFENSE MATRIX: SENTIENT NODE CAPABILITIES 🌟
