@@ -701,7 +701,7 @@ Follow these instructions to deploy and operate your quantum-resistant P2P commu
 
 1.  **Secure the Source Code**: Clone the repository from its official source.
 ```bash
-    git clone https://github.com/yourusername/secure-p2p-chat.git # Replace with actual URL
+    git clone https://github.com/Destroyer-official/Destroyer_P2P.git 
     cd secure-p2p-chat
 ```
 
