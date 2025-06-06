@@ -149,6 +149,7 @@ class HybridKeyExchange:
     - Support for ephemeral identities with automatic rotation
     - In-memory key option to avoid storing sensitive key material
     - Post-quantum security with ML-KEM-1024 and FALCON-1024
+    - Handshake replay protection with nonces and timestamps
     """
     
     def __init__(self, identity: str = "user", keys_dir: str = None,
@@ -222,6 +223,11 @@ class HybridKeyExchange:
         # Initialize KEM and DSS instances
         self.kem = quantcrypt.kem.MLKEM_1024()
         self.dss = FALCON_1024()
+        
+        # Add nonce tracking for replay protection - dictionary mapping peer IDs to sets of seen nonces
+        self.seen_nonces = {}  
+        # Timestamp validity window in seconds (±60 seconds allowed for clock drift)
+        self.timestamp_window = 60
         
         # Load or generate keys
         self._load_or_generate_keys()
@@ -525,6 +531,57 @@ class HybridKeyExchange:
             log.error(f"Invalid key bundle: {e}")
             return False
     
+    def _generate_handshake_nonce(self) -> Tuple[bytes, int]:
+        """
+        Generate a secure random nonce and timestamp for handshake replay protection.
+        
+        Returns:
+            Tuple of (nonce, timestamp) where nonce is 32 random bytes and timestamp is current Unix time
+        """
+        nonce = os.urandom(32)  # 32 bytes of cryptographically secure randomness
+        timestamp = int(time.time())  # Current Unix timestamp
+        return nonce, timestamp
+
+    def _verify_handshake_nonce(self, peer_id: str, nonce: bytes, timestamp: int) -> bool:
+        """
+        Verify that a handshake nonce hasn't been seen before and the timestamp is valid.
+        
+        Args:
+            peer_id: Identity of the peer sending the nonce
+            nonce: The nonce to verify (32 bytes)
+            timestamp: Unix timestamp from the handshake
+            
+        Returns:
+            True if nonce is valid (not seen before and timestamp is current), False otherwise
+        """
+        current_time = int(time.time())
+        
+        # Check if timestamp is within the acceptable window (±timestamp_window seconds)
+        if abs(current_time - timestamp) > self.timestamp_window:
+            log.error(f"SECURITY ALERT: Handshake timestamp outside valid window. Received: {timestamp}, Current: {current_time}")
+            return False
+        
+        # Initialize nonce set for this peer if it doesn't exist
+        if peer_id not in self.seen_nonces:
+            self.seen_nonces[peer_id] = set()
+        
+        # Check if we've seen this nonce before from this peer
+        if nonce in self.seen_nonces[peer_id]:
+            log.error(f"SECURITY ALERT: Handshake replay detected! Duplicate nonce from peer: {peer_id}")
+            return False
+            
+        # Store the nonce as seen
+        self.seen_nonces[peer_id].add(nonce)
+        
+        # If we have too many nonces stored for this peer, keep only the most recent ones
+        # This prevents memory exhaustion attacks
+        if len(self.seen_nonces[peer_id]) > 1000:  # Arbitrary limit
+            log.warning(f"Too many stored nonces for peer {peer_id}, clearing oldest")
+            self.seen_nonces[peer_id].clear()  # In a production system, you might want to keep the most recent ones
+            self.seen_nonces[peer_id].add(nonce)  # Keep the current one
+            
+        return True
+
     def initiate_handshake(self, peer_bundle: Dict[str, str]) -> Tuple[Dict[str, str], bytes]:
         """
         Initiate the X3DH+PQ handshake (Alice's side).
@@ -533,9 +590,8 @@ class HybridKeyExchange:
             peer_bundle: The public key bundle from the peer (Bob)
             
         Returns:
-            A tuple containing:
-            - The handshake message to send to the peer
-            - The derived shared secret
+            Tuple of (handshake_message, shared_secret) containing the message
+            to send to the peer and the derived shared secret
         """
         log.info(f"Initiating hybrid X3DH+PQ handshake with peer: {peer_bundle.get('identity', 'unknown')}")
         
@@ -546,6 +602,9 @@ class HybridKeyExchange:
         if not self.verify_public_bundle(peer_bundle):
             log.error("SECURITY ALERT: Invalid peer key bundle, signature verification failed")
             raise ValueError("Invalid peer key bundle")
+        
+        # Generate handshake nonce and timestamp for replay protection
+        handshake_nonce, timestamp = self._generate_handshake_nonce()
         
         # Generate ephemeral key
         log.debug("Generating ephemeral X25519 key for handshake")
@@ -612,8 +671,9 @@ class HybridKeyExchange:
             log.error(f"SECURITY CRITICAL: Failed to sign ephemeral FALCON public key: {e}", exc_info=True)
             raise ValueError("Failed to sign ephemeral FALCON public key")
 
-        # Create specific binding for ephemeral EC key and KEM ciphertext, signed by ephemeral FALCON key
-        binding_data = ephemeral_public + kem_ciphertext  # Concatenate raw bytes
+        # Create specific binding for ephemeral EC key, KEM ciphertext, and handshake nonce, signed by ephemeral FALCON key
+        # Include the nonce and timestamp in the binding data for replay protection
+        binding_data = ephemeral_public + kem_ciphertext + handshake_nonce + timestamp.to_bytes(8, byteorder='big')
         try:
             ec_pq_binding_signature = self.dss.sign(eph_falcon_private_key, binding_data)
             verify_key_material(ec_pq_binding_signature, description="EC-PQ binding signature")
@@ -638,6 +698,25 @@ class HybridKeyExchange:
         verify_key_material(root_key, expected_length=32, description="Derived root key")
         log.debug(f"Derived root key: {_format_binary(root_key)}")
         
+        # Securely erase the ephemeral X25519 private key data
+        try:
+            # Extract raw private key bytes for secure wiping
+            raw_priv = ephemeral_key.private_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PrivateFormat.Raw,
+                encryption_algorithm=serialization.NoEncryption()
+            )
+            # Convert to a bytearray so it's mutable
+            ba = bytearray(raw_priv)
+            # Write zeros to the memory
+            for i in range(len(ba)):
+                ba[i] = 0
+            # Delete references
+            del ephemeral_key, raw_priv, ba
+            log.debug("Securely erased ephemeral X25519 private key")
+        except Exception as e:
+            log.error(f"Error during ephemeral X25519 key zeroization: {e}")
+        
         # Create the handshake message
         handshake_message = {
             'identity': self.identity,
@@ -649,7 +728,9 @@ class HybridKeyExchange:
             'kem_ciphertext': base64.b64encode(kem_ciphertext).decode('utf-8'),
             'eph_falcon_public_key': base64.b64encode(eph_falcon_public_key).decode('utf-8'),
             'eph_falcon_key_signature': base64.b64encode(eph_falcon_key_signature).decode('utf-8'),
-            'ec_pq_binding_sig': base64.b64encode(ec_pq_binding_signature).decode('utf-8')
+            'ec_pq_binding_sig': base64.b64encode(ec_pq_binding_signature).decode('utf-8'),
+            'handshake_nonce': base64.b64encode(handshake_nonce).decode('utf-8'),
+            'timestamp': timestamp
         }
         
         # Create a canonicalized representation for signing
@@ -680,6 +761,21 @@ class HybridKeyExchange:
         """
         try:
             log.info(f"Processing incoming handshake from: {handshake_message.get('identity', 'unknown')}")
+            
+            # Check for required nonce and timestamp fields
+            if 'handshake_nonce' not in handshake_message or 'timestamp' not in handshake_message:
+                log.error("SECURITY ALERT: Handshake message missing nonce or timestamp")
+                raise ValueError("Handshake message missing required replay protection fields")
+            
+            # Extract and verify nonce and timestamp
+            handshake_nonce = base64.b64decode(handshake_message['handshake_nonce'])
+            timestamp = handshake_message['timestamp']
+            
+            # Verify the nonce hasn't been seen before and timestamp is valid
+            peer_id = handshake_message.get('identity', 'unknown')
+            if not self._verify_handshake_nonce(peer_id, handshake_nonce, timestamp):
+                log.error("SECURITY ALERT: Handshake replay protection check failed")
+                raise ValueError("Invalid handshake: replay protection check failed")
             
             # Use provided peer_bundle if available, otherwise fallback to instance's stored bundle
             current_peer_bundle = peer_bundle if peer_bundle else self.peer_hybrid_bundle
@@ -778,7 +874,8 @@ class HybridKeyExchange:
                 ec_pq_binding_signature = base64.b64decode(ec_pq_binding_sig_b64)
                 verify_key_material(ec_pq_binding_signature, description="EC-PQ binding signature from handshake")
 
-                binding_data_to_verify = peer_ephemeral_public_bytes + kem_ciphertext # Concatenate raw bytes
+                # Include the nonce and timestamp in the binding data verification
+                binding_data_to_verify = peer_ephemeral_public_bytes + kem_ciphertext + handshake_nonce + timestamp.to_bytes(8, byteorder='big')
 
                 # Verify with the trusted ephemeral FALCON key
                 try:
@@ -851,6 +948,22 @@ class HybridKeyExchange:
             
             verify_key_material(root_key, expected_length=32, description="Derived root key")
             log.debug(f"Derived root key: {_format_binary(root_key)}")
+            
+            # Securely erase all intermediate key material
+            try:
+                # Zero out all DH shares and IKM
+                for key_material in [dh1, dh2, dh3, dh4, kem_shared_secret, ikm]:
+                    if isinstance(key_material, bytes):
+                        ba = bytearray(key_material)
+                        for i in range(len(ba)):
+                            ba[i] = 0
+                        del ba
+                
+                # Delete references to sensitive values
+                del dh1, dh2, dh3, dh4, kem_shared_secret, ikm
+                log.debug("Securely erased intermediate key material from handshake")
+            except Exception as e:
+                log.error(f"Error during intermediate key material zeroization: {e}")
             
             log.info(f"Hybrid X3DH+PQ handshake completed successfully with {handshake_message.get('identity', 'unknown')}")
             return root_key
@@ -1021,6 +1134,20 @@ class HybridKeyExchange:
             secure_erase(self.falcon_public_key)
             self.falcon_public_key = None
 
+        # Clear nonce tracking
+        self.seen_nonces.clear()
+        
+        # Set all key attributes to None
+        self.static_key = None
+        self.signing_key = None
+        self.signed_prekey = None
+        self.prekey_signature = None
+        self.kem_private_key = None
+        self.kem_public_key = None
+        self.falcon_private_key = None
+        self.falcon_public_key = None
+        self.peer_hybrid_bundle = None
+
 
 def demonstrate_handshake():
     """
@@ -1057,5 +1184,50 @@ def demonstrate_handshake():
         print("\n❌ Error! The derived keys don't match.")
 
 
+def test_replay_protection():
+    """
+    Test function to demonstrate handshake replay protection.
+    
+    This function simulates a replay attack by verifying the same nonce twice,
+    which should be rejected on the second attempt.
+    """
+    print("\n=== Testing Handshake Replay Protection ===")
+    
+    # Create a HybridKeyExchange instance
+    kex = HybridKeyExchange(identity="test_user", ephemeral=True)
+    
+    # Generate a test nonce and timestamp
+    peer_id = "test_peer"
+    nonce = os.urandom(32)
+    timestamp = int(time.time())
+    
+    print(f"Generated test nonce ({len(nonce)} bytes) and timestamp: {timestamp}")
+    
+    # First verification should succeed
+    result1 = kex._verify_handshake_nonce(peer_id, nonce, timestamp)
+    print(f"First verification result: {result1} (should be True)")
+    
+    # Second verification with same nonce should fail (replay detected)
+    result2 = kex._verify_handshake_nonce(peer_id, nonce, timestamp)
+    print(f"Second verification result: {result2} (should be False - replay detected)")
+    
+    # Test with invalid timestamp (too old)
+    old_timestamp = timestamp - 120  # 2 minutes ago (outside the window)
+    new_nonce = os.urandom(32)
+    result3 = kex._verify_handshake_nonce(peer_id, new_nonce, old_timestamp)
+    print(f"Verification with old timestamp: {result3} (should be False - timestamp too old)")
+    
+    # Test with invalid timestamp (future)
+    future_timestamp = timestamp + 120  # 2 minutes in future (outside the window)
+    new_nonce2 = os.urandom(32)
+    result4 = kex._verify_handshake_nonce(peer_id, new_nonce2, future_timestamp)
+    print(f"Verification with future timestamp: {result4} (should be False - timestamp in future)")
+    
+    print("\nReplay protection test completed.")
+
+
 if __name__ == "__main__":
-    demonstrate_handshake() 
+    # Uncomment the line below to run the replay protection test
+    test_replay_protection()
+    # Or uncomment this line to run the regular handshake demo
+    # demonstrate_handshake() 

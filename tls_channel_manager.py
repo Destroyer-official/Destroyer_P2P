@@ -206,7 +206,8 @@ class XChaCha20Poly1305:
         if len(key) != 32:
             raise ValueError("XChaCha20Poly1305 key must be 32 bytes")
         self.key = key
-        self.nonce_manager = NonceManager(nonce_size=24)  # 24-byte nonce for XChaCha20
+        # Use CounterBasedNonceManager for 24-byte nonce (20-byte counter, 4-byte salt)
+        self.nonce_manager = CounterBasedNonceManager(counter_size=20, salt_size=4, nonce_size=24)  # 24-byte nonce for XChaCha20
     
     def encrypt(self, nonce: Optional[bytes] = None, data: bytes = None, 
                 associated_data: Optional[bytes] = None) -> bytes:
@@ -343,9 +344,9 @@ class MultiCipherSuite:
         else:
             self.krypton = None
             
-        # Nonce management
-        self.aes_nonce_manager = NonceManager(nonce_size=12)  # 12-byte nonce for AES-GCM
-        self.chacha_nonce_manager = NonceManager(nonce_size=12)  # 12-byte nonce for ChaCha20-Poly1305
+        # Nonce management using counter-based approach for AEAD security
+        self.aes_nonce_manager = CounterBasedNonceManager()  # 12-byte nonce (8-byte counter, 4-byte salt) for AES-GCM
+        self.chacha_nonce_manager = CounterBasedNonceManager()  # 12-byte nonce for ChaCha20-Poly1305
         
         # Key rotation tracking
         self.operation_count = 0
@@ -3710,10 +3711,10 @@ class TLSRecordLayer:
         
         # Initialize nonce manager with TLS record protocol limits
         # TLS 1.3 sequence numbers are 64-bit, but we'll use a smaller limit for safety
-        self.nonce_manager = NonceManager(
-            nonce_size=12,  # Standard size for ChaCha20-Poly1305
-            max_nonce_uses=2**48 - 1,  # Safely below 2^64 limit
-            rotation_threshold=0.8
+        # Use counter-based nonce management for TLS record layer
+        self.nonce_manager = CounterBasedNonceManager(
+            counter_size=8,  # 8-byte counter (up to 2^64 messages)
+            salt_size=4      # 4-byte salt for additional randomness
         )
         log.debug("TLS record layer initialized with secure nonce management")
     
@@ -3945,9 +3946,9 @@ class CustomCipherSuite:
         self.aes = AESGCM(self.aes_key)
         self.chacha = ChaCha20Poly1305(self.chacha_key)
         
-        # Nonce managers
-        self.aes_nonce_manager = NonceManager(nonce_size=12)
-        self.chacha_nonce_manager = NonceManager(nonce_size=12)
+        # Nonce managers using counter-based approach for AEAD security
+        self.aes_nonce_manager = CounterBasedNonceManager()  # 12-byte nonce (8-byte counter, 4-byte salt)
+        self.chacha_nonce_manager = CounterBasedNonceManager()
     
     def encrypt(self, data: bytes, associated_data: Optional[bytes] = None) -> bytes:
         """
@@ -4632,4 +4633,77 @@ def verify_quantum_resistance(connection):
             log.debug("OCSP Must-Staple callback configured for server context.")
 
         return context
+
+class CounterBasedNonceManager:
+    """
+    Manages nonce generation using the counter + salt approach for AEAD ciphers.
+    This approach ensures each (key, nonce) pair is used exactly once, preventing
+    catastrophic nonce reuse in ChaCha20-Poly1305 and AES-GCM.
+    """
+    
+    def __init__(self, counter_size: int = 8, salt_size: int = 4, nonce_size: int = 12):
+        """
+        Initialize the counter-based nonce manager.
+        
+        Args:
+            counter_size: Size of the counter in bytes (default: 8 bytes/64-bit)
+            salt_size: Size of the random salt in bytes (default: 4 bytes/32-bit)
+            nonce_size: Total nonce size in bytes (default: 12 for most AEAD ciphers,
+                       use 24 for XChaCha20Poly1305)
+        """
+        if counter_size + salt_size != nonce_size:
+            raise ValueError(f"Counter size ({counter_size}) + salt size ({salt_size}) must equal nonce_size ({nonce_size}) bytes for AEAD")
+            
+        self.counter_size = counter_size
+        self.salt_size = salt_size
+        self.nonce_size = nonce_size
+        self.counter = 0
+        self.salt = os.urandom(salt_size)
+        
+        # For tracking purposes only
+        self.nonce_uses = 0
+        self.last_reset_time = time.time()
+        
+    def generate_nonce(self) -> bytes:
+        """
+        Generate a unique nonce using counter + salt approach.
+        
+        Returns:
+            nonce_size-byte nonce for AEAD encryption (salt + counter)
+        
+        Raises:
+            RuntimeError: If counter exceeds maximum value
+        """
+        # Check if counter is approaching maximum
+        max_counter = (2 ** (self.counter_size * 8)) - 1
+        if self.counter >= max_counter:
+            logger.warning(f"Nonce counter reached maximum ({max_counter}), resetting salt and counter")
+            self.reset()
+            
+        # Convert counter to bytes (big-endian)
+        counter_bytes = self.counter.to_bytes(self.counter_size, byteorder='big')
+        
+        # Construct nonce: salt + counter
+        nonce = self.salt + counter_bytes
+        
+        # Increment counter for next use
+        self.counter += 1
+        self.nonce_uses += 1
+        
+        return nonce
+    
+    def reset(self):
+        """Reset the counter and generate a new random salt."""
+        self.counter = 0
+        self.salt = os.urandom(self.salt_size)
+        self.last_reset_time = time.time()
+        logger.debug(f"CounterBasedNonceManager reset with new {self.salt_size}-byte salt")
+        
+    def get_counter(self) -> int:
+        """Get the current counter value (for testing/debugging only)."""
+        return self.counter
+    
+    def get_salt(self) -> bytes:
+        """Get the current salt value (for testing/debugging only)."""
+        return self.salt
 

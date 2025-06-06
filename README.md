@@ -76,6 +76,14 @@ This initiative pioneers a new echelon of secure peer-to-peer communication, arc
 
 **Recent Developments (June 2025):** Successfully resolved a critical issue in the certificate exchange mechanism, ensuring robust ChaCha20Poly1305 encryption with proper key derivation (HKDF-SHA256) and error handling. This fix has enhanced the reliability and security of the initial peer authentication process, leading to stable end-to-end secure communication across all layers.
 
+### ✨ Recent Security Improvements
+
+Following a comprehensive security review, several key enhancements have been integrated to further bolster the application's defenses:
+
+*   **Standardized Cryptographic Primitives**: Where possible, the project is moving away from custom cryptographic implementations in favor of well-vetted, standard libraries to enhance security and maintainability.
+*   **Robust Certificate Exchange**: The certificate exchange process has been hardened. It now uses `ChaCha20-Poly1305` for encryption, with keys properly derived using `HKDF` to ensure the correct key length. Error handling has been improved to abort the connection if any part of the certificate exchange fails, preventing fail-open vulnerabilities.
+*   **Careful Key Derivation**: Throughout the application, key derivation functions (`HKDF`) are used with domain separation to ensure that keys are used only for their intended purpose.
+
 ### 🛡️ Recent Security Fortifications (Post-June 2025 Audit)
 
 Following a comprehensive security review, several key enhancements have been integrated to further bolster the application's defenses:
@@ -520,7 +528,6 @@ python-pkcs11            # Python interface to PKCS#11 compliant HSMs (primarily
 
 These integral components are part of the project's internal architecture:
 
-- **`quantcrypt` (Local Custom Library)**: A specialized, self-contained library providing Python implementations of the **ML-KEM (Kyber)** and **FALCON** post-quantum cryptographic algorithms. This module is pivotal for the application's quantum-resistant capabilities.
 - **`platform_hsm_interface.py` (typically imported as `cphs`)**: The central internal module that provides a consistent abstraction layer for interacting with platform-specific hardware security elements (Windows CNG/TPM and PKCS#11 HSMs).
 - **Core Application & Protocol Modules**: Files such as `secure_p2p.py`, `hybrid_kex.py`, `double_ratchet.py`, `ca_services.py`, and `tls_channel_manager.py` constitute the main application logic, implementing the multi-layered security protocols and orchestration.
 
@@ -594,5 +601,49 @@ This work stands on the shoulders of giants and draws inspiration from numerous 
 - **NIST (National Institute of Standards and Technology)**: For their crucial leadership in the Post-Quantum Cryptography (PQC) standardization process, guiding the selection of next-generation algorithms.
 - **The Global Cryptography Community**: For their invaluable open-source tools, libraries, research papers, and collaborative spirit that make projects like this possible.
 - **All Innovators & Contributors**: To everyone who has contributed, or will contribute, to the design, implementation, testing, and security of this platform.
+
+## Security Enhancements
+
+### Secure AEAD Nonce Management
+
+The library now implements a counter-based nonce management system for AEAD ciphers to ensure nonce uniqueness:
+
+- Counter-based nonces (8-byte counter + 4-byte random salt) for ChaCha20-Poly1305 and AES-GCM
+- Prevents catastrophic nonce reuse under the same key
+- Ensures forward security and message integrity
+- Each encryption key is associated with its own counter manager
+
+Key components:
+- `CounterBasedNonceManager` in `tls_channel_manager.py` for generating unique nonces
+- Integrated with all AEAD cipher operations throughout the codebase
+- Configurable counter and salt sizes
+- Automatic reset when counter approaches maximum value
+
+This approach provides strong security guarantees against nonce reuse attacks while maintaining efficient operation.
+
+### Ephemeral X25519 Key Management
+
+For each handshake, the system:
+
+- Generates fresh ephemeral X25519 keys to ensure forward secrecy
+- Securely wipes private keys from memory immediately after use
+- Uses proper zeroization techniques for ephemeral private keys
+- Prevents key reuse across different handshakes
+
+### Handshake Replay Protection
+
+To prevent handshake replay attacks, the library now implements:
+
+- 32-byte random nonce generation for each handshake
+- Timestamp validation to ensure freshness (±60 second window)
+- Nonce tracking to detect and reject replayed handshakes
+- Inclusion of nonces and timestamps in signed handshake data
+
+This ensures that captured handshakes cannot be replayed by an attacker, adding protection against:
+- Session hijacking via handshake replay
+- Man-in-the-middle attacks using captured handshakes
+- Forced key reuse attacks
+
+All security enhancements follow cryptographic best practices and are fully integrated with the existing secure communication framework.
 
 

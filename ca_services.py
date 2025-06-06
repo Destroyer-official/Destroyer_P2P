@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 # This assumes tls_channel_manager.py is in a location where it can be imported
 # and that it doesn't create circular dependencies with ca_services.py
 try:
-    from tls_channel_manager import XChaCha20Poly1305
+    from tls_channel_manager import XChaCha20Poly1305, CounterBasedNonceManager
     HAVE_XCHACHA = True
 except ImportError as e:
     # Fallback or error handling if XChaCha20Poly1305 cannot be imported
@@ -148,6 +148,7 @@ class CAExchange:
             # Initialize XChaCha20Poly1305 cipher if available
             if HAVE_XCHACHA:
                 try:
+                    # Create a custom implementation with the correct nonce size for XChaCha20Poly1305 (24 bytes)
                     self.xchacha_cipher = XChaCha20Poly1305(self.exchange_key)
                     logger.debug("CAExchange initialized with XChaCha20Poly1305 for cert exchange.")
                 except Exception as e:

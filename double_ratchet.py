@@ -1302,6 +1302,11 @@ class DoubleRatchet:
     def _setup_secure_memory(self):
         """Initialize secure memory protection features."""
         try:
+            # Initialize the counter-based nonce manager for AEAD encryption
+            from tls_channel_manager import CounterBasedNonceManager
+            self._nonce_manager = CounterBasedNonceManager()
+            logger.debug("Initialized counter-based nonce manager for AEAD encryption")
+            
             # Create canary protector instance
             self._canary_protector = CanaryProtector()
             
@@ -1628,8 +1633,16 @@ class DoubleRatchet:
         Returns:
             Tuple of (nonce, ciphertext)
         """
-        # Generate a random 96-bit nonce using cphs
-        nonce = cphs.get_secure_random(12)
+        # Generate a counter-based nonce with random salt
+        # Counter (8 bytes) for uniqueness + salt (4 bytes) for randomness
+        if not hasattr(self, '_nonce_manager') or self._nonce_manager is None:
+            # Create a new nonce manager if one doesn't exist
+            # Import here to avoid circular imports
+            from tls_channel_manager import CounterBasedNonceManager
+            self._nonce_manager = CounterBasedNonceManager()
+            
+        # Generate nonce using counter + salt method
+        nonce = self._nonce_manager.generate_nonce()
         
         # Create the cipher with the message key
         cipher = ChaCha20Poly1305(message_key)
