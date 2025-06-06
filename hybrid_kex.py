@@ -481,20 +481,29 @@ class HybridKeyExchange:
         Verify the signatures in a public key bundle.
         
         Args:
-            bundle: The public key bundle from a peer
+            bundle: The key bundle to verify
             
         Returns:
-            True if the bundle is valid, False otherwise
+            True if verification succeeds, False if it fails
         """
         try:
-            # First verify Ed25519 prekey signature
-            signing_public_key = Ed25519PublicKey.from_public_bytes(
-                base64.b64decode(bundle['signing_key'])
-            )
-            
-            signed_prekey = base64.b64decode(bundle['signed_prekey'])
+            # Check for required keys
+            if not all(k in bundle for k in ['static_key', 'signed_prekey', 'signing_key', 'prekey_signature']):
+                log.error("Invalid key bundle: missing required keys")
+                return False
+                
+            # Extract keys from bundle
+            signing_key_bytes = base64.b64decode(bundle['signing_key'])
             prekey_signature = base64.b64decode(bundle['prekey_signature'])
+            signed_prekey = base64.b64decode(bundle['signed_prekey'])
             
+            # First verify Ed25519 prekey signature
+            try:
+                signing_public_key = Ed25519PublicKey.from_public_bytes(signing_key_bytes)
+            except ValueError as e:
+                log.error(f"Invalid signing key format: {e}")
+                return False
+                
             # Verify the prekey signature
             try:
                 signing_public_key.verify(prekey_signature, signed_prekey)
@@ -517,12 +526,10 @@ class HybridKeyExchange:
                 
                 # Verify with FALCON-1024
                 try:
-                    if not self.dss.verify(falcon_public_key, bundle_data, bundle_signature):
-                        log.error("SECURITY ALERT: FALCON bundle signature verification failed")
-                        return False
+                    secure_verify(self.dss, falcon_public_key, bundle_data, bundle_signature, "FALCON bundle signature")
                     log.debug("FALCON-1024 bundle signature verified successfully")
-                except Exception as e:
-                    log.error(f"SECURITY ALERT: FALCON signature verification error: {e}")
+                except ValueError as e:
+                    log.error(f"SECURITY ALERT: {str(e)}")
                     return False
             
             return True
@@ -601,7 +608,7 @@ class HybridKeyExchange:
         # Verify bundle before proceeding
         if not self.verify_public_bundle(peer_bundle):
             log.error("SECURITY ALERT: Invalid peer key bundle, signature verification failed")
-            raise ValueError("Invalid peer key bundle")
+            raise ValueError("Handshake aborted: invalid peer key bundle signature")
         
         # Generate handshake nonce and timestamp for replay protection
         handshake_nonce, timestamp = self._generate_handshake_nonce()
@@ -807,13 +814,12 @@ class HybridKeyExchange:
             verify_key_material(peer_main_falcon_public_key, description="Peer's main FALCON public key from bundle")
 
             try:
-                if not self.dss.verify(peer_main_falcon_public_key, eph_falcon_public_key_bytes, eph_falcon_key_signature_bytes):
-                    log.error("SECURITY ALERT: Ephemeral FALCON public key signature verification failed.")
-                    raise ValueError("Invalid ephemeral FALCON public key signature.")
+                secure_verify(self.dss, peer_main_falcon_public_key, eph_falcon_public_key_bytes, 
+                             eph_falcon_key_signature_bytes, "ephemeral FALCON key signature")
                 log.debug("Ephemeral FALCON public key successfully verified against main FALCON key.")
-            except Exception as e:
-                log.error(f"SECURITY ALERT: Error verifying ephemeral FALCON key signature: {e}", exc_info=True)
-                raise ValueError(f"Ephemeral FALCON key signature verification failed: {e}")
+            except ValueError as e:
+                log.error(f"SECURITY ALERT: {str(e)}")
+                raise
 
             # Now, the eph_falcon_public_key_bytes can be trusted to verify other signatures in the message.
             # Keep it as peer_verified_eph_falcon_pk for clarity
@@ -835,13 +841,12 @@ class HybridKeyExchange:
                 
                 # Verify with the trusted ephemeral FALCON-1024 public key
                 try:
-                    if not self.dss.verify(peer_verified_eph_falcon_pk, message_data, message_signature):
-                        log.error("SECURITY ALERT: FALCON message signature verification failed (using ephemeral key).")
-                        raise ValueError("Invalid handshake message signature (ephemeral key verification).")
+                    secure_verify(self.dss, peer_verified_eph_falcon_pk, message_data, 
+                                message_signature, "FALCON message signature")
                     log.debug("FALCON-1024 handshake message signature verified successfully (using ephemeral key).")
-                except Exception as e:
-                    log.error(f"SECURITY ALERT: FALCON signature (ephemeral key) verification error: {e}", exc_info=True)
-                    raise ValueError(f"FALCON signature (ephemeral key) verification failed: {e}")
+                except ValueError as e:
+                    log.error(f"SECURITY ALERT: {str(e)}")
+                    raise
             else:
                 log.warning("SECURITY WARNING: No overall message_signature found in handshake message. This is unexpected with ephemeral key scheme.")
                 # Depending on policy, this might be a hard fail. For now, raising an error.
@@ -879,13 +884,12 @@ class HybridKeyExchange:
 
                 # Verify with the trusted ephemeral FALCON key
                 try:
-                    if not self.dss.verify(peer_verified_eph_falcon_pk, binding_data_to_verify, ec_pq_binding_signature):
-                        log.error("SECURITY ALERT: Explicit EC-PQ binding signature verification failed (using ephemeral key).")
-                        raise ValueError("Invalid EC-PQ binding signature in handshake message (ephemeral key verification).")
+                    secure_verify(self.dss, peer_verified_eph_falcon_pk, binding_data_to_verify, 
+                                ec_pq_binding_signature, "EC-PQ binding signature")
                     log.debug("Explicit EC-PQ binding signature verified successfully (using ephemeral key).")
-                except Exception as e:
-                    log.error(f"SECURITY ALERT: EC-PQ binding signature (ephemeral key) verification error: {e}", exc_info=True)
-                    raise ValueError(f"EC-PQ binding signature (ephemeral key) verification failed: {e}")
+                except ValueError as e:
+                    log.error(f"SECURITY ALERT: {str(e)}")
+                    raise
             else:
                 log.error("SECURITY ALERT: Handshake message is missing 'ec_pq_binding_sig'. This is a required field.")
                 raise ValueError("Handshake message missing ec_pq_binding_sig")
@@ -1224,6 +1228,34 @@ def test_replay_protection():
     print(f"Verification with future timestamp: {result4} (should be False - timestamp in future)")
     
     print("\nReplay protection test completed.")
+
+
+def secure_verify(dss, public_key, payload, signature, description="signature"):
+    """
+    Securely verify a signature, aborting immediately on mismatch.
+    
+    Args:
+        dss: The digital signature system (e.g., FALCON_1024 instance)
+        public_key: The public key bytes to use for verification
+        payload: The payload that was signed
+        signature: The signature to verify
+        description: Description for logging
+        
+    Returns:
+        True if verification succeeds
+        
+    Raises:
+        ValueError: If verification fails or throws an exception
+    """
+    try:
+        if not dss.verify(public_key, payload, signature):
+            log.error(f"SECURITY ALERT: {description} verification failed")
+            raise ValueError(f"Handshake aborted: invalid {description}")
+        return True
+    except Exception as e:
+        # Log at most "signature mismatch" (avoid printing raw data)
+        log.error(f"SECURITY ALERT: {description} verification error", exc_info=True)
+        raise ValueError(f"Handshake aborted: invalid {description}")
 
 
 if __name__ == "__main__":

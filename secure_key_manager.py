@@ -73,6 +73,15 @@ except ImportError:
     HAVE_ZMQ = False
     log.warning("pyzmq not available, process isolation not available")
 
+try:
+    import nacl.utils
+    import nacl.secret
+    from nacl.exceptions import CryptoError
+    HAS_NACL = True
+except ImportError:
+    HAS_NACL = False
+    log.warning("PyNaCl library not found; falling back to standard secure memory handling")
+
 # Constants
 SERVICE_NAME = "secure_p2p_chat"
 DEFAULT_SECURE_DIR = "secure_keys"
@@ -88,6 +97,97 @@ else:
 class KeyProtectionError(Exception):
     """Exception raised for key protection related errors."""
     pass
+
+class SecureMemory:
+    """
+    Secure memory handler using PyNaCl/libsodium for memory protection.
+    
+    PyNaCl provides access to libsodium's secure memory functions, which offer:
+    1. Memory locking (pinning memory to prevent it from being swapped to disk)
+    2. Memory protection against reads from other processes
+    3. Secure memory wiping with multiple overwrite passes
+    
+    This class should be used for storing sensitive key material.
+    """
+    
+    def __init__(self):
+        """Initialize secure memory handler."""
+        self.has_nacl = HAS_NACL
+        if not self.has_nacl:
+            log.warning("PyNaCl not available; using fallback memory protection")
+    
+    def allocate(self, size: int) -> bytearray:
+        """
+        Allocate secure memory of specified size.
+        
+        Args:
+            size: Size of the secure memory buffer in bytes
+            
+        Returns:
+            A secured bytearray
+        """
+        if self.has_nacl:
+            try:
+                # Use nacl.utils.sodium_malloc for secure memory allocation
+                # This memory is locked (prevented from swapping) and protected
+                secure_buffer = nacl.utils.sodium_malloc(size)
+                log.debug(f"Allocated {size} bytes of secure memory using libsodium")
+                return secure_buffer
+            except Exception as e:
+                log.warning(f"Failed to allocate secure memory with libsodium: {e}, falling back")
+        
+        # Fallback to regular bytearray
+        buffer = bytearray(size)
+        
+        # Try to manually lock the memory
+        try:
+            buffer_addr = ctypes.addressof((ctypes.c_char * size).from_buffer(buffer))
+            if cphs.lock_memory(buffer_addr, size):
+                log.debug(f"Manually locked {size} bytes of memory")
+        except Exception as e:
+            log.debug(f"Failed to manually lock memory: {e}")
+            
+        return buffer
+    
+    def secure_copy(self, data):
+        """
+        Create a secure copy of data in protected memory.
+        
+        Args:
+            data: The data to copy (bytes, bytearray or str)
+            
+        Returns:
+            A secure copy of the data
+        """
+        if isinstance(data, str):
+            data = data.encode('utf-8')
+            
+        secure_buffer = self.allocate(len(data))
+        for i in range(len(data)):
+            secure_buffer[i] = data[i]
+            
+        return secure_buffer
+    
+    def wipe(self, buffer):
+        """
+        Securely wipe a memory buffer.
+        
+        Args:
+            buffer: The buffer to wipe
+        """
+        if self.has_nacl and hasattr(nacl.utils, 'sodium_free'):
+            try:
+                nacl.utils.sodium_free(buffer)
+                log.debug(f"Securely wiped and freed memory using libsodium ({len(buffer)} bytes)")
+                return
+            except Exception as e:
+                log.warning(f"Failed to sodium_free: {e}, using fallback wiping")
+        
+        # Fallback to secure_erase
+        secure_erase(buffer)
+
+# Create a global instance of SecureMemory
+secure_memory = SecureMemory()
 
 class SecureKeyManager:
     """Manages cryptographic keys with secure storage and access controls."""
@@ -735,9 +835,20 @@ if __name__ == "__main__":
         else:
             key_data = key_material
             
-        # In-memory mode: simply store in memory dictionary
+        # In-memory mode: use enhanced memory protection
         if self.in_memory_only:
-            self.memory_keys[key_name] = key_data
+            # Use secure memory if PyNaCl is available
+            if HAS_NACL:
+                try:
+                    # Convert key_data to bytearray in secure memory
+                    self.memory_keys[key_name] = secure_memory.secure_copy(key_data)
+                    log.info(f"Key {key_name} stored in protected memory using PyNaCl (not persisted)")
+                    return True
+                except Exception as e:
+                    log.warning(f"Failed to use PyNaCl secure memory for {key_name}: {e}. Falling back to bytearray.")
+            
+            # Fall back to using a mutable bytearray for better memory hygiene
+            self.memory_keys[key_name] = _convert_to_bytearray(key_data)
             log.info(f"Key {key_name} stored in memory only (not persisted)")
             return True
         
@@ -874,13 +985,26 @@ if __name__ == "__main__":
         # In-memory mode: delete from memory dictionary
         if self.in_memory_only:
             if key_name in self.memory_keys:
-                key_data_b64_str = self.memory_keys.get(key_name)
-                if key_data_b64_str:
-                    # Securely erase the content before deleting the reference
+                key_data = self.memory_keys.get(key_name)
+                if key_data:
+                    # Use the appropriate method for secure erasure based on the type
                     try:
-                        # Ensure we are erasing the byte representation of the string
-                        secure_erase(key_data_b64_str.encode('utf-8'))
-                        log.debug(f"Securely erased in-memory key data for {key_name}")
+                        if HAS_NACL and hasattr(nacl.utils, 'sodium_free'):
+                            # If it's a PyNaCl secure buffer, use sodium_free
+                            try:
+                                secure_memory.wipe(key_data)
+                                log.debug(f"Securely erased in-memory key data for {key_name} using libsodium")
+                            except Exception as e:
+                                log.warning(f"Failed to use PyNaCl for secure erasure: {e}. Falling back to secure_erase.")
+                                # Fall back to secure_erase if sodium_free fails
+                                secure_erase(key_data)
+                        else:
+                            # For regular bytearrays or strings, use secure_erase
+                            if isinstance(key_data, str):
+                                secure_erase(key_data.encode('utf-8'))
+                            else:
+                                secure_erase(key_data)
+                            log.debug(f"Securely erased in-memory key data for {key_name}")
                     except Exception as e:
                         log.warning(f"Failed to securely erase in-memory key data for {key_name}: {e}")
                 
@@ -1106,4 +1230,23 @@ def cleanup():
 
 # Cleanup on exit
 import atexit
-atexit.register(cleanup) 
+atexit.register(cleanup)
+
+def _convert_to_bytearray(key_data):
+    """
+    Convert immutable key data to a mutable bytearray for secure wiping.
+    
+    Args:
+        key_data: The key data to convert, either bytes or str
+        
+    Returns:
+        A bytearray containing the key data
+    """
+    if isinstance(key_data, bytearray):
+        return key_data
+    elif isinstance(key_data, bytes):
+        return bytearray(key_data)
+    elif isinstance(key_data, str):
+        return bytearray(key_data.encode('utf-8'))
+    else:
+        raise TypeError(f"Cannot convert key data of type {type(key_data)} to bytearray") 

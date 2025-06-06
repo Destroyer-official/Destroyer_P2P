@@ -773,81 +773,108 @@ def format_binary(data: Optional[bytes], max_len: int = 8) -> str:
     return base64.b64encode(data).decode('utf-8')
 
 
-def secure_erase(key_material: Optional[Union[bytes, bytearray]]) -> None:
+def secure_erase(key_material: Optional[Union[bytes, bytearray, str]]) -> None:
     """
-    Securely erase sensitive cryptographic material from memory using multiple passes.
+    Securely erase sensitive cryptographic material from memory.
     
     Args:
-        key_material: The sensitive data to erase
+        key_material: The sensitive data to erase (bytes, bytearray, or str)
     """
     if key_material is None:
         return
         
-    if isinstance(key_material, (bytes, bytearray)):
-        buffer = bytearray(key_material)
-        # Multi-pass overwrite with different patterns
-        patterns = [
-            0x00,  # All zeros
-            0xFF,  # All ones
-            0xAA,  # Alternating 1010...
-            0x55,  # Alternating 0101...
-            0xF0,  # 11110000
-            0x0F,  # 00001111
-            0x33,  # 00110011
-            0xCC   # 11001100
-        ]
+    # Convert to mutable bytearray if necessary
+    original_type = type(key_material)
+    
+    # Create a mutable copy in bytearray format if key_material is immutable
+    if isinstance(key_material, bytes) or isinstance(key_material, str):
+        if isinstance(key_material, str):
+            buffer = bytearray(key_material.encode('utf-8'))
+            buffer_len = len(buffer)
+        else:  # bytes
+            buffer = bytearray(key_material)
+            buffer_len = len(buffer)
         
-        # Apply each pattern
-        for pattern in patterns:
-            for i in range(len(buffer)):
-                buffer[i] = pattern
-                
-            # Memory barrier to prevent optimization
-            ctypes.memmove(
-                ctypes.byref(ctypes.c_char.from_buffer(buffer)), 
-                ctypes.byref(ctypes.c_char.from_buffer(buffer)), 
-                len(buffer)
-            )
+        logger.debug(f"Created mutable bytearray copy of immutable {original_type.__name__} for secure erasure ({buffer_len} bytes)")
+    elif isinstance(key_material, bytearray):
+        buffer = key_material  # Already mutable
+        buffer_len = len(buffer)
+        logger.debug(f"Using existing mutable bytearray for secure erasure ({buffer_len} bytes)")
+    else:
+        # Try to use zeroize method if available
+        if hasattr(key_material, 'zeroize'):
+            key_material.zeroize()
+            logger.debug(f"Used built-in zeroize method for {type(key_material).__name__}")
+            return
+        else:
+            # Cannot wipe object that is neither bytes-like nor has zeroize method
+            logger.warning(f"Cannot securely erase unknown type: {type(key_material).__name__}")
+            return
             
-        # Final pass with random data
-        random_data = cphs.get_secure_random(len(buffer)) # Use cphs for random data
-        for i in range(len(buffer)):
+    if buffer_len == 0:
+        return  # Nothing to erase
+        
+    # Lock memory to prevent swapping
+    memory_pinned = False
+    try:
+        # Try to pin memory using platform-specific method
+        # This prevents the sensitive data from being swapped to disk
+        buffer_addr = ctypes.addressof((ctypes.c_char * buffer_len).from_buffer(buffer))
+        memory_pinned = cphs.lock_memory(buffer_addr, buffer_len)
+        if memory_pinned:
+            logger.debug(f"Memory locked for secure erasure ({buffer_len} bytes)")
+    except Exception as e_pin:
+        logger.debug(f"Failed to pin memory for erasure: {e_pin}")
+    
+    # Multi-pass overwrite with different patterns
+    patterns = [
+        0x00,  # All zeros
+        0xFF,  # All ones
+        0xAA,  # Alternating 1010...
+        0x55,  # Alternating 0101...
+        0xF0,  # 11110000
+        0x0F,  # 00001111
+        0x33,  # 00110011
+        0xCC   # 11001100
+    ]
+    
+    try:
+        # 1. Apply each pattern
+        for pattern in patterns:
+            # Use ctypes for direct memory access
+            ctypes.memset(buffer_addr, pattern, buffer_len)
+            
+            # Ensure compiler doesn't optimize away our wipes
+            ctypes.memmove(buffer_addr, buffer_addr, buffer_len)
+            
+        # 2. Final pass with random data
+        random_data = cphs.get_secure_random(buffer_len) 
+        for i in range(buffer_len):
             buffer[i] = random_data[i]
             
-        # Final zero pass
-        for i in range(len(buffer)):
-            buffer[i] = 0x00
-            
-        # Lock memory to prevent it from being swapped to disk using cross-platform approach
+        # 3. Final zero pass
+        ctypes.memset(buffer_addr, 0, buffer_len)
+        
+        logger.debug(f"Securely erased {buffer_len} bytes using multi-pass overwrite")
+    except Exception as e_wipe:
+        logger.warning(f"Error during secure memory erasure: {e_wipe}")
+        # Fallback to manual byte-by-byte erasure
         try:
-            # Create a ctypes buffer with the same length
-            secure_buffer = (ctypes.c_char * len(buffer))()
-            
-            # Lock the memory to prevent it from being swapped to disk
-            buffer_addr = ctypes.addressof(secure_buffer)
-            # Use cphs directly here for locking/unlocking
-            locked = cphs.lock_memory(buffer_addr, len(secure_buffer))
-            if locked:
-                logger.debug(f"Memory locked for secure erasure ({len(buffer)} bytes)")
-            
-            # Zero out the buffer after locking
-            ctypes.memset(buffer_addr, 0, len(secure_buffer))
-            
-            # Unlock the memory
-            if locked:
-                cphs.unlock_memory(buffer_addr, len(secure_buffer))
-                logger.debug("Memory unlocked after secure erasure")
-                
-        except Exception as e:
-            logger.debug(f"Memory protection during secure erasure failed: {e}")
-            
-    elif hasattr(key_material, 'zeroize'):
-        # Use library-provided secure erasure if available
-        key_material.zeroize()
+            for i in range(buffer_len):
+                buffer[i] = 0
+            logger.debug(f"Used fallback manual byte erasure for {buffer_len} bytes")
+        except Exception as e_fallback:
+            logger.error(f"All secure erasure methods failed: {e_fallback}")
     
-    logger.debug(f"Securely erased key material of length {len(key_material) if key_material else 'unknown'}")
+    # Unlock memory if it was pinned
+    if memory_pinned:
+        try:
+            cphs.unlock_memory(buffer_addr, buffer_len)
+            logger.debug(f"Memory unlocked after secure erasure")
+        except Exception as e_unpin:
+            logger.debug(f"Failed to unpin memory after erasure: {e_unpin}")
 
-    # Try to force garbage collection after secure erasure
+    # Force garbage collection to ensure the buffer is properly deallocated
     try:
         import gc
         gc.collect()
@@ -1186,8 +1213,11 @@ class DoubleRatchet:
         self.anomaly_detection = anomaly_detection
         self.secure_memory_protection = security_level == "PARANOID"
         
-        # Initialize replay cache
-        self.processed_message_ids = collections.deque(maxlen=max_replay_cache_size)
+        # Initialize replay cache with improved implementation
+        replay_cache_size = max_replay_cache_size
+        replay_cache_expiry = 3600  # Default 1 hour
+        self.replay_cache = ReplayCache(max_size=replay_cache_size, expiry_seconds=replay_cache_expiry)
+        logger.info(f"Initialized enhanced replay protection cache with size={replay_cache_size}, expiry={replay_cache_expiry}s")
         
         # Load security configuration based on selected security level
         security_config = DoubleRatchetDefaults.get_defaults(security_level)
@@ -1644,13 +1674,32 @@ class DoubleRatchet:
         # Generate nonce using counter + salt method
         nonce = self._nonce_manager.generate_nonce()
         
-        # Create the cipher with the message key
-        cipher = ChaCha20Poly1305(message_key)
+        # Create a mutable copy of the message key for better memory hygiene
+        # This copy will be securely erased after use
+        message_key_buffer = bytearray(message_key)
         
-        # Encrypt the plaintext
-        ciphertext = cipher.encrypt(nonce, plaintext, auth_data)
-        
-        return nonce, ciphertext
+        try:
+            # Create the cipher with the message key
+            cipher = ChaCha20Poly1305(bytes(message_key_buffer))
+            
+            # Encrypt the plaintext
+            ciphertext = cipher.encrypt(nonce, plaintext, auth_data)
+            
+            return nonce, ciphertext
+        finally:
+            # Securely erase the message key copy from memory
+            # Multi-pass overwrite of the key buffer
+            for i in range(len(message_key_buffer)):
+                message_key_buffer[i] = 0
+            
+            # Try to use platform-specific memory lock/unlock if available
+            try:
+                buffer_addr = ctypes.addressof((ctypes.c_char * len(message_key_buffer)).from_buffer(message_key_buffer))
+                # Zero out with memset for direct memory access
+                ctypes.memset(buffer_addr, 0, len(message_key_buffer))
+            except Exception:
+                # Silently handle any errors during secure erasure
+                pass
     
     def _encrypt(self, plaintext: bytes) -> bytes:
         """
@@ -1758,17 +1807,36 @@ class DoubleRatchet:
         Returns:
             Decrypted plaintext
         """
-        # Create the cipher with the message key
-        cipher = ChaCha20Poly1305(message_key)
+        # Create a mutable copy of the message key for better memory hygiene
+        # This copy will be securely erased after use
+        message_key_buffer = bytearray(message_key)
         
         try:
-            # Decrypt the ciphertext
-            plaintext = cipher.decrypt(nonce, ciphertext, auth_data)
-            return plaintext
-        except InvalidTag:
-            logger.error("SECURITY ALERT: Authentication tag verification failed")
-            raise SecurityError("Message authentication failed")
-
+            # Create the cipher with the message key
+            cipher = ChaCha20Poly1305(bytes(message_key_buffer))
+            
+            try:
+                # Decrypt the ciphertext
+                plaintext = cipher.decrypt(nonce, ciphertext, auth_data)
+                return plaintext
+            except InvalidTag:
+                logger.error("SECURITY ALERT: Authentication tag verification failed")
+                raise SecurityError("Message authentication failed")
+        finally:
+            # Securely erase the message key copy from memory
+            # Multi-pass overwrite of the key buffer
+            for i in range(len(message_key_buffer)):
+                message_key_buffer[i] = 0
+            
+            # Try to use platform-specific memory lock/unlock if available
+            try:
+                buffer_addr = ctypes.addressof((ctypes.c_char * len(message_key_buffer)).from_buffer(message_key_buffer))
+                # Zero out with memset for direct memory access
+                ctypes.memset(buffer_addr, 0, len(message_key_buffer))
+            except Exception:
+                # Silently handle any errors during secure erasure
+                pass
+    
     def decrypt(self, message: bytes) -> bytes:
         """
         Decrypt a message using the Double Ratchet protocol.
@@ -1801,12 +1869,13 @@ class DoubleRatchet:
             
             # --- REPLAY DETECTION ---
             # Check if this unique message ID has already been processed
-            if header.message_id in self.processed_message_ids:
+            if header.message_id in self.replay_cache:
                 logger.warning(
-                    f"SECURITY ALERT: Replay detected for message ID {format_binary(header.message_id)}. "
-                    f"Ratchet: {format_binary(self._get_public_key_fingerprint(header.public_key))}, MsgNum: {header.message_number}"
+                    f"SECURITY ALERT: Message replay attack detected! Message ID {format_binary(header.message_id)} already processed. "
+                    f"Ratchet: {format_binary(self._get_public_key_fingerprint(header.public_key))}, MsgNum: {header.message_number}. "
+                    f"This indicates an adversary may be attempting to replay old ciphertexts."
                 )
-                raise SecurityError("Replayed message ID detected. Potential replay attack.")
+                raise SecurityError("Message replay attack detected: message ID already processed.")
             # --- END REPLAY DETECTION ---
             
             # Extract signature length and signature
@@ -1832,17 +1901,8 @@ class DoubleRatchet:
                 if not self.remote_dss_public_key:
                     logger.warning("Cannot verify FALCON signature: No remote DSS public key available")
                 else:
-                    try:
-                        data_to_verify = nonce + ciphertext
-                        verified = self.dss.verify(self.remote_dss_public_key, data_to_verify, signature)
-                        if verified:
-                            logger.debug("FALCON signature verified successfully")
-                        else:
-                            logger.error("SECURITY ALERT: FALCON signature verification failed")
-                            raise SecurityError("Message signature verification failed")
-                    except Exception as e:
-                        logger.error(f"FALCON signature verification error: {e}", exc_info=True)
-                        raise SecurityError(f"Signature verification error: {e}")
+                    data_to_verify = nonce + ciphertext
+                    self._secure_verify(self.remote_dss_public_key, data_to_verify, signature, "FALCON message signature")
             
             # 3. Create authenticated data from header
             auth_data = self._get_associated_data(header_bytes)
@@ -1855,7 +1915,7 @@ class DoubleRatchet:
             plaintext = self._decrypt_with_cipher(nonce, ciphertext, auth_data, message_key)
             
             # Add successfully processed message ID to replay cache
-            self.processed_message_ids.append(header.message_id)
+            self.replay_cache.add(header.message_id)
             
             return plaintext
             
@@ -1992,10 +2052,11 @@ class DoubleRatchet:
 
         if message_number < self.receiving_message_number:
             # Message is older than current state for this chain AND was not in skipped_message_keys.
-            logger.error(f"SECURITY ALERT: Old message #{message_number} received for current ratchet "
-                         f"(expecting #{self.receiving_message_number} or later), not in skipped cache. "
-                         f"Ratchet ID: {format_binary(current_message_ratchet_id)}. Possible replay or severe de-sync.")
-            raise SecurityError(f"Old message #{message_number} for current ratchet (ID {format_binary(current_message_ratchet_id)}), not in skipped cache.")
+            logger.error(f"SECURITY ALERT: Message replay attack detected! Old message #{message_number} received for current ratchet "
+                         f"(current chain is at message #{self.receiving_message_number}), not in skipped keys cache. "
+                         f"Ratchet ID: {format_binary(current_message_ratchet_id)}. "
+                         f"This indicates an adversary may be attempting to replay old ciphertexts after the ratchet has advanced.")
+            raise SecurityError(f"Message replay attack detected: old message sequence number (#{message_number}) for current ratchet, not in skipped keys cache.")
 
         if message_number > self.receiving_message_number:
             # Message is ahead in this chain. Skip from current self.receiving_message_number up to message_number (exclusive).
@@ -2516,6 +2577,32 @@ class DoubleRatchet:
             logger.error(self.last_error, exc_info=True)
             raise SecurityError(f"Key initialization failed: {str(e)}")
 
+    def _secure_verify(self, public_key, payload, signature, description="signature"):
+        """
+        Securely verify a signature, aborting immediately on mismatch.
+        
+        Args:
+            public_key: The public key bytes to use for verification
+            payload: The payload that was signed
+            signature: The signature to verify
+            description: Description for logging
+            
+        Returns:
+            True if verification succeeds
+            
+        Raises:
+            SecurityError: If verification fails or throws an exception
+        """
+        try:
+            if not self.dss.verify(public_key, payload, signature):
+                logger.error(f"SECURITY ALERT: {description} verification failed")
+                raise SecurityError(f"Handshake aborted: invalid {description}")
+            return True
+        except Exception as e:
+            # Log at most "signature mismatch" (avoid printing raw data)
+            logger.error(f"SECURITY ALERT: {description} verification error", exc_info=True)
+            raise SecurityError(f"Handshake aborted: invalid {description}")
+
 
 class DoubleRatchetDefaults:
     """Default security settings for the Double Ratchet protocol."""
@@ -2536,7 +2623,9 @@ class DoubleRatchetDefaults:
             "threshold_security": False,     # Threshold cryptography splitting
             "message_padding": False,        # Add random padding to messages
             "anti_tampering": False,         # Extra anti-tampering measures
-            "secure_erasure_passes": 4       # Number of secure erasure passes
+            "secure_erasure_passes": 4,      # Number of secure erasure passes
+            "replay_cache_size": 200,        # Maximum replay cache size
+            "replay_cache_expiry": 3600      # Replay cache expiry time (1 hour)
         },
         "MAXIMUM": { # This was HIGH, settings updated by user
             "enable_pq": True,
@@ -2553,27 +2642,27 @@ class DoubleRatchetDefaults:
             "threshold_security": True,      # Enable threshold security
             "message_padding": True,         # Add random padding
             "anti_tampering": True,          # Advanced anti-tampering 
-            "secure_erasure_passes": 10,     # Maximum secure erasure
-            "constant_time_only": True,      # Force constant-time operations
-            "restricted_algorithms": True,   # Use only top-tier algorithms
-            "hardware_attestation": True,    # Require hardware attestation     # More secure erasure passes
+            "secure_erasure_passes": 8,      # Increased erasure passes
+            "replay_cache_size": 500,        # Larger replay cache
+            "replay_cache_expiry": 7200      # Longer expiry (2 hours)
         },
         "PARANOID": {
             "enable_pq": True,
-            "max_skipped_keys": 10,          # Minimal skipped keys
-            "key_rotation_messages": 10,     # Very frequent rotation
-            "key_rotation_time": 600,        # 10 minutes key rotation
-            "max_message_size": 131072,      # 128KB max message size
+            "max_skipped_keys": 0,          # No skipped keys - immediate rejection
+            "key_rotation_messages": 1,     # Rotate keys after every message
+            "key_rotation_time": 300,       # 5 minutes max key lifetime
+            "max_message_size": 65536,      # 64KB max message size
             "strict_verification": True,
             "side_channel_protection": True,
-            "memory_protection": True,       # Maximum memory protection
-            "anomaly_detection": True,       # Advanced anomaly detection
-            "hardware_binding": True,        # Hardware binding (mandatory if available)
-            "threshold_security": True,      # Enable threshold security
-            "message_padding": True,         # Always add random padding 
-            "anti_tampering": True,          # Maximum anti-tampering measures
-            "secure_erasure_passes": 8,      # Maximum secure erasure passes
-            "constant_time_only": True       # Force constant-time operations
+            "memory_protection": True,
+            "anomaly_detection": True,
+            "hardware_binding": True,
+            "threshold_security": True,
+            "message_padding": True,
+            "anti_tampering": True,
+            "secure_erasure_passes": 10,
+            "replay_cache_size": 1000,      # Very large replay cache
+            "replay_cache_expiry": 86400    # Very long expiry (24 hours)
         }
       
     }
@@ -2779,6 +2868,112 @@ def example_double_ratchet(use_pq: bool = True) -> None:
         print(f"\nError in demonstration: {e}")
         import traceback
         traceback.print_exc()
+
+
+class ReplayCache:
+    """
+    Enhanced replay protection cache with timestamp-based expiration.
+    
+    This class provides efficient storage and lookup of message IDs with
+    automatic expiration to prevent memory growth. It combines a fast
+    lookup set with timestamp tracking for efficient cleanup.
+    """
+    
+    def __init__(self, max_size=200, expiry_seconds=3600):
+        """
+        Initialize the replay cache.
+        
+        Args:
+            max_size: Maximum number of message IDs to store
+            expiry_seconds: Time in seconds after which message IDs expire
+        """
+        self.max_size = max_size
+        self.expiry_seconds = expiry_seconds
+        self.message_ids = set()  # Fast lookup set
+        self.timestamps = {}  # Maps message ID to timestamp
+        self.last_cleanup = time.time()
+        self.cleanup_interval = 300  # Clean up every 5 minutes
+        
+    def add(self, message_id: bytes) -> None:
+        """
+        Add a message ID to the replay cache.
+        
+        Args:
+            message_id: The message ID to add
+        """
+        # Perform cleanup if needed
+        current_time = time.time()
+        if current_time - self.last_cleanup > self.cleanup_interval:
+            self._cleanup(current_time)
+        
+        # If we're at capacity, force a cleanup
+        if len(self.message_ids) >= self.max_size:
+            self._cleanup(current_time, force=True)
+            
+        # If still at capacity after cleanup, remove oldest entry
+        if len(self.message_ids) >= self.max_size:
+            self._remove_oldest()
+        
+        # Add the new message ID
+        self.message_ids.add(message_id)
+        self.timestamps[message_id] = current_time
+    
+    def contains(self, message_id: bytes) -> bool:
+        """
+        Check if a message ID is in the replay cache.
+        
+        Args:
+            message_id: The message ID to check
+            
+        Returns:
+            True if the message ID is in the cache, False otherwise
+        """
+        return message_id in self.message_ids
+    
+    def _cleanup(self, current_time: float, force: bool = False) -> None:
+        """
+        Remove expired message IDs from the cache.
+        
+        Args:
+            current_time: Current time in seconds since epoch
+            force: If True, remove at least 25% of entries even if not expired
+        """
+        self.last_cleanup = current_time
+        expired_ids = []
+        
+        # Find expired message IDs
+        for msg_id, timestamp in self.timestamps.items():
+            if current_time - timestamp > self.expiry_seconds:
+                expired_ids.append(msg_id)
+        
+        # If forced cleanup and not enough expired, remove oldest entries
+        if force and len(expired_ids) < (self.max_size // 4):
+            # Sort by timestamp and keep only the newest 75%
+            sorted_ids = sorted(self.timestamps.items(), key=lambda x: x[1])
+            additional_removals = max(1, self.max_size // 4) - len(expired_ids)
+            expired_ids.extend([msg_id for msg_id, _ in sorted_ids[:additional_removals]])
+        
+        # Remove expired IDs
+        for msg_id in expired_ids:
+            self.message_ids.remove(msg_id)
+            del self.timestamps[msg_id]
+    
+    def _remove_oldest(self) -> None:
+        """Remove the oldest message ID from the cache."""
+        if not self.timestamps:
+            return
+            
+        oldest_id = min(self.timestamps.items(), key=lambda x: x[1])[0]
+        self.message_ids.remove(oldest_id)
+        del self.timestamps[oldest_id]
+    
+    def __contains__(self, message_id: bytes) -> bool:
+        """Support for 'in' operator."""
+        return self.contains(message_id)
+    
+    def __len__(self) -> int:
+        """Return the number of message IDs in the cache."""
+        return len(self.message_ids)
 
 
 if __name__ == "__main__":

@@ -646,4 +646,37 @@ This ensures that captured handshakes cannot be replayed by an attacker, adding 
 
 All security enhancements follow cryptographic best practices and are fully integrated with the existing secure communication framework.
 
+# Enhanced Memory Hygiene
+
+The application now includes advanced memory hygiene practices for protecting sensitive cryptographic keys from RAM-dump attacks:
+
+1. **PyNaCl Secure Memory**: Uses libsodium's secure memory functions (via PyNaCl library) to allocate locked memory regions that cannot be swapped to disk and are protected from other processes.
+
+2. **Mutable Buffers**: All cryptographic keys are now stored in mutable `bytearray` objects instead of immutable `bytes` to allow secure wiping.
+
+3. **Multi-Pass Memory Wiping**: When a key is no longer needed, its memory is overwritten multiple times with different patterns before being released.
+
+4. **Memory Locking**: Uses platform-specific memory locking functions (via `mlock` on Unix systems or `VirtualLock` on Windows) to prevent sensitive buffers from being swapped to disk.
+
+5. **Secure Key Storage**: AEAD keys are stored in protected memory and wiped immediately after use.
+
+# Enhanced Message-Layer Replay Protection
+
+The application now includes enhanced replay protection at the message layer to prevent adversaries from replaying old ciphertexts:
+
+1. **Advanced Replay Cache**: Replaced the simple FIFO cache with a sophisticated time-based replay protection system that tracks message IDs with timestamps for efficient detection and cleanup.
+
+2. **Sequence Number Tracking**: The Double Ratchet protocol meticulously tracks message sequence numbers across multiple ratchet chains, detecting and rejecting out-of-sequence messages.
+
+3. **Skipped Message Keys Management**: For legitimate out-of-order messages, the system temporarily stores skipped message keys (with configurable limits) while maintaining forward secrecy.
+
+4. **Security-Level Specific Settings**: Different security profiles (STANDARD, MAXIMUM, PARANOID) have tailored replay protection settings:
+   - **STANDARD**: 200 cache entries with 1-hour expiry
+   - **MAXIMUM**: 500 cache entries with 2-hour expiry
+   - **PARANOID**: 1000 cache entries with 24-hour expiry
+
+5. **Automatic Cache Cleanup**: The replay cache automatically removes expired entries to prevent memory growth while maintaining robust replay protection.
+
+This multi-layered approach ensures that once the ratchet has advanced, an adversary cannot replay old ciphertexts, even during periods of network disruption or when messages arrive out of order.
+
 

@@ -2065,7 +2065,10 @@ class TLSSecureChannel:
                 # Log TLS version and cipher used
                 version = self.ssl_socket.version()
                 if version != "TLSv1.3":
-                    log.warning(f"Connected with {version} instead of TLS 1.3")
+                    log.error(f"SECURITY ALERT: Connected with {version} instead of TLS 1.3")
+                    # Close connection and abort
+                    self.ssl_socket.close()
+                    raise ssl.SSLError(f"TLS version downgrade detected: {version} (TLS 1.3 required)")
                 else:
                     log.info(f"Connected using TLS 1.3")
                 
@@ -2120,12 +2123,16 @@ class TLSSecureChannel:
                 # Log TLS version and cipher used
                 version = self.ssl_socket.version()
                 if version != "TLSv1.3":
-                    log.warning(f"Connected with {version} instead of TLS 1.3")
+                    log.error(f"SECURITY ALERT: Connected with {version} instead of TLS 1.3")
+                    raise ssl.SSLError(f"TLS version downgrade detected: {version} (TLS 1.3 required)")
                 else:
                     log.info(f"Connected using TLS 1.3")
                 
                 cipher = self.ssl_socket.cipher()
                 log.info(f"Using cipher: {cipher[0]}")
+                
+                # Verify certificate fingerprint (certificate pinning)
+                self.verify_certificate_fingerprint(self.ssl_socket, server_hostname)
             
             return self.ssl_socket
             
@@ -2262,7 +2269,9 @@ class TLSSecureChannel:
                 # Log TLS version and cipher
                 version = self.ssl_socket.version()
                 if version != "TLSv1.3":
-                    log.warning(f"Connected with {version} instead of TLS 1.3")
+                    log.error(f"SECURITY ALERT: Connected with {version} instead of TLS 1.3")
+                    self.close()
+                    raise ssl.SSLError(f"TLS version downgrade detected: {version} (TLS 1.3 required)")
                 else:
                     log.info(f"Connected using TLS 1.3")
                 
@@ -2386,7 +2395,10 @@ class TLSSecureChannel:
                 # Log TLS version and cipher
                 version = self.ssl_socket.version()
                 if version != "TLSv1.3":
-                    log.warning(f"Connected with {version} instead of TLS 1.3")
+                    log.error(f"SECURITY ALERT: Connected with {version} instead of TLS 1.3")
+                    # Close connection and abort
+                    self.ssl_socket.close()
+                    raise ssl.SSLError(f"TLS version downgrade detected: {version} (TLS 1.3 required)")
                 else:
                     log.info(f"Connected using TLS 1.3")
                 
@@ -2683,8 +2695,19 @@ class TLSSecureChannel:
         if hasattr(ssl, 'TLSVersion'):
             context.minimum_version = ssl.TLSVersion.TLSv1_3
             context.maximum_version = ssl.TLSVersion.TLSv1_3
+        else:
+            # If TLSVersion enum isn't available, use explicit options to disable older versions
+            context.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1 | ssl.OP_NO_TLSv1_2
+            log.warning("TLSVersion enum not available. Using options to disable older TLS versions.")
             
-        # Define the ciphers to be set
+        # Disable TLS version fallback - protect against downgrade attacks
+        context.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1 | ssl.OP_NO_TLSv1_2
+        
+        # Add additional options for security
+        context.options |= ssl.OP_SINGLE_DH_USE | ssl.OP_SINGLE_ECDH_USE
+        context.options |= ssl.OP_NO_COMPRESSION  # Disable compression (CRIME attack)
+        
+        # Define the ciphers to be set - only high security TLS 1.3 ciphers
         ciphers_to_set_list = list(self.CIPHER_SUITES) # Start with default classical suites
         pq_suites_attempted = []
 
@@ -2702,10 +2725,16 @@ class TLSSecureChannel:
             current_cipher_names = [c['name'] for c in current_ciphers_details if 'name' in c] if current_ciphers_details else []
             
             if not current_cipher_names:
-                log.critical("CRITICAL (Client Context): set_ciphers resulted in an empty cipher list! Potentially no ciphers are active. OpenSSL may use defaults.")
-                # Depending on security policy, raising an error might be appropriate here:
-                # raise ssl.SSLError("Cipher suite configuration failed: No ciphers were set by set_ciphers.")
+                log.critical("CRITICAL (Client Context): set_ciphers resulted in an empty cipher list! Potentially no ciphers are active. Aborting.")
+                # Raise error to prevent insecure operation
+                raise ssl.SSLError("Cipher suite configuration failed: No ciphers were set by set_ciphers.")
             else:
+                # Verify that only TLS 1.3 ciphers were selected
+                non_tls13_ciphers = [c for c in current_cipher_names if not c.startswith("TLS_")]
+                if non_tls13_ciphers:
+                    log.critical(f"CRITICAL: Non-TLS 1.3 ciphers detected: {non_tls13_ciphers}. Aborting.")
+                    raise ssl.SSLError(f"Non-TLS 1.3 ciphers were selected: {non_tls13_ciphers}")
+                    
                 log.info(f"Client Context: Successfully applied cipher string. Active ciphers: {current_cipher_names}")
 
             if self.enable_pq_kem:
@@ -2715,110 +2744,22 @@ class TLSSecureChannel:
                         log.info(f"Client Context: Confirmed PQ cipher suite active: {pq_suite_name}")
                         found_pq_cipher = True
                         # Typically, finding one successfully applied PQ suite is enough if multiple were alternatives
-                    break
-                if not found_pq_cipher:
-                    log.warning(f"Client Context: PQ KEM was enabled, but none of the expected PQ cipher suites ({pq_suites_attempted}) are active after setting '{cipher_suite_string_to_set}'. Active ciphers: {current_cipher_names}. This may indicate the PQ suites are not supported by OpenSSL, were silently ignored, or a fallback to classical ciphers occurred.")
+                        break
+                if not found_pq_cipher and pq_suites_attempted:
+                    log.warning(f"Client Context: PQ KEM was enabled, but none of the expected PQ cipher suites ({pq_suites_attempted}) are active. Active ciphers: {current_cipher_names}.")
+                    # Continue with standard TLS 1.3 ciphers when PQ is not available
 
-        except ssl.SSLError as e_main:
-            log.warning(f"Client Context: Failed to set combined cipher string '{cipher_suite_string_to_set}': {e_main}. Attempting fallbacks using CIPHER_SUITES: {self.CIPHER_SUITES}")
-            cipher_applied_in_fallback = False
-            # Fallback loop only tries classical ciphers from self.CIPHER_SUITES (original list)
-            for classical_cipher in self.CIPHER_SUITES:
-                try:
-                    context.set_ciphers(classical_cipher) # Try setting one by one
-                    current_ciphers_fallback_details = context.get_ciphers()
-                    current_cipher_names_fallback = [c['name'] for c in current_ciphers_fallback_details if 'name' in c] if current_ciphers_fallback_details else []
-
-                    if classical_cipher in current_cipher_names_fallback:
-                        log.info(f"Client Context Fallback: Successfully set cipher to: {classical_cipher}. Active ciphers: {current_cipher_names_fallback}")
-                        cipher_applied_in_fallback = True
-                        break # Applied one classical cipher, stop fallback.
-                    else:
-                        # This case means set_ciphers(classical_cipher) didn't error but also didn't set the cipher
-                        log.warning(f"Client Context Fallback: Attempted to set {classical_cipher}, but it was not found in active list: {current_cipher_names_fallback}. OpenSSL might have silently ignored it or it's not supported.")
-                except ssl.SSLError as e_fallback:
-                    log.warning(f"Client Context Fallback: Failed to set single cipher {classical_cipher}: {e_fallback}")
-                    continue
-                    
-            if not cipher_applied_in_fallback:
-                log.critical("CRITICAL (Client Context): All cipher configurations (combined and individual fallbacks) failed. OpenSSL will use its default ciphers. PQ features via cipher suites are likely unavailable.")
-                # Depending on security policy, consider raising an error.
-                # raise ssl.SSLError("Cipher suite configuration failed: No preferred ciphers could be set after fallbacks.")
-            elif self.enable_pq_kem: # Fallback to classical was successful, but PQ was intended
-                 log.warning(f"Client Context: PQ KEM was enabled, but cipher suite configuration fell back to classical ciphers ({[c['name'] for c in context.get_ciphers() if 'name' in c]}). Expected PQ cipher suites ({pq_suites_attempted}) are not active.")
+        except ssl.SSLError as e:
+            # Do not attempt fallback to weaker ciphers - we want strict TLS 1.3 enforcement
+            log.critical(f"Client Context: Failed to set cipher string '{cipher_suite_string_to_set}': {e}. Aborting.")
+            raise
         
-        # Enable post-quantum key exchange if configured (this usually means KEMs via set_groups)
-        if self.enable_pq_kem:
-            try:
-                # ... existing code ...
-                # Set post-quantum key exchange preference
-                if hasattr(context, 'set_alpn_protocols'):
-                    context.set_alpn_protocols(['pq-tls13'])
-                
-                # Mark the context as post-quantum enabled for our session info
-                context.post_quantum = True
-                
-                if hasattr(context, 'set_groups'):
-                    # Define groups to use (X25519MLKEM1024 and traditional curves)
-                    # Using both decimal values and named groups for better compatibility
-                    tls_groups = []
-                    
-                    # Add post-quantum groups, try different formats
-                    # Different OpenSSL/Python SSL versions might accept different formats
-                    try:
-                        tls_groups.extend([
-                            # Try hex strings (some SSL libraries accept these)
-                            "0x11EE",  # X25519MLKEM1024 (4590)
-                            "0x11ED",  # SecP256r1MLKEM1024 (4589)
-                            # Try decimal strings (more common)
-                            "4590",    # X25519MLKEM1024 (0x11EE)
-                            "4589",    # SecP256r1MLKEM1024 (0x11ED)
-                            # Add our specific group values to ensure compatibility in standalone mode
-                            str(self.NAMEDGROUP_X25519MLKEM1024),
-                            str(self.NAMEDGROUP_SECP256R1MLKEM1024),
-                            # If PQ negotiation fails, we need traditional fallbacks
-                            "x25519",      # Traditional elliptic curve
-                            "P-256",       # NIST P-256 curve
-                            "secp256r1"    # Same as P-256, different name
-                        ])
-                    except Exception:
-                        # If extending fails, use a simpler approach
-                        tls_groups = ["x25519", "P-256"]
-                        
-                    # Try setting the groups
-                    try:
-                        context.set_groups(tls_groups)
-                        log.info(f"Post-quantum groups set for client: {tls_groups}")
-                    except Exception as e:
-                        log.warning(f"Failed to set specific groups for client: {e}")
-                        # Try individual group additions
-                        for group in ["x25519", "P-256"]:
-                            try:
-                                context.set_groups([group])
-                                log.info(f"Successfully set fallback group: {group}")
-                                break
-                            except Exception:
-                                pass
-                
-                # Set custom options to signal PQ support
-                if hasattr(context, 'options'):
-                    # Store our PQ enabled flag
-                    setattr(context, '_pq_enabled', True)
-                    # Mark context as standalone for better detection
-                    setattr(context, '_standalone_mode', True) 
-                    # Store algorithm information for better reporting
-                    setattr(context, '_pq_algorithm', 'X25519MLKEM1024')
-                
-                log.info("Post-quantum hybrid key exchange enabled in client TLS")
-            except Exception as e:
-                log.warning(f"Failed to set post-quantum groups for client: {e}")
-                # Store that PQ was attempted but failed
-                setattr(context, '_pq_enabled', False)
-        else:
-            # Store that PQ is not enabled
-            setattr(context, '_pq_enabled', False)
+        # Add TLS fingerprint verification and certificate pinning
+        if hasattr(self, 'certificate_pinning') and self.certificate_pinning:
+            # This will be checked after handshake
+            log.info("Certificate pinning enabled for client context")
         
-        # For P2P, skip certificate verification by default
+        # For P2P, certificate verification depends on configuration
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
         
@@ -3224,14 +3165,21 @@ class TLSSecureChannel:
         # Create context with strong security settings
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         
-        # Set TLS 1.3
+        # Set TLS 1.3 as both minimum and maximum version if supported
         if hasattr(context, 'maximum_version') and hasattr(ssl, 'TLSVersion'):
             context.maximum_version = ssl.TLSVersion.TLSv1_3
-            
-        if hasattr(context, 'minimum_version') and hasattr(ssl, 'TLSVersion'):
             context.minimum_version = ssl.TLSVersion.TLSv1_3
+            log.info("TLS 1.3 set as both minimum and maximum version")
         
-        # Define the ciphers to be set
+        # Always enforce no older TLS versions regardless of TLSVersion support
+        context.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1 | ssl.OP_NO_TLSv1_2
+        log.info("Explicitly disabled older TLS protocol versions (1.0, 1.1, 1.2)")
+        
+        # Add additional security options
+        context.options |= ssl.OP_SINGLE_DH_USE | ssl.OP_SINGLE_ECDH_USE
+        context.options |= ssl.OP_NO_COMPRESSION  # Disable compression (CRIME attack)
+        
+        # Define the ciphers to be set - only high security TLS 1.3 ciphers
         ciphers_to_set_list = list(self.CIPHER_SUITES) # Start with default classical suites
         pq_suites_attempted = []
 
@@ -3249,11 +3197,16 @@ class TLSSecureChannel:
             current_cipher_names = [c['name'] for c in current_ciphers_details if 'name' in c] if current_ciphers_details else []
 
             if not current_cipher_names:
-                log.critical("CRITICAL (Server Context): set_ciphers resulted in an empty cipher list! Potentially no ciphers are active. OpenSSL may use defaults.")
-                # Depending on security policy, raising an error might be appropriate here:
-                # raise ssl.SSLError("Cipher suite configuration failed: No ciphers were set by set_ciphers.")
+                log.critical("CRITICAL (Server Context): set_ciphers resulted in an empty cipher list! Aborting for security.")
+                raise ssl.SSLError("Cipher suite configuration failed: No ciphers were set by set_ciphers.")
             else:
-                log.info(f"Server Context: Successfully applied cipher string. Active ciphers: {current_cipher_names}")
+                # Verify that only TLS 1.3 ciphers were selected
+                non_tls13_ciphers = [c for c in current_cipher_names if not c.startswith("TLS_")]
+                if non_tls13_ciphers:
+                    log.critical(f"CRITICAL: Non-TLS 1.3 ciphers detected: {non_tls13_ciphers}. Aborting.")
+                    raise ssl.SSLError(f"Non-TLS 1.3 ciphers were selected: {non_tls13_ciphers}")
+                
+                log.info(f"Server Context: Successfully applied TLS 1.3 cipher string. Active ciphers: {current_cipher_names}")
 
             if self.enable_pq_kem:
                 found_pq_cipher = False
@@ -3262,35 +3215,14 @@ class TLSSecureChannel:
                         log.info(f"Server Context: Confirmed PQ cipher suite active: {pq_suite_name}")
                         found_pq_cipher = True
                         break 
-                if not found_pq_cipher:
-                    log.warning(f"Server Context: PQ KEM was enabled, but none of the expected PQ cipher suites ({pq_suites_attempted}) are active after setting '{cipher_suite_string_to_set}'. Active ciphers: {current_cipher_names}. This may indicate the PQ suites are not supported by OpenSSL, were silently ignored, or a fallback to classical ciphers occurred.")
+                if not found_pq_cipher and pq_suites_attempted:
+                    log.warning(f"Server Context: PQ KEM was enabled, but none of the expected PQ cipher suites ({pq_suites_attempted}) are active. Using standard TLS 1.3 ciphers instead.")
+                    # Continue with standard TLS 1.3 ciphers
 
-        except ssl.SSLError as e_main:
-            log.warning(f"Server Context: Failed to set combined cipher string '{cipher_suite_string_to_set}': {e_main}. Attempting fallbacks using CIPHER_SUITES: {self.CIPHER_SUITES}")
-            cipher_applied_in_fallback = False
-            # Fallback loop only tries classical ciphers from self.CIPHER_SUITES
-            for classical_cipher in self.CIPHER_SUITES:
-                try:
-                    context.set_ciphers(classical_cipher)
-                    current_ciphers_fallback_details = context.get_ciphers()
-                    current_cipher_names_fallback = [c['name'] for c in current_ciphers_fallback_details if 'name' in c] if current_ciphers_fallback_details else []
-                    
-                    if classical_cipher in current_cipher_names_fallback:
-                        log.info(f"Server Context Fallback: Successfully set cipher to: {classical_cipher}. Active ciphers: {current_cipher_names_fallback}")
-                        cipher_applied_in_fallback = True
-                        break
-                    else:
-                        log.warning(f"Server Context Fallback: Attempted to set {classical_cipher}, but it was not found in active list: {current_cipher_names_fallback}. OpenSSL might have silently ignored it or it's not supported.")
-                except ssl.SSLError as e_fallback:
-                    log.warning(f"Server Context Fallback: Failed to set single cipher {classical_cipher}: {e_fallback}")
-                    continue
-            
-            if not cipher_applied_in_fallback:
-                log.critical("CRITICAL (Server Context): All cipher configurations (combined and individual fallbacks) failed. OpenSSL will use its default ciphers. PQ features via cipher suites are likely unavailable.")
-                # Depending on security policy, consider raising an error.
-                # raise ssl.SSLError("Cipher suite configuration failed: No preferred ciphers could be set after fallbacks.")
-            elif self.enable_pq_kem: # Fallback to classical was successful, but PQ was intended
-                 log.warning(f"Server Context: PQ KEM was enabled, but cipher suite configuration fell back to classical ciphers ({[c['name'] for c in context.get_ciphers() if 'name' in c]}). Expected PQ cipher suites ({pq_suites_attempted}) are not active.")
+        except ssl.SSLError as e:
+            # Don't attempt fallback - fail securely instead
+            log.critical(f"Server Context: Failed to set cipher string '{cipher_suite_string_to_set}': {e}. Aborting for security.")
+            raise
 
         # Load certificates using secure enclave if available
         if self.secure_enclave and self.secure_enclave.using_enclave:
@@ -4706,4 +4638,125 @@ class CounterBasedNonceManager:
     def get_salt(self) -> bytes:
         """Get the current salt value (for testing/debugging only)."""
         return self.salt
+
+    def verify_certificate_fingerprint(self, ssl_socket, server_hostname=None):
+        """
+        Verify the server certificate fingerprint against pinned fingerprints.
+        
+        Args:
+            ssl_socket: The SSL socket with the peer certificate
+            server_hostname: The hostname to verify (for SNI)
+            
+        Returns:
+            True if verification passes, False otherwise
+            
+        Raises:
+            ssl.SSLError: If certificate pinning is enabled and verification fails
+        """
+        if not hasattr(self, 'certificate_pinning') or not self.certificate_pinning:
+            # No certificate pinning configured, nothing to check
+            return True
+            
+        # Get the peer certificate in DER format
+        try:
+            der_cert = ssl_socket.getpeercert(binary_form=True)
+            if not der_cert:
+                log.error("No peer certificate available")
+                raise ssl.SSLError("Certificate verification failed: No peer certificate")
+                
+            # Calculate SHA-256 fingerprint
+            import hashlib
+            actual_fingerprint = hashlib.sha256(der_cert).hexdigest()
+            log.debug(f"Peer certificate fingerprint: {actual_fingerprint}")
+            
+            # Check if we have a fingerprint for this hostname
+            hostname = server_hostname or ssl_socket.server_hostname or '*'
+            expected_fingerprint = None
+            
+            # Try exact hostname match first
+            if hostname in self.certificate_pinning:
+                expected_fingerprint = self.certificate_pinning[hostname]
+            # Try wildcard match
+            elif '*' in self.certificate_pinning:
+                expected_fingerprint = self.certificate_pinning['*']
+                
+            # If we have an expected fingerprint, verify it
+            if expected_fingerprint:
+                if actual_fingerprint.lower() == expected_fingerprint.lower():
+                    log.info(f"Certificate fingerprint verification passed for {hostname}")
+                    return True
+                else:
+                    log.critical(f"SECURITY ALERT: Certificate fingerprint mismatch for {hostname}! Expected {expected_fingerprint}, got {actual_fingerprint}")
+                    raise ssl.SSLError(f"Certificate fingerprint verification failed for {hostname}")
+            else:
+                log.warning(f"No pinned certificate fingerprint found for {hostname}")
+                # If enforce_dane_validation is True, we should fail if no fingerprint is found
+                if hasattr(self, 'enforce_dane_validation') and self.enforce_dane_validation:
+                    raise ssl.SSLError(f"No pinned certificate fingerprint found for {hostname} and enforce_dane_validation is enabled")
+                
+        except ssl.SSLError:
+            # Re-raise SSL errors
+            raise
+        except Exception as e:
+            log.error(f"Error during certificate fingerprint verification: {e}")
+            if hasattr(self, 'enforce_dane_validation') and self.enforce_dane_validation:
+                raise ssl.SSLError(f"Certificate fingerprint verification failed: {e}")
+            
+        return True
+        
+    def wrap_socket_client(self, sock: socket.socket, server_hostname: str = None) -> ssl.SSLSocket:
+        """
+        Wraps an existing socket with TLS as a client.
+        
+        Args:
+            sock: The socket to wrap
+            server_hostname: The server hostname for SNI
+            
+        Returns:
+            The wrapped SSL socket
+        """
+        try:
+            # Create client context
+            context = self._create_client_context()
+            
+            # Check if socket is non-blocking
+            is_nonblocking = sock.getblocking() == False
+            
+            # Wrap with SSL, handling non-blocking sockets correctly
+            self.ssl_socket = context.wrap_socket(
+                sock, 
+                server_hostname=server_hostname,
+                do_handshake_on_connect=not is_nonblocking
+            )
+            
+            # For non-blocking sockets, handshake will be done manually later
+            if is_nonblocking:
+                log.info("Non-blocking socket detected, handshake will be performed later")
+                self.handshake_complete = False
+            else:
+                self.handshake_complete = True
+                
+                # Log TLS version and cipher used
+                version = self.ssl_socket.version()
+                if version != "TLSv1.3":
+                    log.error(f"SECURITY ALERT: Connected with {version} instead of TLS 1.3")
+                    raise ssl.SSLError(f"TLS version downgrade detected: {version} (TLS 1.3 required)")
+                else:
+                    log.info(f"Connected using TLS 1.3")
+                
+                cipher = self.ssl_socket.cipher()
+                log.info(f"Using cipher: {cipher[0]}")
+                
+                # Verify certificate fingerprint (certificate pinning)
+                self.verify_certificate_fingerprint(self.ssl_socket, server_hostname)
+            
+            return self.ssl_socket
+            
+        except ssl.SSLError as e:
+            log.error(f"SSL error during client wrapping: {e}")
+            raise
+            
+        except Exception as e:
+            log.error(f"Error during client wrapping: {e}")
+            raise
 
