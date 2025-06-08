@@ -1,10 +1,11 @@
 import os
 import socket
-import ssl
+import ssl   
 import ipaddress
 import tempfile
 import logging
 import secrets
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Tuple, Optional, List, Dict, Any
 from cryptography import x509
@@ -41,6 +42,13 @@ except ImportError as e:
 
 # Configure logging
 logger = logging.getLogger("CAExchange")
+
+# Post-quantum key exchange groups to be used in TLS context
+HYBRID_PQ_GROUPS = ["X25519MLKEM1024", "SecP256r1MLKEM1024"]
+
+class SecurityError(Exception):
+    """Custom exception for security-related errors in the context of CA services."""
+    pass
 
 class CAExchange:
     """
@@ -102,26 +110,6 @@ class CAExchange:
         self.local_cert_fingerprint = None
         self.peer_cert_fingerprint = None
         
-        # Define a fixed exchange key - both peers will use this
-        # This is acceptable because we verify certificate integrity using fingerprints
-        # and this just adds an extra layer of protection against passive eavesdropping
-        if secure_exchange:
-            # Use a fixed key for both sides - will be the same on both peers
-            # self.exchange_key = b'SecureP2PCertificateExchangeKey!!' # Original problematic key
-            # Derive a 32-byte key using HKDF
-            hkdf = HKDF(
-                algorithm=hashes.SHA256(),
-                length=32, # Must be 32 for ChaCha20Poly1305
-                salt=None,
-                info=b'chacha20poly1305-exchange-key',
-                backend=default_backend()
-            )
-            self.exchange_key = hkdf.derive(base_shared_secret)
-            logger.debug(f"Derived 32-byte exchange key using HKDF: {self.exchange_key.hex()}")
-
-        else:
-            self.exchange_key = None
-            
         logger.debug("CAExchange module initialized with enhanced security options")
         
         # Holds the exchange key for ChaCha20Poly1305 or XChaCha20Poly1305
@@ -335,7 +323,7 @@ class CAExchange:
                 logger.error(f"Fallback ChaCha20Poly1305 decryption failed: {e}")
                 raise ValueError(f"Fallback decryption failed: {e}")
 
-    def exchange_certs(self, role: str, host: str, port: int) -> bytes:
+    def exchange_certs(self, role: str, host: str, port: int, ready_event: Optional[threading.Event] = None) -> bytes:
         """
         Exchange certificates with peer using enhanced security measures
         
@@ -343,6 +331,7 @@ class CAExchange:
             role: Either "server" or "client"
             host: IP address to use (for server binding or client connection)
             port: Base port (exchange port will be base_port + exchange_port_offset)
+            ready_event: Optional threading.Event to signal when the server is ready
             
         Returns:
             bytes: Peer's certificate in PEM format
@@ -355,22 +344,31 @@ class CAExchange:
         
         # Create socket with appropriate timeout
         if role == "server":
-            # For IPv6 addresses, need to determine socket family
-            sock_family = socket.AF_INET6 if ':' in host else socket.AF_INET
+            # For IPv6 addresses, need to determine socket family to bind to the correct "any" address
+            is_ipv6 = ':' in host
+            sock_family = socket.AF_INET6 if is_ipv6 else socket.AF_INET
             s = socket.socket(sock_family, socket.SOCK_STREAM)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             
             # Set socket timeout for security
             s.settimeout(30.0)
             
+            # Use a wildcard address for binding, not the client's IP
+            bind_addr = '::' if is_ipv6 else '0.0.0.0'
+            
             # Format address properly based on socket family
             if sock_family == socket.AF_INET6:
-                s.bind((host, exchange_port, 0, 0))  # Include flowinfo and scopeid for IPv6
+                s.bind((bind_addr, exchange_port, 0, 0))  # Bind to wildcard IPv6
             else:
-                s.bind((host, exchange_port))
+                s.bind((bind_addr, exchange_port))  # Bind to wildcard IPv4
                 
             s.listen(1)
-            logger.info(f"Server listening on [{host}]:{exchange_port} for cert exchange.")
+            logger.info(f"Server listening on [{bind_addr}]:{exchange_port} for cert exchange.")
+            
+            # Signal that the server is ready
+            if ready_event:
+                ready_event.set()
+                
             logger.info("Waiting for client connection for cert exchange...")
             
             try:
@@ -400,71 +398,106 @@ class CAExchange:
                 peer_sock.close()
                 raise ConnectionError(f"Failed to connect for certificate exchange: {e}")
 
+        peer_cert_pem = None
         try:
+            # --- Start of communication block ---
+            
             # First send certificate length and fingerprint for validation
             cert_data = self.local_cert_pem
             
             # Only encrypt if secure exchange is enabled
             encrypted_payload = cert_data # Assume plaintext initially
-            current_aad = None
             if self.secure_exchange:
-                try:
-                    # Construct AAD from the connection context
-                    current_aad = f"{role}:{host}:{exchange_port}:cert-exchange".encode('utf-8')
-                    logger.debug(f"Using AAD for cert encryption: {current_aad.decode('utf-8', errors='ignore')}")
-                    encrypted_payload = self._encrypt_data(cert_data, associated_data=current_aad)
-                except ValueError as e:
-                    logger.error(f"Failed to encrypt certificate for exchange: {e}")
-                    peer_sock.close()
-                    if role == "server": s.close()
-                    raise ConnectionError(f"Certificate encryption failed: {e}")
+                # Construct AAD from the connection context
+                local_ip, local_port = peer_sock.getsockname()[:2]
+                peer_ip, peer_port = peer_sock.getpeername()[:2]
                 
-            # Prepare metadata: length (8 hex chars = 4 bytes) + fingerprint (64 hex chars = 32 bytes)
+                if role == 'client':
+                    # Client is the initiator
+                    aad_string = f"{local_ip}:{local_port}:{peer_ip}:{exchange_port}"
+                else: # server
+                    # Server is the listener, peer is the initiator
+                    aad_string = f"{peer_ip}:{peer_port}:{local_ip}:{exchange_port}"
+
+                current_aad = aad_string.encode('utf-8')
+                logger.debug(f"Using AAD for cert encryption: {current_aad.decode('utf-8', errors='ignore')}")
+                encrypted_payload = self._encrypt_data(cert_data, associated_data=current_aad)
+            
+            # Prepare metadata and send
             metadata = f"{len(encrypted_payload):08x}{self.local_cert_fingerprint}".encode()
             peer_sock.sendall(metadata)
-            
-            # Then send certificate data
             logger.info(f"Sending local certificate ({len(encrypted_payload)} bytes) to peer.")
             peer_sock.sendall(encrypted_payload)
             logger.info("Local certificate sent.")
 
+            # --- Receive peer's certificate ---
+            
             # Receive metadata first
-            metadata = b""
-            while len(metadata) < 72:  # 8 bytes length + 64 bytes fingerprint
-                chunk = peer_sock.recv(72 - len(metadata))
+            received_metadata = b""
+            while len(received_metadata) < 72:
+                chunk = peer_sock.recv(72 - len(received_metadata))
                 if not chunk:
                     raise ConnectionError("Connection closed while receiving metadata")
-                metadata += chunk
+                received_metadata += chunk
                 
             # Parse metadata
-            try:
-                cert_len = int(metadata[:8].decode(), 16)
-                peer_fingerprint = metadata[8:].decode()
-                logger.info(f"Expecting peer certificate of {cert_len} bytes with fingerprint: {peer_fingerprint}")
-            except (ValueError, UnicodeDecodeError) as e:
-                logger.error(f"Failed to parse peer metadata: {e}")
-                raise ValueError(f"Invalid certificate metadata received: {e}")
+            cert_len = int(received_metadata[:8].decode(), 16)
+            peer_fingerprint = received_metadata[8:].decode()
+            logger.info(f"Expecting peer certificate of {cert_len} bytes with fingerprint: {peer_fingerprint}")
 
-            # Now receive the actual certificate
-            data = b""
-            peer_sock.settimeout(10.0)  # Shorter timeout for data transmission
-            logger.info("Receiving peer certificate...")
-            
-            # Use a more robust receiving loop with size limit
-            remaining = min(cert_len, 100000)  # Limit to 100KB for safety
+            # Receive the actual certificate data
+            received_data = b""
+            peer_sock.settimeout(10.0)
+            remaining = min(cert_len, 100000)
             while remaining > 0:
-                try:
-                    chunk = peer_sock.recv(min(self.buffer_size, remaining))
-                    if not chunk:
-                        logger.warning("Peer closed connection before sending complete certificate.")
-                        break
-                    data += chunk
-                    remaining -= len(chunk)
-                    logger.debug(f"Received chunk of {len(chunk)} bytes. {remaining} bytes remaining.")
-                except socket.timeout:
-                    logger.warning("Socket timeout while receiving certificate.")
+                chunk = peer_sock.recv(min(self.buffer_size, remaining))
+                if not chunk:
                     break
-        
+                received_data += chunk
+                remaining -= len(chunk)
+
+            # --- Process received data (decryption and validation) ---
+            
+            if len(received_data) == 0:
+                 raise ValueError("No certificate data received from peer")
+
+            if self.secure_exchange:
+                # Reconstruct AAD for decryption
+                local_ip, local_port = peer_sock.getsockname()[:2]
+                peer_ip, peer_port = peer_sock.getpeername()[:2]
+                
+                if role == 'server':
+                    # Server is decrypting a message from the client (initiator)
+                    aad_string = f"{peer_ip}:{peer_port}:{local_ip}:{exchange_port}"
+                else: # client
+                    # Client is decrypting a message from the server (listener)
+                    aad_string = f"{local_ip}:{local_port}:{peer_ip}:{exchange_port}"
+                
+                current_aad_for_decryption = aad_string.encode('utf-8')
+                logger.debug(f"Using AAD for cert decryption: {current_aad_for_decryption.decode('utf-8', errors='ignore')}")
+                decrypted_payload = self._decrypt_data(received_data, associated_data=current_aad_for_decryption)
+                
+                if not decrypted_payload.startswith(b"-----BEGIN CERTIFICATE-----"):
+                    raise ValueError("Decrypted data is not a valid certificate.")
+                
+                peer_cert_pem = decrypted_payload
+                logger.info("Successfully decrypted certificate data")
+            else:
+                peer_cert_pem = received_data
+            
+            # Validate certificate format and fingerprint
+            x509.load_pem_x509_certificate(peer_cert_pem, default_backend())
+            cert = x509.load_pem_x509_certificate(peer_cert_pem, default_backend())
+            actual_fingerprint = cert.fingerprint(hashes.SHA256()).hex()
+
+            if actual_fingerprint != peer_fingerprint:
+                logger.error(f"Certificate fingerprint mismatch! Expected {peer_fingerprint}, got {actual_fingerprint}")
+                raise SecurityError("Certificate fingerprint mismatch")
+            
+            logger.info(f"Certificate fingerprint verified: {actual_fingerprint}")
+            self.peer_cert_pem = peer_cert_pem
+            logger.info("Certificate exchange process finished successfully.")
+
         except Exception as e:
             logger.error(f"Error during certificate exchange: {e}")
             raise
@@ -474,80 +507,7 @@ class CAExchange:
                 s.close()
             logger.info("Socket closed.")
 
-        if len(data) > 0:
-            # Decrypt if needed, but only when secure exchange is enabled
-            original_data = data
-            decrypted_successfully = False
-            if self.secure_exchange:
-                try:
-                    # Construct AAD for decryption, should match the one used for encryption
-                    # Note: We use the *expected* peer role, host, and port for AAD construction.
-                    # For a server, the host is its listening IP. For a client, it's the peer's IP.
-                    # This implies both sides must agree on these context parameters for AAD to match.
-                    # The `host` parameter to exchange_certs is the relevant one.
-                    current_aad_for_decryption = f"{'client' if role == 'server' else 'server'}:{host}:{exchange_port}:cert-exchange".encode('utf-8')
-                    logger.debug(f"Using AAD for cert decryption: {current_aad_for_decryption.decode('utf-8', errors='ignore')}")
-
-                    decrypted_payload = self._decrypt_data(data, associated_data=current_aad_for_decryption)
-                    # Verify this looks like a PEM certificate
-                    if b"-----BEGIN CERTIFICATE-----" in decrypted_payload:
-                        data = decrypted_payload
-                        logger.info("Successfully decrypted certificate data")
-                        decrypted_successfully = True
-                    else:
-                        # This case means _decrypt_data might have returned original if it had fallback,
-                        # or decryption produced garbage not resembling a cert.
-                        logger.error("Decryption did not produce a valid certificate format.")
-                        raise ValueError("Decrypted data is not a valid certificate.")
-                except ValueError as e: # Catch specific decryption errors
-                    logger.error(f"Certificate decryption failed: {e}")
-                    # Do not proceed with potentially compromised or unencrypted data.
-                    raise ConnectionAbortedError(f"Failed to decrypt peer certificate: {e}")
-                
-            elif not self.secure_exchange: # If secure_exchange is false, treat data as already plain
-                decrypted_successfully = True # Or rather, no decryption was needed.
-
-            if not decrypted_successfully and self.secure_exchange:
-                # This state should ideally not be reached if exceptions are handled correctly above,
-                # but as a safeguard:
-                logger.error("Certificate exchange failed: data was not successfully decrypted but secure exchange was enabled.")
-                raise ConnectionAbortedError("Certificate exchange failed due to decryption issues.")
-                
-            logger.info(f"Received peer certificate ({len(data)} bytes).")
-            
-            # Validate certificate format
-            try:
-                # Check if it starts with PEM header
-                if not data.startswith(b"-----BEGIN CERTIFICATE-----"):
-                    logger.warning("Certificate doesn't have proper PEM format, but will try to parse anyway")
-                
-                x509.load_pem_x509_certificate(data, default_backend())
-                logger.info("Peer certificate validated as proper X.509 format")
-            except Exception as e:
-                logger.error(f"Received invalid certificate: {e}")
-                raise ValueError(f"Invalid certificate received: {e}")
-            
-            # Store peer certificate
-            self.peer_cert_pem = data
-            
-            # Calculate and store fingerprint
-            cert = x509.load_pem_x509_certificate(data, default_backend())
-            actual_fingerprint = cert.fingerprint(hashes.SHA256()).hex()
-            self.peer_cert_fingerprint = actual_fingerprint
-            
-            # Verify fingerprint matches what was sent
-            if actual_fingerprint != peer_fingerprint:
-                logger.error(f"Certificate fingerprint mismatch! Expected {peer_fingerprint}, got {actual_fingerprint}")
-                # Warn but still accept the certificate for compatibility
-                logger.warning("Continuing despite fingerprint mismatch - this is potentially unsafe")
-            else:
-                logger.info(f"Certificate fingerprint verified: {self.peer_cert_fingerprint}")
-        else:
-            logger.error("No data received for peer certificate.")
-            raise ValueError("No certificate data received from peer")
-            
-        logger.info("Certificate exchange process finished successfully.")
-        return data
+        return self.peer_cert_pem
 
     def create_server_ctx(self) -> ssl.SSLContext:
         """
@@ -572,6 +532,15 @@ class CAExchange:
         
         # Apply security options
         ctx.options |= self.SECURE_TLS_OPTIONS
+        
+        # Set post-quantum groups for key exchange
+        try:
+            if hasattr(ctx, 'set_groups'):
+                group_string = ":".join(HYBRID_PQ_GROUPS)
+                ctx.set_groups(group_string)
+                logger.info(f"Server KEM groups set to: {group_string}")
+        except Exception as e:
+            logger.error(f"Failed to set post-quantum key exchange groups for server: {e}")
         
         # Set strong cipher suites
         # try:
@@ -659,6 +628,15 @@ class CAExchange:
         
         # Apply security options
         ctx.options |= self.SECURE_TLS_OPTIONS
+        
+        # Set post-quantum groups for key exchange
+        try:
+            if hasattr(ctx, 'set_groups'):
+                group_string = ":".join(HYBRID_PQ_GROUPS)
+                ctx.set_groups(group_string)
+                logger.info(f"Client KEM groups set to: {group_string}")
+        except Exception as e:
+            logger.error(f"Failed to set post-quantum key exchange groups for client: {e}")
         
         # Set strong cipher suites
         # try:
