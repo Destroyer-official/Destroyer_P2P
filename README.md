@@ -25,7 +25,7 @@
   <table>
     <tr>
       <td align="center"><a href="#-system-overview-"><b>🔍 OVERVIEW</b></a></td>
-      <td align="center"><a href="#-core-capabilities-"><b>⚔️ CAPABILITIES</b></a></td>
+      <td align="center"><a href="#%EF%B8%8F-core-capabilities-%EF%B8%8F)"><b>⚔️ CAPABILITIES</b></a></td>
       <td align="center"><a href="#-security-architecture-"><b>🏗️ ARCHITECTURE</b></a></td>
       <td align="center"><a href="#-deployment-protocol-"><b>⚡ DEPLOYMENT</b></a></td>
     </tr>
