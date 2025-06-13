@@ -1,6 +1,6 @@
-<div align="center"> # ⚡ SECURE P2P CHAT ⚡ </div>
-<div align="center">  </div>
-<div align="center">  </div>
+<div align="center"> ⚡ SECURE P2P CHAT ⚡ </div>
+<div align="center">    </div>
+<div align="center">    </div>
 <div align="center">
   <img src="https://img.shields.io/badge/SECURITY-MAXIMUM-brightgreen?style=for-the-badge" alt="Security: Maximum">
   <img src="https://img.shields.io/badge/ENCRYPTION-QUANTUM_RESISTANT-blue?style=for-the-badge" alt="Encryption: Quantum-Resistant">
