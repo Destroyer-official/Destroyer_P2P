@@ -732,7 +732,7 @@ pip install -r requirements.txt
 To start the secure P2P chat application:
 
 ```bash
-python secure_p2p.py
+python3 secure_p2p.py
 ```
 
 ### Connection Process
