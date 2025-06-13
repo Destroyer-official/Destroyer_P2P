@@ -179,15 +179,15 @@ The system includes a rigorous security test suite that systematically validates
 To run the full security test suite:
 ```bash
 cd tests
-python run_security_tests.py
+python3 run_security_tests.py
 ```
 
 You can also run individual test files for more targeted testing:
 
 ```bash
 cd tests
-python test_cert_auth_security.py
-python test_hybrid_kex_security.py
+python3 test_cert_auth_security.py
+python3 test_hybrid_kex_security.py
 # etc.
 ```
 
@@ -708,7 +708,7 @@ Follow these instructions to deploy and operate your quantum-resistant P2P commu
 2.  **Establish a Containment Field (Virtual Environment)**:
 ```bash
     # Create virtual environment
-    python -m venv .venv_secure_chat
+    python3 -m venv .venv_secure_chat
 
     # Activate on Windows (PowerShell)
     .venv_secure_chat\Scripts\Activate.ps1
