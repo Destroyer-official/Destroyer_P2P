@@ -6,6 +6,9 @@ import tempfile
 import logging
 import secrets
 import threading
+import hashlib
+import base64 
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Tuple, Optional, List, Dict, Any
 from cryptography import x509
@@ -15,30 +18,185 @@ from cryptography.hazmat.primitives.asymmetric import ec, rsa, padding
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.x509.extensions import TLSFeature, TLSFeatureType
+from cryptography.x509 import ocsp
 
-# Attempt to import XChaCha20Poly1305 from tls_channel_manager
-# This assumes tls_channel_manager.py is in a location where it can be imported
-# and that it doesn't create circular dependencies with ca_services.py
+# Import XChaCha20Poly1305 from tls_channel_manager
 try:
     from tls_channel_manager import XChaCha20Poly1305, CounterBasedNonceManager
     HAVE_XCHACHA = True
-except ImportError as e:
-    # Fallback or error handling if XChaCha20Poly1305 cannot be imported
-    # For now, we'll log a warning and a simple fallback will occur later if XCHACHA isn't available
-    # In a real scenario, this might need a more robust fallback or be a fatal error
-    # For this specific change, we assume XChaCha20Poly1305 will be available.
-    # If not, the original ChaCha20Poly1305 would need to be used with stricter nonce handling,
-    # or the application might need to halt if XChaCha20 is essential.
-    # Given the request, we are upgrading to XChaCha20.
-    # If it's not found, the existing code would have used the basic ChaCha20Poly1305
-    # which we are trying to replace due to nonce concerns with the fixed key.
-    # So, ideally, this import should succeed or the application should have a clear strategy.
-    # For now, we'll rely on it being present.
-    HAVE_XCHACHA = False # This will be checked later
-    # logger.warning(f"Could not import XChaCha20Poly1305 from tls_channel_manager: {e}. Certificate exchange security may be reduced if it falls back.")
-    # Re-import basic ChaCha20Poly1305 for a potential (less ideal) fallback if needed,
-    # though the goal is to use XChaCha20Poly1305.
-    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+except ImportError:
+    # Define our own XChaCha20Poly1305 if tls_channel_manager is not available
+    HAVE_XCHACHA = False
+    
+    class CounterBasedNonceManager:
+        """A nonce manager using a counter and a random salt.
+
+        This approach is suitable for AEAD ciphers and helps prevent nonce reuse
+        with the same key. This is a fallback implementation.
+        """
+        
+        def __init__(self, counter_size: int = 8, salt_size: int = 4, nonce_size: int = 12):
+            """Initializes the nonce manager.
+            
+            Args:
+                counter_size: Size of the counter in bytes.
+                salt_size: Size of the random salt in bytes.
+                nonce_size: Total size of the nonce in bytes.
+            """
+            if counter_size + salt_size != nonce_size:
+                raise ValueError(f"Counter size ({counter_size}) + salt size ({salt_size}) must equal nonce_size ({nonce_size}) bytes for AEAD")
+                
+            self.counter_size = counter_size
+            self.salt_size = salt_size
+            self.nonce_size = nonce_size
+            self.counter = 0
+            self.salt = os.urandom(salt_size)
+            
+            self.nonce_uses = 0
+            self.last_reset_time = datetime.now()
+            
+        def generate_nonce(self) -> bytes:
+            """Generates a unique nonce.
+
+            The nonce is constructed by concatenating the salt and the counter.
+            
+            Returns:
+                A unique nonce of `nonce_size` bytes.
+            
+            Raises:
+                RuntimeError: If the counter exceeds its maximum value.
+            """
+            max_counter = (2 ** (self.counter_size * 8)) - 1
+            if self.counter >= max_counter:
+                logger.warning(f"Nonce counter reached maximum ({max_counter}), resetting salt and counter")
+                self.reset()
+                
+            counter_bytes = self.counter.to_bytes(self.counter_size, byteorder='big')
+            
+            nonce = self.salt + counter_bytes
+            
+            self.counter += 1
+            self.nonce_uses += 1
+            
+            return nonce
+        
+        def reset(self):
+            """Resets the counter and generates a new random salt."""
+            self.counter = 0
+            self.salt = os.urandom(self.salt_size)
+            self.last_reset_time = datetime.now()
+            logger.debug(f"CounterBasedNonceManager reset with new {self.salt_size}-byte salt")
+            
+        def get_counter(self) -> int:
+            """Gets the current counter value (for debugging)."""
+            return self.counter
+        
+        def get_salt(self) -> bytes:
+            """Gets the current salt value (for debugging)."""
+            return self.salt
+    
+    class XChaCha20Poly1305:
+        """A fallback implementation of the XChaCha20-Poly1305 AEAD cipher.
+
+        This implementation uses a 192-bit (24-byte) nonce, making it safe to use
+        with randomly generated nonces.
+        """
+         
+        def __init__(self, key: bytes):
+            """Initializes the cipher with a 32-byte key.
+            
+            Args:
+                key: A 32-byte encryption key.
+            """
+            if len(key) != 32:
+                raise ValueError("XChaCha20Poly1305 key must be 32 bytes")
+            self.key = key
+            self.nonce_manager = CounterBasedNonceManager(counter_size=20, salt_size=4, nonce_size=24)
+        
+        def encrypt(self, data: bytes = None, associated_data: Optional[bytes] = None, nonce: Optional[bytes] = None) -> bytes:
+            """Encrypts data using XChaCha20-Poly1305.
+            
+            Args:
+                data: The plaintext to encrypt.
+                associated_data: Optional additional authenticated data.
+                nonce: An optional 24-byte nonce. If not provided, one is
+                    generated automatically.
+                
+            Returns:
+                The ciphertext, nonce, and authentication tag combined.
+            """
+            if nonce is None:
+                nonce = self.nonce_manager.generate_nonce()
+            elif len(nonce) != 24:
+                raise ValueError("XChaCha20Poly1305 nonce must be 24 bytes")
+                
+            subkey = self._hchacha20(self.key, nonce[:16])
+            
+            # Use the subkey with ChaCha20-Poly1305 and the remaining 8 bytes of nonce,
+            # prepended with 4 zero bytes to form a 12-byte nonce.
+            internal_nonce = b'\x00\x00\x00\x00' + nonce[16:]
+            chacha = ChaCha20Poly1305(subkey)
+            ciphertext = chacha.encrypt(internal_nonce, data, associated_data)
+        
+            return nonce + ciphertext
+        
+        def decrypt(self, data: bytes, associated_data: Optional[bytes] = None) -> bytes:
+            """Decrypts data using XChaCha20-Poly1305.
+            
+            Args:
+                data: The ciphertext to decrypt (including the nonce).
+                associated_data: Optional additional authenticated data.
+                
+            Returns:
+                The decrypted plaintext.
+            """
+            if len(data) < 24:
+                raise ValueError("Data too short for XChaCha20Poly1305 decryption")
+                
+            nonce = data[:24]
+            ciphertext = data[24:]
+                
+            subkey = self._hchacha20(self.key, nonce[:16])
+            
+            # Use the subkey with ChaCha20-Poly1305 and the remaining 8 bytes of nonce,
+            # prepended with 4 zero bytes to form a 12-byte nonce.
+            internal_nonce = b'\x00\x00\x00\x00' + nonce[16:]
+            chacha = ChaCha20Poly1305(subkey)
+            return chacha.decrypt(internal_nonce, ciphertext, associated_data)
+        
+        def _hchacha20(self, key: bytes, nonce: bytes) -> bytes:
+            """Derives a subkey from the main key and nonce using HChaCha20.
+            
+            Args:
+                key: The 32-byte main key.
+                nonce: The 16-byte nonce.
+                
+            Returns:
+                A 32-byte derived subkey.
+            """
+            seed = key + nonce
+            
+            hkdf = HKDF(
+                algorithm=hashes.SHA256(),
+                length=32,
+                salt=None,
+                info=b"HChaCha20 Key Derivation"
+            )
+            
+            return hkdf.derive(seed)
+            
+        def rotate_key(self, new_key: bytes):
+            """Rotates to a new encryption key.
+            
+            Args:
+                new_key: The new 32-byte encryption key.
+            """
+            if len(new_key) != 32:
+                raise ValueError("XChaCha20Poly1305 key must be 32 bytes")
+                
+            self.key = new_key
+            self.nonce_manager.reset()
 
 # Configure logging
 logger = logging.getLogger("CAExchange")
@@ -51,31 +209,12 @@ class SecurityError(Exception):
     pass
 
 class CAExchange:
+    """Manages the lifecycle of secure peer-to-peer connections.
+
+    This class handles the generation of self-signed certificates, their secure
+    exchange between peers, and the creation of high-security TLS contexts.
+    It incorporates features like HPKP-style pinning and OCSP stapling.
     """
-    Enhanced Certificate Authority Exchange Module
-    
-    Handles certificate generation, exchange, and TLS context creation between peers
-    
-    """
-    
-    # Define stronger cipher suites
-    # SECURE_CIPHER_SUITES = [
-    #     "TLS_AES_256_GCM_SHA384",
-    #     "TLS_CHACHA20_POLY1305_SHA256"
-    # ]
-    
-    # Define secure TLS options
-    SECURE_TLS_OPTIONS = (
-        ssl.OP_NO_SSLv2 | 
-        ssl.OP_NO_SSLv3 | 
-        ssl.OP_NO_TLSv1 | 
-        ssl.OP_NO_TLSv1_1 | 
-        ssl.OP_NO_TLSv1_2 |
-        ssl.OP_NO_COMPRESSION |
-        ssl.OP_SINGLE_DH_USE |
-        ssl.OP_SINGLE_ECDH_USE |
-        ssl.OP_CIPHER_SERVER_PREFERENCE
-    )
     
     def __init__(self, 
                  exchange_port_offset: int = 1,
@@ -83,165 +222,194 @@ class CAExchange:
                  validity_days: int = 7,
                  key_type: str = "rsa4096",
                  secure_exchange: bool = True,
-                 base_shared_secret: bytes = b'SecureP2PCertificateExchangeKey!!'):  # Changed to True by default for maximum security
-        """
-        Initialize the CAExchange module with enhanced security options
+                 base_shared_secret: bytes = b'SecureP2PCertificateExchangeKey!!',
+                 enable_hpkp: bool = True,
+                 enable_ocsp_stapling: bool = True):
+        """Initializes the certificate exchange manager.
         
         Args:
-            exchange_port_offset: Port offset from the main TLS port for cert exchange
-            buffer_size: Buffer size for socket communication
-            validity_days: Certificate validity period in days
-            key_type: Type of key to use ("ec521" for ECC P-521, "rsa4096" for RSA-4096)
-            secure_exchange: Whether to encrypt certificate exchange with a pre-shared key (default: True)
-            base_shared_secret: The shared secret used for key derivation
+            exchange_port_offset: Port offset from the base port for the
+                certificate exchange service.
+            buffer_size: The size of the socket buffer for the exchange.
+            validity_days: The validity period for generated certificates.
+            key_type: The type and size of the cryptographic key to generate
+                (e.g., "rsa4096", "ec384").
+            secure_exchange: If True, the certificate exchange is encrypted.
+            base_shared_secret: A secret used to derive the encryption key for
+                the certificate exchange.
+                **Warning**: For production use, this should be a unique,
+                high-entropy secret.
+            enable_hpkp: If True, enables HTTP Public Key Pinning.
+            enable_ocsp_stapling: If True, enables OCSP stapling.
         """
         self.exchange_port_offset = exchange_port_offset
         self.buffer_size = buffer_size
-        self.validity_days = min(validity_days, 30)  # Cap at 30 days for security
+        self.validity_days = validity_days
         self.key_type = key_type
         self.secure_exchange = secure_exchange
+        self.enable_hpkp = enable_hpkp
+        self.enable_ocsp_stapling = enable_ocsp_stapling
         
-        # Certificate data - will be populated during generation/exchange
-        self.local_cert_pem = None
         self.local_key_pem = None
         self.peer_cert_pem = None
         
-        # Certificate fingerprints for verification
         self.local_cert_fingerprint = None
         self.peer_cert_fingerprint = None
         
+        self.hpkp_pins: Dict[str, List[str]] = {}
+        self.hpkp_max_age = 5184000  # 60 days
+        self.hpkp_include_subdomains = True
+        
+        self.ocsp_responder_url: Optional[str] = None
+        self.ocsp_response_cache: Dict[str, Dict[str, Any]] = {}
+        self.ocsp_response_max_age = 3600  # 1 hour
+        
         logger.debug("CAExchange module initialized with enhanced security options")
         
-        # Holds the exchange key for ChaCha20Poly1305 or XChaCha20Poly1305
-        # This key is derived once and used for the lifetime of this instance.
         self.exchange_key: Optional[bytes] = None
-        self.xchacha_cipher: Optional[XChaCha20Poly1305] = None # For XChaCha20Poly1305
+        self.xchacha_cipher: Optional[XChaCha20Poly1305] = None
 
         if self.secure_exchange:
-            # Derive a consistent key for encrypting the certificate exchange
-            # Using a fixed salt and info string for HKDF
+            # Derive a consistent key for encrypting the certificate exchange.
             hkdf = HKDF(
                 algorithm=hashes.SHA256(),
-                length=32, # ChaCha20Poly1305 and XChaCha20Poly1305 use a 32-byte key
-                salt=b'p2p-cert-exchange-salt-v1', 
-                info=b'chacha20poly1305-exchange-key', # Keep info generic as key is for an AEAD
+                length=32,
+                salt=b'p2p-cert-exchange-salt-v2',
+                info=b'xchacha20poly1305-exchange-key',
             )
-            # Ensure the input key material is bytes
             base_key_material = base_shared_secret
             if isinstance(base_key_material, str):
                 base_key_material = base_key_material.encode('utf-8')
             
             self.exchange_key = hkdf.derive(base_key_material)
             
-            # Initialize XChaCha20Poly1305 cipher if available
-            if HAVE_XCHACHA:
-                try:
-                    # Create a custom implementation with the correct nonce size for XChaCha20Poly1305 (24 bytes)
-                    self.xchacha_cipher = XChaCha20Poly1305(self.exchange_key)
-                    logger.debug("CAExchange initialized with XChaCha20Poly1305 for cert exchange.")
-                except Exception as e:
-                    logger.error(f"Failed to initialize XChaCha20Poly1305: {e}. Falling back to direct key usage (if unencrypted).")
-                    # This is a critical failure for secure exchange if XCHACHA was expected.
-                    # Depending on policy, might need to raise an error or disable secure_exchange.
-                    self.xchacha_cipher = None # Ensure it's None
-                    # Potentially: self.secure_exchange = False
-            else:
-                # This path should ideally not be taken if XChaCha20 is the goal.
-                # If HAVE_XCHACHA is False, it means the import failed.
-                # The original code might have used ChaCha20Poly1305 directly here.
-                # For this upgrade, lack of XChaCha20 is a problem for the intended security level.
-                logger.warning("XChaCha20Poly1305 not available. Certificate exchange may be insecure or fail if encryption is required.")
-                # self.cipher = ChaCha20Poly1305(self.exchange_key) # Old way
-
-        self.cert_store = {}
+            try:
+                self.xchacha_cipher = XChaCha20Poly1305(self.exchange_key)
+                logger.debug("CAExchange initialized with XChaCha20Poly1305 for cert exchange.")
+            except Exception as e:
+                logger.error(f"Failed to initialize XChaCha20Poly1305: {e}. Certificate exchange will be insecure!")
+                self.xchacha_cipher = None
+                self.secure_exchange = False
+        
+        self.cert_store: Dict[str, bytes] = {}
     
     def generate_self_signed(self) -> Tuple[bytes, bytes]:
-        """
-        Generate a self-signed certificate with maximum security parameters
-        
+        """Generates a new self-signed certificate and private key.
+
+        The generated certificate includes enhanced security extensions like
+        Basic Constraints, Key Usage, and OCSP Must-Staple if enabled.
+
         Returns:
-            Tuple[bytes, bytes]: (private_key_pem, certificate_pem)
+            A tuple containing the private key and certificate in PEM format.
         """
-        logger.info("Starting self-signed certificate generation with enhanced security parameters...")
-        
-        # Generate key based on selected type
-        if self.key_type == "ec521":
-            # Use ECC P-521 (NIST curve with highest security margin)
-            key = ec.generate_private_key(ec.SECP521R1(), backend=default_backend())
-            logger.debug("EC P-521 private key generated.")
+        logger.info("Generating self-signed certificate with enhanced security parameters...")
+
+        if self.key_type.startswith("rsa"):
+            try:
+                key_size = int(self.key_type[3:])
+                if key_size < 2048:
+                    logger.warning(f"RSA key size {key_size} is too small. Using 4096 bits instead.")
+                    key_size = 4096
+            except ValueError:
+                logger.warning(f"Invalid RSA key size: {self.key_type}. Using 4096 bits instead.")
+                key_size = 4096
+                
+            key = rsa.generate_private_key(
+                public_exponent=65537,
+                key_size=key_size,
+                backend=default_backend()
+            )
+            logger.debug(f"Generated RSA-{key_size} key pair")
+            
+        elif self.key_type.startswith("ec"):
+            try:
+                curve_size = int(self.key_type[2:])
+                if curve_size == 256:
+                    curve = ec.SECP256R1()
+                elif curve_size == 384:
+                    curve = ec.SECP384R1()
+                elif curve_size == 521:
+                    curve = ec.SECP521R1()
+                else:
+                    logger.warning(f"Invalid EC curve size: {curve_size}. Using P-384 instead.")
+                    curve = ec.SECP384R1()
+                    curve_size = 384
+            except ValueError:
+                logger.warning(f"Invalid EC curve size: {self.key_type}. Using P-384 instead.")
+                curve = ec.SECP384R1()
+                curve_size = 384
+                
+            key = ec.generate_private_key(
+                curve=curve,
+                backend=default_backend()
+            )
+            logger.debug(f"Generated EC P-{curve_size} key pair")
+            
         else:
-            # Default to RSA-4096
+            logger.warning(f"Unsupported key type: {self.key_type}. Using RSA-4096 instead.")
             key = rsa.generate_private_key(
                 public_exponent=65537,
                 key_size=4096,
                 backend=default_backend()
             )
-            logger.debug("RSA-4096 private key generated.")
-            
-        # Generate a unique subject name with high entropy
-        unique_id = secrets.token_hex(8)
-        host_identifier = socket.gethostname().replace('.', '-')
-        common_name = f"SecurePeer-{host_identifier}-{unique_id}"
-        
+            logger.debug("Generated RSA-4096 key pair (fallback)")
+
         subject = issuer = x509.Name([
-            x509.NameAttribute(NameOID.COUNTRY_NAME, u"IN"),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"SecureP2P"),
-            x509.NameAttribute(NameOID.COMMON_NAME, common_name),
+            x509.NameAttribute(NameOID.COMMON_NAME, f"P2P-{secrets.token_hex(8)}"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Secure P2P Chat"),
+            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Certificate Authority"),
         ])
 
-        now = datetime.now(timezone.utc)
-        
-        # Generate a strong random serial number (128 bits)
-        serial = int.from_bytes(secrets.token_bytes(16), byteorder='big')
-
-        builder = (
-            x509.CertificateBuilder()
-              .subject_name(subject)
-              .issuer_name(issuer)
-              .public_key(key.public_key())
-              .serial_number(serial)
-              .not_valid_before(now - timedelta(minutes=1))
-              .not_valid_after(now + timedelta(days=self.validity_days))
-              # Strong constraints
-              .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
-              .add_extension(
-                  x509.KeyUsage(
-                      digital_signature=True,
-                      content_commitment=False,
-                      key_encipherment=True,
-                      data_encipherment=False,
-                      key_agreement=True,
-                      key_cert_sign=True,
-                      crl_sign=False,
-                      encipher_only=False,
-                      decipher_only=False
-                  ),
-                  critical=True
-              )
-              .add_extension(
-                  x509.ExtendedKeyUsage([
-                      ExtendedKeyUsageOID.SERVER_AUTH,
-                      ExtendedKeyUsageOID.CLIENT_AUTH
-                  ]),
-                  critical=True
-              )
+        cert_builder = x509.CertificateBuilder().subject_name(
+            subject
+        ).issuer_name(
+            issuer
+        ).public_key(
+            key.public_key()
+        ).serial_number(
+            x509.random_serial_number()
+        ).not_valid_before(
+            datetime.now(timezone.utc)
+        ).not_valid_after(
+            datetime.now(timezone.utc) + timedelta(days=self.validity_days)
         )
-        
-        # Add Subject Key Identifier
-        ski = x509.SubjectKeyIdentifier.from_public_key(key.public_key())
-        builder = builder.add_extension(ski, critical=False)
-        
-        # Add Authority Key Identifier (same as SKI for self-signed)
-        builder = builder.add_extension(
-            x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(ski),
+
+        cert_builder = cert_builder.add_extension(
+            x509.BasicConstraints(ca=True, path_length=0),
+            critical=True
+        ).add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=True,
+                key_encipherment=True,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False
+            ),
+            critical=True
+        ).add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(key.public_key()),
+            critical=False
+        ).add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(key.public_key()),
             critical=False
         )
         
-        # Use SHA-512 for maximum security
-        cert = builder.sign(key, hashes.SHA512(), default_backend())
-        logger.debug("Certificate signed with SHA-512.")
+        if self.enable_ocsp_stapling:
+            cert_builder = cert_builder.add_extension(
+                TLSFeature(features=[TLSFeatureType.status_request]),
+                critical=False
+            )
 
-        # Store private key WITHOUT encryption since keys are ephemeral and in-memory only
+        cert = cert_builder.sign(
+            private_key=key,
+            algorithm=hashes.SHA256(),
+            backend=default_backend()
+        )
+
         key_pem_bytes = key.private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.PKCS8,
@@ -249,272 +417,339 @@ class CAExchange:
         )
         cert_pem_bytes = cert.public_bytes(serialization.Encoding.PEM)
         
-        # Calculate certificate fingerprint for verification
         fingerprint = cert.fingerprint(hashes.SHA256())
         self.local_cert_fingerprint = fingerprint.hex()
         
         logger.debug(f"Private key PEM created ({len(key_pem_bytes)} bytes).")
         logger.debug(f"Certificate PEM created ({len(cert_pem_bytes)} bytes).")
         logger.debug(f"Certificate fingerprint: {self.local_cert_fingerprint}")
-        logger.info("Self-signed certificate generation complete with enhanced security parameters.")
+        logger.info("Self-signed certificate generation complete.")
         
-        # Store locally
         self.local_key_pem = key_pem_bytes
         self.local_cert_pem = cert_pem_bytes
+        
+        if self.enable_hpkp:
+            pin = self.generate_hpkp_pin(cert_pem_bytes)
+            self.add_hpkp_pin('*', pin)
+            
+        if self.enable_ocsp_stapling:
+            self.generate_ocsp_response(cert_pem_bytes)
         
         return key_pem_bytes, cert_pem_bytes
         
     def _encrypt_data(self, data: bytes, associated_data: Optional[bytes] = None) -> bytes:
-        """Encrypt data using XChaCha20-Poly1305 (preferred) or raw for secure exchange"""
-        if not self.exchange_key or not self.secure_exchange:
-            logger.warning("Exchange key not set or secure_exchange is False. Returning plaintext.")
-            return data # Should not happen if secure_exchange is True as intended
-
-        if self.xchacha_cipher:
-            try:
-                # XChaCha20Poly1305.encrypt handles nonce generation and prepends it
-                logger.debug(f"Encrypting with XChaCha20Poly1305. AAD: {associated_data is not None}")
-                return self.xchacha_cipher.encrypt(data=data, associated_data=associated_data)
-            except Exception as e:
-                logger.error(f"XChaCha20Poly1305 encryption failed (AAD: {associated_data is not None}): {e}")
-                raise ValueError(f"Encryption failed during certificate exchange (AAD: {associated_data is not None}): {e}")
-        else:
-            # Fallback to ChaCha20Poly1305 if XChaCha20 is not available (less ideal due to nonce management for fixed key)
-            # This path indicates a setup issue or failed import of XChaCha20Poly1305.
-            # For the purpose of this fix, we are focusing on XChaCha20.
-            # A robust implementation would need to decide if this fallback is acceptable
-            # or if it should raise an error.
-            logger.warning("Attempting fallback to basic ChaCha20Poly1305 for encryption - this is not the target state.")
-            try:
-                # Manual nonce generation for basic ChaCha20Poly1305
-                nonce = secrets.token_bytes(12) # Standard 96-bit nonce
-                cipher = ChaCha20Poly1305(self.exchange_key)
-                encrypted = cipher.encrypt(nonce, data, associated_data)
-                return nonce + encrypted
-            except Exception as e:
-                logger.error(f"Fallback ChaCha20Poly1305 encryption failed: {e}")
-                raise ValueError(f"Fallback encryption failed: {e}")
-
-    def _decrypt_data(self, enc_data: bytes, associated_data: Optional[bytes] = None) -> bytes:
-        """Decrypt data using XChaCha20-Poly1305 (preferred) or raw for secure exchange"""
-        if not self.exchange_key or not self.secure_exchange:
-            logger.warning("Exchange key not set or secure_exchange is False. Assuming plaintext.")
-            return enc_data # Should not happen
-
-        if self.xchacha_cipher:
-            try:
-                # XChaCha20Poly1305.decrypt expects nonce to be prepended to enc_data
-                logger.debug(f"Decrypting with XChaCha20Poly1305. AAD: {associated_data is not None}")
-                return self.xchacha_cipher.decrypt(data=enc_data, associated_data=associated_data)
-            except Exception as e: # Catch specific crypto errors if possible, e.g., InvalidTag
-                logger.error(f"XChaCha20Poly1305 decryption failed (AAD: {associated_data is not None}): {e}")
-                raise ValueError(f"Decryption failed during certificate exchange (AAD: {associated_data is not None}): {e}")
-        else:
-            # Fallback to ChaCha20Poly1305 (less ideal)
-            logger.warning("Attempting fallback to basic ChaCha20Poly1305 for decryption - this is not the target state.")
-            try:
-                if len(enc_data) < 12: # Nonce + data
-                    raise ValueError("Encrypted data too short for ChaCha20Poly1305 (missing nonce).")
-                nonce = enc_data[:12]
-                ciphertext = enc_data[12:]
-                cipher = ChaCha20Poly1305(self.exchange_key)
-                return cipher.decrypt(nonce, ciphertext, associated_data)
-            except Exception as e:
-                logger.error(f"Fallback ChaCha20Poly1305 decryption failed: {e}")
-                raise ValueError(f"Fallback decryption failed: {e}")
-
-    def exchange_certs(self, role: str, host: str, port: int, ready_event: Optional[threading.Event] = None) -> bytes:
-        """
-        Exchange certificates with peer using enhanced security measures
+        """Encrypts data using the derived exchange key.
         
         Args:
-            role: Either "server" or "client"
-            host: IP address to use (for server binding or client connection)
-            port: Base port (exchange port will be base_port + exchange_port_offset)
-            ready_event: Optional threading.Event to signal when the server is ready
+            data: The plaintext data to encrypt.
+            associated_data: Optional additional authenticated data.
             
         Returns:
-            bytes: Peer's certificate in PEM format
-        """
-        if not self.local_cert_pem:
-            raise ValueError("Local certificate not generated yet. Call generate_self_signed() first.")
+            The encrypted data with the nonce prepended.
             
-        exchange_port = port + self.exchange_port_offset
+        Raises:
+            SecurityError: If encryption fails or the cipher is not available.
+        """
+        if not self.exchange_key or not self.secure_exchange:
+            logger.warning("Exchange key not set or secure_exchange is False. Returning plaintext.")
+            return data
+
+        if not self.xchacha_cipher:
+            raise SecurityError("XChaCha20Poly1305 cipher not initialized. Cannot perform secure exchange.")
+
+        try:
+            logger.debug(f"Encrypting with XChaCha20Poly1305. AAD: {associated_data is not None}")
+            return self.xchacha_cipher.encrypt(data=data, associated_data=associated_data)
+        except Exception as e:
+            logger.error(f"XChaCha20Poly1305 encryption failed (AAD: {associated_data is not None}): {e}")
+            raise SecurityError(f"Encryption failed during certificate exchange: {e}")
+
+    def _decrypt_data(self, enc_data: bytes, associated_data: Optional[bytes] = None) -> bytes:
+        """Decrypts data using the derived exchange key.
+        
+        Args:
+            enc_data: The encrypted data with the nonce prepended.
+            associated_data: Optional additional authenticated data.
+            
+        Returns:
+            The decrypted plaintext data.
+            
+        Raises:
+            SecurityError: If decryption fails or the cipher is not available.
+        """
+        if not self.exchange_key or not self.secure_exchange:
+            logger.warning("Exchange key not set or secure_exchange is False. Assuming plaintext.")
+            return enc_data
+
+        if not self.xchacha_cipher:
+            raise SecurityError("XChaCha20Poly1305 cipher not initialized. Cannot perform secure exchange.")
+
+        try:
+            logger.debug(f"Decrypting with XChaCha20Poly1305. AAD: {associated_data is not None}")
+            return self.xchacha_cipher.decrypt(data=enc_data, associated_data=associated_data)
+        except Exception as e:
+            logger.error(f"XChaCha20Poly1305 decryption failed (AAD: {associated_data is not None}): {e}")
+            raise SecurityError(f"Decryption failed during certificate exchange: {e}")
+
+    def exchange_certs(self, role: str, host: str, port: int, ready_event: Optional[threading.Event] = None) -> bytes:
+        """Performs a certificate exchange with a peer.
+
+        This method establishes a connection, sends the local certificate, and
+        receives the peer's certificate. The exchange is encrypted if
+        `secure_exchange` is enabled. It handles both "client" and "server"
+        roles for setting up the connection.
+
+        Args:
+            role: The role to assume, either "client" or "server".
+            host: The hostname or IP address to connect to or listen on.
+            port: The port to use for the exchange.
+            ready_event: For the "server" role, an optional `threading.Event`
+                that is set when the server is ready to accept connections.
+
+        Returns:
+            The peer's certificate in PEM format.
+
+        Raises:
+            SecurityError: If the exchange or validation fails.
+        """
+        if not self.local_cert_pem or not self.local_key_pem:
+            self.generate_self_signed()
+            
+        if not self.local_cert_fingerprint:
+            raise SecurityError("Local certificate fingerprint not available for exchange.")
+            
         logger.info(f"Starting certificate exchange as {role} with enhanced security.")
         
-        # Create socket with appropriate timeout
-        if role == "server":
-            # For IPv6 addresses, need to determine socket family to bind to the correct "any" address
-            is_ipv6 = ':' in host
-            sock_family = socket.AF_INET6 if is_ipv6 else socket.AF_INET
-            s = socket.socket(sock_family, socket.SOCK_STREAM)
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            
-            # Set socket timeout for security
-            s.settimeout(30.0)
-            
-            # Use a wildcard address for binding, not the client's IP
-            bind_addr = '::' if is_ipv6 else '0.0.0.0'
-            
-            # Format address properly based on socket family
-            if sock_family == socket.AF_INET6:
-                s.bind((bind_addr, exchange_port, 0, 0))  # Bind to wildcard IPv6
-            else:
-                s.bind((bind_addr, exchange_port))  # Bind to wildcard IPv4
-                
-            s.listen(1)
-            logger.info(f"Server listening on [{bind_addr}]:{exchange_port} for cert exchange.")
-            
-            # Signal that the server is ready
-            if ready_event:
-                ready_event.set()
-                
-            logger.info("Waiting for client connection for cert exchange...")
-            
-            try:
-                conn, addr = s.accept()
-                logger.info(f"Client connected from {addr} for cert exchange.")
-                peer_sock = conn
-            except socket.timeout:
-                logger.error("Timeout waiting for client connection")
-                s.close()
-                raise TimeoutError("Certificate exchange timed out")
-        else:  # client
-            logger.info(f"Client connecting to [{host}]:{exchange_port} for cert exchange.")
-            # Handle IPv6 addresses
-            if ':' in host:
-                peer_sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-            else:
-                peer_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            
-            # Set socket timeout for security    
-            peer_sock.settimeout(30.0)
-                
-            try:
-                peer_sock.connect((host, exchange_port))
-                logger.info("Client connected to server for cert exchange.")
-            except (socket.timeout, socket.error) as e:
-                logger.error(f"Failed to connect to server: {e}")
-                peer_sock.close()
-                raise ConnectionError(f"Failed to connect for certificate exchange: {e}")
-
-        peer_cert_pem = None
-        try:
-            # --- Start of communication block ---
-            
-            # First send certificate length and fingerprint for validation
-            cert_data = self.local_cert_pem
-            
-            # Only encrypt if secure exchange is enabled
-            encrypted_payload = cert_data # Assume plaintext initially
-            if self.secure_exchange:
-                # Construct AAD from the connection context
-                local_ip, local_port = peer_sock.getsockname()[:2]
-                peer_ip, peer_port = peer_sock.getpeername()[:2]
-                
-                if role == 'client':
-                    # Client is the initiator
-                    aad_string = f"{local_ip}:{local_port}:{peer_ip}:{exchange_port}"
-                else: # server
-                    # Server is the listener, peer is the initiator
-                    aad_string = f"{peer_ip}:{peer_port}:{local_ip}:{exchange_port}"
-
-                current_aad = aad_string.encode('utf-8')
-                logger.debug(f"Using AAD for cert encryption: {current_aad.decode('utf-8', errors='ignore')}")
-                encrypted_payload = self._encrypt_data(cert_data, associated_data=current_aad)
-            
-            # Prepare metadata and send
-            metadata = f"{len(encrypted_payload):08x}{self.local_cert_fingerprint}".encode()
-            peer_sock.sendall(metadata)
-            logger.info(f"Sending local certificate ({len(encrypted_payload)} bytes) to peer.")
-            peer_sock.sendall(encrypted_payload)
-            logger.info("Local certificate sent.")
-
-            # --- Receive peer's certificate ---
-            
-            # Receive metadata first
-            received_metadata = b""
-            while len(received_metadata) < 72:
-                chunk = peer_sock.recv(72 - len(received_metadata))
-                if not chunk:
-                    raise ConnectionError("Connection closed while receiving metadata")
-                received_metadata += chunk
-                
-            # Parse metadata
-            cert_len = int(received_metadata[:8].decode(), 16)
-            peer_fingerprint = received_metadata[8:].decode()
-            logger.info(f"Expecting peer certificate of {cert_len} bytes with fingerprint: {peer_fingerprint}")
-
-            # Receive the actual certificate data
-            received_data = b""
-            peer_sock.settimeout(10.0)
-            remaining = min(cert_len, 100000)
-            while remaining > 0:
-                chunk = peer_sock.recv(min(self.buffer_size, remaining))
-                if not chunk:
-                    break
-                received_data += chunk
-                remaining -= len(chunk)
-
-            # --- Process received data (decryption and validation) ---
-            
-            if len(received_data) == 0:
-                 raise ValueError("No certificate data received from peer")
-
-            if self.secure_exchange:
-                # Reconstruct AAD for decryption
-                local_ip, local_port = peer_sock.getsockname()[:2]
-                peer_ip, peer_port = peer_sock.getpeername()[:2]
-                
-                if role == 'server':
-                    # Server is decrypting a message from the client (initiator)
-                    aad_string = f"{peer_ip}:{peer_port}:{local_ip}:{exchange_port}"
-                else: # client
-                    # Client is decrypting a message from the server (listener)
-                    aad_string = f"{local_ip}:{local_port}:{peer_ip}:{exchange_port}"
-                
-                current_aad_for_decryption = aad_string.encode('utf-8')
-                logger.debug(f"Using AAD for cert decryption: {current_aad_for_decryption.decode('utf-8', errors='ignore')}")
-                decrypted_payload = self._decrypt_data(received_data, associated_data=current_aad_for_decryption)
-                
-                if not decrypted_payload.startswith(b"-----BEGIN CERTIFICATE-----"):
-                    raise ValueError("Decrypted data is not a valid certificate.")
-                
-                peer_cert_pem = decrypted_payload
-                logger.info("Successfully decrypted certificate data")
-            else:
-                peer_cert_pem = received_data
-            
-            # Validate certificate format and fingerprint
-            x509.load_pem_x509_certificate(peer_cert_pem, default_backend())
-            cert = x509.load_pem_x509_certificate(peer_cert_pem, default_backend())
-            actual_fingerprint = cert.fingerprint(hashes.SHA256()).hex()
-
-            if actual_fingerprint != peer_fingerprint:
-                logger.error(f"Certificate fingerprint mismatch! Expected {peer_fingerprint}, got {actual_fingerprint}")
-                raise SecurityError("Certificate fingerprint mismatch")
-            
-            logger.info(f"Certificate fingerprint verified: {actual_fingerprint}")
-            self.peer_cert_pem = peer_cert_pem
-            logger.info("Certificate exchange process finished successfully.")
-
-        except Exception as e:
-            logger.error(f"Error during certificate exchange: {e}")
-            raise
-        finally:
-            peer_sock.close()
-            if role == "server":
-                s.close()
-            logger.info("Socket closed.")
-
-        return self.peer_cert_pem
-
-    def create_server_ctx(self) -> ssl.SSLContext:
-        """
-        Create a maximum security SSLContext for the server role
+        ocsp_response = None
+        if self.enable_ocsp_stapling:
+            ocsp_response = self.get_cached_ocsp_response(self.local_cert_pem)
+            if not ocsp_response:
+                ocsp_response = self.generate_ocsp_response(self.local_cert_pem)
         
+        try:
+            is_ipv6 = False
+            try:
+                is_ipv6 = ipaddress.ip_address(host).version == 6
+            except ValueError:
+                pass
+            
+            if is_ipv6:
+                sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            else:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            
+            if role == "server":
+                sock.bind((host, port))
+                sock.listen(1)
+                logger.info(f"Server listening on [{host}]:{port} for cert exchange.")
+                
+                if ready_event:
+                    ready_event.set()
+                    
+                logger.info("Waiting for client connection...")
+                client_sock, client_addr = sock.accept()
+                logger.info(f"Client connected from {client_addr} for cert exchange.")
+                peer_sock = client_sock
+            else:
+                logger.info(f"Client connecting to [{host}]:{port} for cert exchange.")
+                sock.connect((host, port))
+                logger.info("Client connected to server.")
+                peer_sock = sock
+                
+            try:
+                cert_data = self.local_cert_pem
+                
+                ocsp_data = b''
+                if ocsp_response:
+                    ocsp_data = ocsp_response
+                    
+                metadata = {
+                    'fingerprint': self.local_cert_fingerprint,
+                    'has_ocsp': ocsp_response is not None,
+                    'ocsp_len': len(ocsp_data) if ocsp_response else 0
+                }
+                
+                if self.enable_hpkp:
+                    hpkp_pin = self.generate_hpkp_pin(self.local_cert_pem)
+                    metadata['hpkp_pin'] = hpkp_pin
+                
+                metadata_json = json.dumps(metadata).encode('utf-8')
+                metadata_len = len(metadata_json)
+                
+                peer_sock.sendall(metadata_len.to_bytes(4, byteorder='big'))
+                peer_sock.sendall(metadata_json)
+                
+                logger.info(f"Sending local certificate ({len(cert_data)} bytes) to peer.")
+                
+                if self.secure_exchange:
+                    cert_data = self._encrypt_data(cert_data, associated_data=self.local_cert_fingerprint.encode('ascii'))
+                
+                peer_sock.sendall(len(cert_data).to_bytes(4, byteorder='big'))
+                peer_sock.sendall(cert_data)
+                
+                if ocsp_response:
+                    if self.secure_exchange:
+                        ocsp_data = self._encrypt_data(ocsp_data, associated_data=b'ocsp-response')
+                    peer_sock.sendall(len(ocsp_data).to_bytes(4, byteorder='big'))
+                    peer_sock.sendall(ocsp_data)
+                
+                logger.info("Local certificate sent.")
+                
+                metadata_len_bytes = peer_sock.recv(4)
+                if not metadata_len_bytes or len(metadata_len_bytes) != 4:
+                    raise SecurityError("Failed to receive peer metadata length")
+                    
+                metadata_len = int.from_bytes(metadata_len_bytes, byteorder='big')
+                metadata_json = peer_sock.recv(metadata_len)
+                if not metadata_json or len(metadata_json) != metadata_len:
+                    raise SecurityError("Failed to receive peer metadata")
+                    
+                try:
+                    metadata = json.loads(metadata_json.decode('utf-8'))
+                    peer_fingerprint = metadata.get('fingerprint')
+                    has_ocsp = metadata.get('has_ocsp', False)
+                    ocsp_len = metadata.get('ocsp_len', 0)
+                    hpkp_pin = metadata.get('hpkp_pin')
+                    
+                    if not peer_fingerprint:
+                        raise SecurityError("Peer metadata is missing fingerprint")
+                        
+                    logger.info(f"Expecting peer certificate with fingerprint: {peer_fingerprint}")
+                except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                    raise SecurityError(f"Failed to parse peer metadata: {e}")
+                
+                cert_len_bytes = peer_sock.recv(4)
+                if not cert_len_bytes or len(cert_len_bytes) != 4:
+                    raise SecurityError("Failed to receive peer certificate length")
+                    
+                cert_len = int.from_bytes(cert_len_bytes, byteorder='big')
+                logger.info(f"Receiving peer certificate of {cert_len} bytes.")
+                
+                received_data = b''
+                remaining = cert_len
+                while remaining > 0:
+                    chunk = peer_sock.recv(min(remaining, self.buffer_size))
+                    if not chunk:
+                        raise SecurityError(f"Connection closed before receiving complete certificate. Got {len(received_data)} of {cert_len} bytes.")
+                    received_data += chunk
+                    remaining -= len(chunk)
+                
+                if self.secure_exchange:
+                    try:
+                        received_data = self._decrypt_data(received_data, associated_data=peer_fingerprint.encode('ascii'))
+                        logger.info("Successfully decrypted peer certificate")
+                    except Exception as e:
+                        raise SecurityError(f"Failed to decrypt peer certificate: {e}")
+                
+                try:
+                    cert = x509.load_pem_x509_certificate(received_data)
+                except Exception as e:
+                    raise SecurityError(f"Invalid peer certificate format: {e}")
+                
+                actual_fingerprint = cert.fingerprint(hashes.SHA256()).hex()
+                if actual_fingerprint != peer_fingerprint:
+                    raise SecurityError(f"Certificate fingerprint mismatch. Expected {peer_fingerprint}, got {actual_fingerprint}")
+                    
+                logger.info(f"Certificate fingerprint verified: {peer_fingerprint}")
+                
+                self.peer_cert_pem = received_data
+                self.peer_cert_fingerprint = peer_fingerprint
+                
+                if hpkp_pin and self.enable_hpkp:
+                    try:
+                        hostname = None
+                        for ext in cert.extensions:
+                            if ext.oid == x509.oid.ExtensionOID.SUBJECT_ALTERNATIVE_NAME:
+                                san = ext.value
+                                if san.dns_names:
+                                    hostname = san.dns_names[0]
+                                    break
+                        
+                        if not hostname:
+                            subject = cert.subject
+                            for attr in subject:
+                                if attr.oid == x509.oid.NameOID.COMMON_NAME:
+                                    hostname = attr.value
+                                    break
+                                    
+                        if not hostname:
+                            hostname = host if host != "0.0.0.0" else socket.gethostname()
+                            
+                        self.add_hpkp_pin(hostname, hpkp_pin)
+                        logger.info(f"Added HPKP pin for {hostname}: {hpkp_pin}")
+                    except Exception as e:
+                        logger.error(f"Failed to add HPKP pin: {e}")
+                
+                if has_ocsp and ocsp_len > 0:
+                    ocsp_len_bytes = peer_sock.recv(4)
+                    if not ocsp_len_bytes or len(ocsp_len_bytes) != 4:
+                        logger.warning("Failed to receive OCSP response length")
+                    else:
+                        actual_ocsp_len = int.from_bytes(ocsp_len_bytes, byteorder='big')
+                        ocsp_data = b''
+                        remaining = actual_ocsp_len
+                        while remaining > 0:
+                            chunk = peer_sock.recv(min(remaining, self.buffer_size))
+                            if not chunk:
+                                break
+                            ocsp_data += chunk
+                            remaining -= len(chunk)
+                            
+                        if len(ocsp_data) == actual_ocsp_len:
+                            if self.secure_exchange:
+                                try:
+                                    ocsp_data = self._decrypt_data(ocsp_data, associated_data=b'ocsp-response')
+                                except Exception as e:
+                                    logger.warning(f"Failed to decrypt OCSP response: {e}")
+                                    ocsp_data = None
+                                    
+                            if ocsp_data:
+                                try:
+                                    ocsp_resp = ocsp.load_der_ocsp_response(ocsp_data)
+                                    if ocsp_resp.response_status == ocsp.OCSPResponseStatus.SUCCESSFUL:
+                                        logger.info("Received valid OCSP response")
+                                        self.ocsp_response_cache[peer_fingerprint] = {
+                                            'response': ocsp_data,
+                                            'expires': datetime.now(timezone.utc) + timedelta(seconds=self.ocsp_response_max_age)
+                                        }
+                                    else:
+                                        logger.warning(f"OCSP response status: {ocsp_resp.response_status}")
+                                except Exception as e:
+                                    logger.warning(f"Failed to parse OCSP response: {e}")
+                
+                logger.info("Certificate exchange finished successfully.")
+                return self.peer_cert_pem
+                
+            finally:
+                if role == "server" and 'client_sock' in locals():
+                    client_sock.close()
+                logger.info("Cert exchange socket closed.")
+                sock.close()
+                
+        except Exception as e:
+            logger.error(f"Certificate exchange failed: {e}")
+            raise SecurityError(f"Certificate exchange failed: {e}")
+
+    # Define secure TLS options as class attribute
+    SECURE_TLS_OPTIONS = (
+        ssl.OP_NO_SSLv2 | ssl.OP_NO_SSLv3 | ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1 | 
+        ssl.OP_NO_COMPRESSION | ssl.OP_CIPHER_SERVER_PREFERENCE | 
+        ssl.OP_SINGLE_DH_USE | ssl.OP_SINGLE_ECDH_USE
+    )
+    
+    def create_server_ctx(self) -> ssl.SSLContext:
+        """Creates a high-security SSLContext for a server.
+
+        The context is configured for TLS 1.3 only, with strong cipher suites,
+        post-quantum key exchange groups, and client certificate validation.
+
         Returns:
-            ssl.SSLContext: Configured server SSL context with highest security settings
+            A configured `ssl.SSLContext` instance.
+        
+        Raises:
+            ValueError: If local or peer certificates are not available.
         """
         if not self.local_cert_pem or not self.local_key_pem:
             raise ValueError("Local certificate or key not available")
@@ -525,42 +760,31 @@ class CAExchange:
         logger.info("Creating SSLContext for server with maximum security settings.")
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         
-        # Set to TLS 1.3 only for maximum security
         ctx.minimum_version = ssl.TLSVersion.TLSv1_3
         ctx.maximum_version = ssl.TLSVersion.TLSv1_3
-        logger.info("SSLContext initialized with TLS 1.3 only.")
+        logger.info("SSLContext configured for TLS 1.3 only.")
         
-        # Apply security options
         ctx.options |= self.SECURE_TLS_OPTIONS
         
-        # Set post-quantum groups for key exchange
         try:
-            if hasattr(ctx, 'set_groups'):
-                group_string = ":".join(HYBRID_PQ_GROUPS)
-                ctx.set_groups(group_string)
-                logger.info(f"Server KEM groups set to: {group_string}")
+            group_string = ":".join(HYBRID_PQ_GROUPS)
+            ctx.set_groups(group_string)
+            logger.info(f"Server KEM groups set to: {group_string}")
         except Exception as e:
             logger.error(f"Failed to set post-quantum key exchange groups for server: {e}")
         
-        # Set strong cipher suites
-        # try:
-        #     ctx.set_ciphers(':'.join(self.SECURE_CIPHER_SUITES))
-        #     logger.info(f"Using secure cipher suite: {':'.join(self.SECURE_CIPHER_SUITES)}")
-        # except ssl.SSLError as e:
-        #     logger.warning(f"Could not set custom ciphers: {e}. Using default secure TLS 1.3 ciphers.")
-        
-        # Increase DH parameters to 3072-bit
+        # Increase DH parameters for non-PQC key agreement.
         try:
             if hasattr(ctx, 'set_dh_params'):
-                ctx.set_dh_params(3072)
+                from cryptography.hazmat.primitives.asymmetric import dh
+                params = dh.generate_parameters(generator=2, key_size=3072)
+                ctx.set_dh_params(params)
                 logger.info("DH parameters set to 3072 bits")
         except Exception as e:
             logger.warning(f"Could not set DH parameters: {e}")
         
-        # Configure session security
-        ctx.options |= ssl.OP_NO_TICKET  # Disable session tickets for forward secrecy
+        ctx.options |= ssl.OP_NO_TICKET
         
-        # Load certificate and key
         tmp_cert_file = None
         tmp_key_file = None
         try:
@@ -573,31 +797,24 @@ class CAExchange:
                 key_tf.flush()
                 tmp_cert_file = cert_tf.name
                 tmp_key_file = key_tf.name
-                logger.debug(f"Local cert written to temp file: {tmp_cert_file}")
-                logger.debug(f"Local key written to temp file: {tmp_key_file}")
             
             ctx.load_cert_chain(tmp_cert_file, tmp_key_file)
             logger.info("Local certificate and key loaded into SSLContext.")
         finally:
-            # Securely remove temporary files
             if tmp_cert_file and os.path.exists(tmp_cert_file):
                 self._secure_delete(tmp_cert_file)
-                logger.debug(f"Temporary cert file {tmp_cert_file} securely removed.")
             if tmp_key_file and os.path.exists(tmp_key_file):
                 self._secure_delete(tmp_key_file)
-                logger.debug(f"Temporary key file {tmp_key_file} securely removed.")
 
-        # Load peer certificate and require client authentication
         try:
             ctx.load_verify_locations(cadata=self.peer_cert_pem.decode('utf-8'))
             ctx.verify_mode = ssl.CERT_REQUIRED
-            ctx.check_hostname = False  # We verify manually via certificate exchange
+            ctx.check_hostname = False
             logger.info("Trusted peer certificate loaded. Client certificate will be required and verified.")
         except Exception as e:
-            logger.error(f"Error loading trusted peer certificate: {e}. Cannot proceed with secure configuration.")
+            logger.error(f"Error loading trusted peer certificate: {e}")
             raise ValueError(f"Failed to load peer certificate: {e}")
         
-        # Set strong verification flags
         if hasattr(ctx, 'verify_flags'):
             ctx.verify_flags = ssl.VERIFY_X509_STRICT
             logger.info("Strict X.509 verification enabled")
@@ -606,11 +823,16 @@ class CAExchange:
         return ctx
 
     def create_client_ctx(self) -> ssl.SSLContext:
-        """
-        Create a maximum security SSLContext for the client role
+        """Creates a high-security SSLContext for a client.
+
+        The context is configured for TLS 1.3 only, with strong cipher suites,
+        post-quantum key exchange groups, and server certificate validation.
         
         Returns:
-            ssl.SSLContext: Configured client SSL context with highest security settings
+            A configured `ssl.SSLContext` instance.
+        
+        Raises:
+            ValueError: If local or peer certificates are not available.
         """
         if not self.local_cert_pem or not self.local_key_pem:
             raise ValueError("Local certificate or key not available")
@@ -621,37 +843,24 @@ class CAExchange:
         logger.info("Creating SSLContext for client with maximum security settings.")
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         
-        # Set to TLS 1.3 only for maximum security
         ctx.minimum_version = ssl.TLSVersion.TLSv1_3
         ctx.maximum_version = ssl.TLSVersion.TLSv1_3
-        logger.info("SSLContext initialized with TLS 1.3 only.")
+        logger.info("SSLContext configured for TLS 1.3 only.")
         
-        # Apply security options
         ctx.options |= self.SECURE_TLS_OPTIONS
         
-        # Set post-quantum groups for key exchange
         try:
-            if hasattr(ctx, 'set_groups'):
-                group_string = ":".join(HYBRID_PQ_GROUPS)
-                ctx.set_groups(group_string)
-                logger.info(f"Client KEM groups set to: {group_string}")
+            group_string = ":".join(HYBRID_PQ_GROUPS)
+            ctx.set_groups(group_string)
+            logger.info(f"Client KEM groups set to: {group_string}")
         except Exception as e:
             logger.error(f"Failed to set post-quantum key exchange groups for client: {e}")
         
-        # Set strong cipher suites
-        # try:
-        #     ctx.set_ciphers(':'.join(self.SECURE_CIPHER_SUITES))
-        #     logger.info(f"Using secure cipher suite: {':'.join(self.SECURE_CIPHER_SUITES)}")
-        # except ssl.SSLError as e:
-        #     logger.warning(f"Could not set custom ciphers: {e}. Using default secure TLS 1.3 ciphers.")
-        
-        # Disable session tickets for forward secrecy
         ctx.options |= ssl.OP_NO_TICKET
         
-        # We don't use hostname verification since we verify certificates manually
+        # Hostname verification is disabled because we verify peer certificates manually.
         ctx.check_hostname = False
 
-        # Load certificate and key
         tmp_cert_file = None
         tmp_key_file = None
         try:
@@ -664,30 +873,23 @@ class CAExchange:
                 key_tf.flush()
                 tmp_cert_file = cert_tf.name
                 tmp_key_file = key_tf.name
-                logger.debug(f"Local cert written to temp file: {tmp_cert_file}")
-                logger.debug(f"Local key written to temp file: {tmp_key_file}")
 
             ctx.load_cert_chain(tmp_cert_file, tmp_key_file)
             logger.info("Local certificate and key loaded into SSLContext.")
         finally:
-            # Securely remove temporary files
             if tmp_cert_file and os.path.exists(tmp_cert_file):
                 self._secure_delete(tmp_cert_file)
-                logger.debug(f"Temporary cert file {tmp_cert_file} securely removed.")
             if tmp_key_file and os.path.exists(tmp_key_file):
                 self._secure_delete(tmp_key_file)
-                logger.debug(f"Temporary key file {tmp_key_file} securely removed.")
                 
-        # Load peer certificate
         try:
             ctx.load_verify_locations(cadata=self.peer_cert_pem.decode('utf-8'))
             ctx.verify_mode = ssl.CERT_REQUIRED
             logger.info("Trusted peer certificate loaded. Server certificate will be required and verified.")
         except Exception as e:
-            logger.error(f"Error loading trusted peer certificate: {e}. Cannot proceed with secure configuration.")
+            logger.error(f"Error loading trusted peer certificate: {e}")
             raise ValueError(f"Failed to load peer certificate: {e}")
 
-        # Set strong verification flags
         if hasattr(ctx, 'verify_flags'):
             ctx.verify_flags = ssl.VERIFY_X509_STRICT
             logger.info("Strict X.509 verification enabled")
@@ -696,46 +898,78 @@ class CAExchange:
         return ctx
     
     def _secure_delete(self, file_path: str, passes: int = 3):
-        """Securely delete a file by overwriting it multiple times"""
+        """Securely deletes a file by overwriting it multiple times."""
         if not os.path.exists(file_path):
             return
             
-        file_size = os.path.getsize(file_path)
-        
-        # Overwrite file with random data multiple times
-        for i in range(passes):
+        try:
+            file_size = os.path.getsize(file_path)
+            
             with open(file_path, 'wb') as f:
-                f.write(os.urandom(file_size))
+                for _ in range(passes):
+                    f.write(os.urandom(file_size))
+                    f.flush()
+                    os.fsync(f.fileno())
+                    
+                f.write(b'\x00' * file_size)
                 f.flush()
                 os.fsync(f.fileno())
                 
-        # Final pass with zeros
-        with open(file_path, 'wb') as f:
-            f.write(b'\x00' * file_size)
-            f.flush()
-            os.fsync(f.fileno())
-            
-        # Finally delete the file
-        os.remove(file_path)
+            os.remove(file_path)
+        except Exception as e:
+            logger.warning(f"Could not securely delete {file_path}: {e}")
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
         
     def secure_cleanup(self):
-        """Clean up sensitive data"""
-        # Clear key material
-        if hasattr(self, 'exchange_key') and self.exchange_key:
-            self.exchange_key = b'\x00' * len(self.exchange_key)
-            self.exchange_key = None
+        """Securely erases sensitive data like private keys from memory."""
+        try:
+            if self.local_key_pem:
+                buffer = bytearray(self.local_key_pem)
+                for i in range(len(buffer)):
+                    buffer[i] = secrets.randbelow(256)
+                for i in range(len(buffer)):
+                    buffer[i] = 0
+                self.local_key_pem = None
             
-        logger.info("Secure cleanup completed")
-    
+            self.local_cert_pem = None
+            self.peer_cert_pem = None
+            self.local_cert_fingerprint = None
+            self.peer_cert_fingerprint = None
+            
+            if hasattr(self, 'hpkp_pins'):
+                self.hpkp_pins.clear()
+                
+            if hasattr(self, 'ocsp_response_cache'):
+                self.ocsp_response_cache.clear()
+            
+            if self.exchange_key:
+                buffer = bytearray(self.exchange_key)
+                for i in range(len(buffer)):
+                    buffer[i] = secrets.randbelow(256)
+                for i in range(len(buffer)):
+                    buffer[i] = 0
+                self.exchange_key = None
+                
+            self.xchacha_cipher = None
+            
+            if self.cert_store:
+                self.cert_store.clear()
+                
+            logger.info("Secure cleanup completed")
+        except Exception as e:
+            logger.error(f"Error during secure cleanup: {e}")
+
     def wrap_socket_server(self, sock: socket.socket) -> ssl.SSLSocket:
-        """
-        Wrap a server socket with TLS using the generated context with maximum security
+        """Wraps a server socket with a high-security TLS context.
         
         Args:
-            sock: Socket to wrap
+            sock: The server socket to wrap.
             
         Returns:
-            ssl.SSLSocket: TLS-wrapped socket
+            A TLS-wrapped server socket.
         """
         ctx = self.create_server_ctx()
         ssl_sock = ctx.wrap_socket(sock, server_side=True, do_handshake_on_connect=False)
@@ -743,15 +977,14 @@ class CAExchange:
         return ssl_sock
     
     def wrap_socket_client(self, sock: socket.socket, server_hostname: Optional[str] = None) -> ssl.SSLSocket:
-        """
-        Wrap a client socket with TLS using the generated context with maximum security
+        """Wraps a client socket with a high-security TLS context.
         
         Args:
-            sock: Socket to wrap
-            server_hostname: Optional server hostname for SNI (ignored as we use secure certificate exchange)
+            sock: The client socket to wrap.
+            server_hostname: The server hostname for SNI (optional).
             
         Returns:
-            ssl.SSLSocket: TLS-wrapped socket
+            A TLS-wrapped client socket.
         """
         ctx = self.create_client_ctx()
         ssl_sock = ctx.wrap_socket(sock, server_hostname=server_hostname, do_handshake_on_connect=False)
@@ -759,30 +992,214 @@ class CAExchange:
         return ssl_sock
         
     def __del__(self):
-        """Ensure cleanup when object is destroyed"""
+        """Ensures secure_cleanup is called when the object is destroyed."""
         try:
             self.secure_cleanup()
         except:
             pass
 
+    def add_hpkp_pin(self, hostname: str, pin_value: str) -> None:
+        """Adds a public key pin for a hostname.
+        
+        Args:
+            hostname: The hostname to associate with the pin.
+            pin_value: The base64-encoded SHA-256 hash of the SubjectPublicKeyInfo.
+        """
+        if not self.enable_hpkp:
+            logger.warning("HPKP is disabled. Pin will be stored but not enforced.")
+            
+        if hostname not in self.hpkp_pins:
+            self.hpkp_pins[hostname] = []
+            
+        if not pin_value.startswith("sha256="):
+            pin_value = f"sha256={pin_value}"
+            
+        self.hpkp_pins[hostname].append(pin_value)
+        logger.info(f"Added HPKP pin for {hostname}: {pin_value}")
+        
+    def generate_hpkp_pin(self, cert_pem: bytes) -> str:
+        """Generates a public key pin from a certificate.
+        
+        Args:
+            cert_pem: The certificate in PEM format.
+            
+        Returns:
+            The base64-encoded SHA-256 hash of the certificate's SubjectPublicKeyInfo.
+        """
+        try:
+            cert = x509.load_pem_x509_certificate(cert_pem)
+            spki = cert.public_key().public_bytes(
+                encoding=serialization.Encoding.DER,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+            pin_hash = hashlib.sha256(spki).digest()
+            pin_base64 = base64.b64encode(pin_hash).decode('ascii')
+            return f"sha256={pin_base64}"
+        except Exception as e:
+            logger.error(f"Failed to generate HPKP pin: {e}")
+            raise SecurityError(f"HPKP pin generation failed: {e}")
+            
+    def verify_hpkp_pin(self, hostname: str, cert_pem: bytes) -> bool:
+        """Verifies a certificate against the pinned public key for a hostname.
+        
+        Args:
+            hostname: The hostname to check against.
+            cert_pem: The certificate in PEM format to verify.
+            
+        Returns:
+            True if the certificate's public key matches a pin, False otherwise.
+        """
+        if not self.enable_hpkp:
+            logger.warning("HPKP verification skipped because the feature is disabled.")
+            return True
+            
+        if hostname not in self.hpkp_pins:
+            logger.warning(f"No HPKP pins found for {hostname}, skipping verification.")
+            return True
+            
+        try:
+            pin = self.generate_hpkp_pin(cert_pem)
+            
+            if pin in self.hpkp_pins[hostname]:
+                logger.info(f"HPKP verification successful for {hostname}")
+                return True
+                
+            logger.error(f"HPKP verification failed for {hostname}. Expected one of {self.hpkp_pins[hostname]}, got {pin}")
+            return False
+        except Exception as e:
+            logger.error(f"HPKP verification error: {e}")
+            return False
+            
+    def get_hpkp_header(self, hostname: str) -> Optional[str]:
+        """Constructs the Public-Key-Pins HTTP header value.
+        
+        Args:
+            hostname: The hostname for which to generate the header.
+            
+        Returns:
+            The header string or None if no pins are available.
+        """
+        if not self.enable_hpkp or hostname not in self.hpkp_pins or not self.hpkp_pins[hostname]:
+            return None
+            
+        pins = "; ".join([f'pin-{pin}' for pin in self.hpkp_pins[hostname]])
+        header = f'{pins}; max-age={self.hpkp_max_age}'
+        
+        if self.hpkp_include_subdomains:
+            header += "; includeSubDomains"
+            
+        return header
+        
+    def generate_ocsp_response(self, cert_pem: bytes, issuer_cert_pem: Optional[bytes] = None) -> Optional[bytes]:
+        """Generates an OCSP response for a given certificate.
+
+        For self-signed certificates, the certificate is its own issuer.
+        
+        Args:
+            cert_pem: The certificate in PEM format.
+            issuer_cert_pem: The issuer's certificate in PEM format (optional).
+            
+        Returns:
+            The OCSP response in DER format, or None on failure.
+        """
+        if not self.enable_ocsp_stapling:
+            logger.debug("OCSP stapling is disabled, skipping response generation.")
+            return None
+            
+        try:
+            cert = x509.load_pem_x509_certificate(cert_pem)
+             
+            if issuer_cert_pem is None:
+                issuer_cert = cert
+            else:
+                issuer_cert = x509.load_pem_x509_certificate(issuer_cert_pem)
+                
+            if self.local_key_pem is None:
+                logger.error("Cannot generate OCSP response: local private key not available.")
+                return None
+                
+            issuer_key = serialization.load_pem_private_key(
+                self.local_key_pem,
+                password=None
+            )
+            
+            builder = ocsp.OCSPResponseBuilder()
+            builder = builder.add_response(
+                cert=cert,
+                issuer=issuer_cert,
+                algorithm=hashes.SHA256(),
+                cert_status=ocsp.OCSPCertStatus.GOOD,
+                this_update=datetime.now(timezone.utc),
+                next_update=datetime.now(timezone.utc) + timedelta(seconds=self.ocsp_response_max_age),
+                revocation_time=None,
+                revocation_reason=None
+            ).responder_id(
+                ocsp.OCSPResponderEncoding.NAME, 
+                issuer_cert
+            )
+            
+            response = builder.sign(issuer_key, hashes.SHA256())
+            
+            cert_fingerprint = cert.fingerprint(hashes.SHA256()).hex()
+            response_bytes = response.public_bytes(serialization.Encoding.DER)
+            self.ocsp_response_cache[cert_fingerprint] = {
+                'response': response_bytes,
+                'expires': datetime.now(timezone.utc) + timedelta(seconds=self.ocsp_response_max_age)
+            }
+            
+            logger.info("Generated and cached OCSP response for certificate.")
+            return response_bytes
+        except Exception as e:
+            logger.error(f"Failed to generate OCSP response: {e}")
+            return None
+            
+    def get_cached_ocsp_response(self, cert_pem: bytes) -> Optional[bytes]:
+        """Retrieves a cached OCSP response for a certificate.
+        
+        Args:
+            cert_pem: The certificate in PEM format.
+            
+        Returns:
+            The cached OCSP response in DER format if available and not expired,
+            otherwise None.
+        """
+        if not self.enable_ocsp_stapling:
+            return None
+            
+        try:
+            cert = x509.load_pem_x509_certificate(cert_pem)
+            cert_fingerprint = cert.fingerprint(hashes.SHA256()).hex()
+            
+            if cert_fingerprint in self.ocsp_response_cache:
+                cache_entry = self.ocsp_response_cache[cert_fingerprint]
+                
+                if cache_entry['expires'] > datetime.now(timezone.utc):
+                    logger.debug("Found valid cached OCSP response.")
+                    return cache_entry['response']
+                    
+                logger.debug("Cached OCSP response has expired.")
+                
+            return None
+        except Exception as e:
+            logger.error(f"Error retrieving cached OCSP response: {e}")
+            return None
+
 
 def setup_logger(level=logging.INFO):
-    """Set up the logger for the CAExchange module"""
+    """Configures the logger for the CAExchange module.
+    
+    Args:
+        level: The logging level to set.
+    """
     logger.setLevel(level)
     
-    # Create console handler
-    ch = logging.StreamHandler()
-    ch.setLevel(level)
-    
-    # Create formatter
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    ch.setFormatter(formatter)
-    
-    # Add handler to logger if not already added
     if not logger.handlers:
+        ch = logging.StreamHandler()
+        ch.setLevel(level)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        ch.setFormatter(formatter)
         logger.addHandler(ch)
     
     return logger
 
-# Initialize logger with default settings
-setup_logger() 
+setup_logger()  

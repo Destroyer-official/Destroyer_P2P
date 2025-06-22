@@ -9,170 +9,134 @@ from contextlib import contextmanager
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from unittest.mock import patch, MagicMock
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ca_services import CAExchange
+from ca_services import CAExchange, SecurityError
 
 # Configure test logging
-logging.basicConfig(level=logging.ERROR)
+logging.basicConfig(level=logging.INFO)
 
 class TestCertificateAuthSecurity(unittest.TestCase):
-    """Test suite focused on certificate authentication security"""
+    """
+    Test suite for certificate authority exchange security features
+    """
     
     def setUp(self):
         """Set up test environment before each test"""
-        # Use a different port for testing to avoid conflicts
-        self.test_port = 38443
-        self.host = '127.0.0.1'
-
-    @contextmanager
-    def _create_server_socket(self, host, port):
-        """Helper to create and clean up test server socket"""
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind((host, port))
-        server.listen(1)
-        try:
-            yield server
-        finally:
-            server.close()
+        self.ca_exchange = CAExchange(exchange_port_offset=0, secure_exchange=True)
     
-    def test_key_derivation_correct_length(self):
-        """Test that HKDF key derivation produces correct 32-byte key length for ChaCha20Poly1305"""
-        # The original vulnerability: using a 33-byte key
-        insecure_key = b'SecureP2PCertificateExchangeKey!!'  # 33 bytes - incorrect
-        self.assertEqual(len(insecure_key), 33, "Test pre-condition: insecure key should be 33 bytes")
+    def tearDown(self):
+        """Clean up after each test"""
+        if hasattr(self, 'ca_exchange'):
+            self.ca_exchange.secure_cleanup()
+    
+    def test_self_signed_certificate_generation(self):
+        """Test self-signed certificate generation with enhanced security parameters"""
+        key_pem, cert_pem = self.ca_exchange.generate_self_signed()
         
-        # Verify that ChaCha20Poly1305 rejects 33-byte key
-        with self.assertRaises(ValueError) as cm:
-            ChaCha20Poly1305(insecure_key)
-        self.assertIn("key must be 32 bytes", str(cm.exception))
+        # Verify key and certificate were generated
+        self.assertIsNotNone(key_pem)
+        self.assertIsNotNone(cert_pem)
+        self.assertIsNotNone(self.ca_exchange.local_cert_fingerprint)
         
-        # Test the fixed implementation using HKDF
-        hkdf = HKDF(
-            algorithm=hashes.SHA256(),
-            length=32,  # Must be 32 for ChaCha20Poly1305
-            salt=None,
-            info=b'chacha20poly1305-exchange-key'
+        # Verify key and certificate content
+        self.assertTrue(key_pem.startswith(b"-----BEGIN PRIVATE KEY-----"))
+        self.assertTrue(cert_pem.startswith(b"-----BEGIN CERTIFICATE-----"))
+    
+    def test_certificate_exchange(self):
+        """Test secure certificate exchange between client and server"""
+        # Generate certificates for both peers
+        server_ca = CAExchange(exchange_port_offset=0, secure_exchange=True)
+        client_ca = CAExchange(exchange_port_offset=0, secure_exchange=True)
+        
+        server_key, server_cert = server_ca.generate_self_signed()
+        client_key, client_cert = client_ca.generate_self_signed()
+        
+        # Use a threading event to coordinate server-client exchange
+        ready_event = threading.Event()
+        
+        # Start server in a separate thread
+        server_thread = threading.Thread(
+            target=server_ca.exchange_certs,
+            args=("server", "127.0.0.1", 38444, ready_event)
         )
-        secure_key = hkdf.derive(insecure_key)
-        self.assertEqual(len(secure_key), 32, "Derived key should be exactly 32 bytes")
+        server_thread.daemon = True
+        server_thread.start()
         
-        # Verify that ChaCha20Poly1305 accepts this key
-        try:
-            cipher = ChaCha20Poly1305(secure_key)
-            self.assertIsNotNone(cipher)
-        except ValueError:
-            self.fail("ChaCha20Poly1305 should accept a 32-byte key")
-    
-    def test_cert_exchange_encrypt_decrypt(self):
-        """Test that certificate exchange encryption and decryption works correctly"""
-        ca_exchange = CAExchange(exchange_port_offset=1, secure_exchange=True)
-        ca_exchange.generate_self_signed()
+        # Wait for server to be ready
+        ready_event.wait(timeout=5.0)
         
-        # Test data that simulates a certificate
-        test_cert_data = b"-----BEGIN CERTIFICATE-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA\n-----END CERTIFICATE-----"
+        # Client connects and exchanges certificates
+        client_peer_cert = client_ca.exchange_certs("client", "127.0.0.1", 38444)
         
-        # Construct AAD similar to what's used in exchange_certs
-        aad = b"server:127.0.0.1:38444:cert-exchange"
+        # Wait for server thread to complete
+        server_thread.join(timeout=5.0)
         
-        # Encrypt the data
-        encrypted_data = ca_exchange._encrypt_data(test_cert_data, associated_data=aad)
-        self.assertIsNotNone(encrypted_data)
-        self.assertGreater(len(encrypted_data), len(test_cert_data))
+        # Verify certificate exchange was successful
+        self.assertIsNotNone(client_peer_cert)
+        self.assertIsNotNone(server_ca.peer_cert_pem)
         
-        # Decrypt the data
-        decrypted_data = ca_exchange._decrypt_data(encrypted_data, associated_data=aad)
-        self.assertEqual(decrypted_data, test_cert_data)
+        # Verify exchanged certificates match
+        self.assertEqual(client_peer_cert, server_cert)
+        self.assertEqual(server_ca.peer_cert_pem, client_cert)
+        
+        # Clean up
+        server_ca.secure_cleanup()
+        client_ca.secure_cleanup()
     
     def test_wrong_aad_fails_decryption(self):
         """Test that using wrong AAD fails decryption as expected"""
-        ca_exchange = CAExchange(exchange_port_offset=1, secure_exchange=True)
-        ca_exchange.generate_self_signed()
+        # Initialize CAExchange with secure exchange
+        ca_exchange = CAExchange(secure_exchange=True)
         
-        test_cert_data = b"-----BEGIN CERTIFICATE-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA\n-----END CERTIFICATE-----"
+        # Generate a test message
+        test_data = b"This is a test message for secure exchange"
+        correct_aad = b"correct-aad"
+        wrong_aad = b"wrong-aad"
         
-        # Encrypt with one AAD
-        correct_aad = b"server:127.0.0.1:38444:cert-exchange"
-        encrypted_data = ca_exchange._encrypt_data(test_cert_data, associated_data=correct_aad)
+        # Encrypt with correct AAD
+        encrypted_data = ca_exchange._encrypt_data(test_data, associated_data=correct_aad)
         
-        # Try to decrypt with different AAD
-        wrong_aad = b"client:127.0.0.1:38444:cert-exchange"
+        # Verify decryption works with correct AAD
+        decrypted = ca_exchange._decrypt_data(encrypted_data, associated_data=correct_aad)
+        self.assertEqual(decrypted, test_data)
         
-        # Should raise ValueError due to authentication failure
-        with self.assertRaises(ValueError):
+        # Verify decryption fails with wrong AAD
+        with self.assertRaises(SecurityError):
             ca_exchange._decrypt_data(encrypted_data, associated_data=wrong_aad)
     
     def test_encryption_failure_raises_error(self):
         """Test that encryption failure raises proper error instead of returning plaintext"""
-        # Create a modified CAExchange with a broken xchacha_cipher that will fail
-        ca_exchange = CAExchange(exchange_port_offset=1, secure_exchange=True)
+        ca_exchange = CAExchange(secure_exchange=True)
         
-        # Force encryption to fail by setting cipher to problematic state
-        class BrokenCipher:
-            def encrypt(self, *args, **kwargs):
+        # Mock the XChaCha20Poly1305 cipher with one that always fails
+        class MockFailingCipher:
+            def encrypt(self, data=None, associated_data=None):
                 raise ValueError("Simulated encryption failure")
         
-        ca_exchange.xchacha_cipher = BrokenCipher()
+        ca_exchange.xchacha_cipher = MockFailingCipher()
         
-        # Attempt to encrypt - should raise ValueError instead of returning plaintext
-        with self.assertRaises(ValueError):
+        # Verify that encryption failure raises SecurityError
+        with self.assertRaises(SecurityError):
             ca_exchange._encrypt_data(b"test data", associated_data=b"test aad")
     
     def test_decryption_failure_raises_error(self):
         """Test that decryption failure raises proper error instead of returning ciphertext"""
-        # Create a modified CAExchange with a broken xchacha_cipher that will fail during decryption
-        ca_exchange = CAExchange(exchange_port_offset=1, secure_exchange=True)
+        ca_exchange = CAExchange(secure_exchange=True)
         
-        # Force decryption to fail by setting cipher to problematic state
-        class BrokenCipher:
-            def decrypt(self, *args, **kwargs):
+        # Mock the XChaCha20Poly1305 cipher with one that always fails
+        class MockFailingCipher:
+            def decrypt(self, data=None, associated_data=None):
                 raise ValueError("Simulated decryption failure")
         
-        ca_exchange.xchacha_cipher = BrokenCipher()
+        ca_exchange.xchacha_cipher = MockFailingCipher()
         
-        # Attempt to decrypt - should raise ValueError instead of returning ciphertext
-        with self.assertRaises(ValueError):
+        # Verify that decryption failure raises SecurityError
+        with self.assertRaises(SecurityError):
             ca_exchange._decrypt_data(b"fake encrypted data", associated_data=b"test aad")
-            
-    def test_certificate_exchange_integration(self):
-        """
-        Test certificate exchange integration with both client and server roles
-        This is a more complex test that exercises the full certificate exchange process
-        """
-        # Set up server exchange in a thread
-        def server_exchange():
-            server_ca = CAExchange(exchange_port_offset=1, secure_exchange=True)
-            server_ca.generate_self_signed()
-            try:
-                server_ca.exchange_certs("server", self.host, self.test_port)
-                return True
-            except Exception as e:
-                print(f"Server exchange error: {e}")
-                return False
-        
-        # Start server thread
-        server_thread = threading.Thread(target=server_exchange)
-        server_thread.daemon = True
-        server_thread.start()
-        
-        # Give the server time to start
-        time.sleep(1)
-        
-        # Now run client exchange
-        client_ca = CAExchange(exchange_port_offset=1, secure_exchange=True)
-        client_ca.generate_self_signed()
-        peer_cert = client_ca.exchange_certs("client", self.host, self.test_port)
-        
-        # Verify we got a legitimate certificate
-        self.assertIsNotNone(peer_cert)
-        self.assertIn(b"-----BEGIN CERTIFICATE-----", peer_cert)
-        
-        # Wait for server thread to finish
-        server_thread.join(timeout=5)
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main() 

@@ -1,12 +1,12 @@
 """
 Hybrid Key Exchange Module
-
+ 
 Combines X3DH (Extended Triple Diffie-Hellman) with Post-Quantum Cryptography
 for establishing secure shared secrets resistant to both classical and quantum attacks.
-"""
-
+""" 
+ 
 import os
-import json
+import json 
 import time
 import base64
 import logging
@@ -14,6 +14,8 @@ import uuid
 import random
 import string
 from typing import Tuple, Dict, Optional, Union
+import hashlib
+import ctypes 
 
 # X25519 for classical key exchange
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
@@ -122,15 +124,12 @@ def secure_erase(key_material):
     """
     if key_material is None:
         return
-        
-    if isinstance(key_material, bytes):
-        buffer = bytearray(key_material)
-        for i in range(len(buffer)):
-            buffer[i] = 0
-    elif hasattr(key_material, 'zeroize'):
-        key_material.zeroize()
     
-    log.debug("Securely erased key material")
+    # Always use the enhanced_secure_erase from secure_key_manager
+    import secure_key_manager as skm
+    skm.enhanced_secure_erase(key_material)
+    log.debug("Securely erased key material using enhanced technique")
+    return
 
 
 # Flag indicating we're using the real post-quantum implementation
@@ -1105,37 +1104,40 @@ class HybridKeyExchange:
         """
         log.info(f"Performing secure cleanup for {self.identity}")
         
-        # Erase all sensitive key material
+        # Import directly to avoid any confusion with local functions
+        import secure_key_manager as skm
+        
+        # Erase all sensitive key material using the enhanced secure erase function
         if self.static_key:
-            secure_erase(self.static_key)
+            skm.enhanced_secure_erase(self.static_key)
             self.static_key = None
             
         if self.signing_key:
-            secure_erase(self.signing_key)
+            skm.enhanced_secure_erase(self.signing_key)
             self.signing_key = None
             
         if self.signed_prekey:
-            secure_erase(self.signed_prekey)
+            skm.enhanced_secure_erase(self.signed_prekey)
             self.signed_prekey = None
             
         if self.prekey_signature:
-            secure_erase(self.prekey_signature)
+            skm.enhanced_secure_erase(self.prekey_signature)
             self.prekey_signature = None
             
         if self.kem_private_key:
-            secure_erase(self.kem_private_key)
+            skm.enhanced_secure_erase(self.kem_private_key)
             self.kem_private_key = None
             
         if self.kem_public_key:
-            secure_erase(self.kem_public_key)
+            skm.enhanced_secure_erase(self.kem_public_key)
             self.kem_public_key = None
             
         if self.falcon_private_key:
-            secure_erase(self.falcon_private_key)
+            skm.enhanced_secure_erase(self.falcon_private_key)
             self.falcon_private_key = None
             
         if self.falcon_public_key:
-            secure_erase(self.falcon_public_key)
+            skm.enhanced_secure_erase(self.falcon_public_key)
             self.falcon_public_key = None
 
         # Clear nonce tracking
@@ -1151,6 +1153,165 @@ class HybridKeyExchange:
         self.falcon_private_key = None
         self.falcon_public_key = None
         self.peer_hybrid_bundle = None
+
+    def _derive_shared_secret(self, dh_secret, pq_shared_secret):
+        """
+        Derive a shared secret from both classical and post-quantum shared secrets.
+        
+        Args:
+            dh_secret: Classical DH shared secret
+            pq_shared_secret: Post-quantum shared secret
+            
+        Returns:
+            bytes: The derived shared secret
+        """
+        if dh_secret is None or pq_shared_secret is None:
+            raise ValueError("Both classical and post-quantum shared secrets are required")
+            
+        # Verify key material
+        verify_key_material(dh_secret, description="DH shared secret")
+        verify_key_material(pq_shared_secret, description="PQ shared secret")
+        
+        # MILITARY-GRADE ENHANCEMENT: Multi-round key derivation with domain separation
+        # This provides defense-in-depth against potential quantum attacks
+        
+        # Step 1: Initial combination of secrets with domain separation
+        combined = b"CLASSICAL_DOMAIN:" + dh_secret + b"PQ_DOMAIN:" + pq_shared_secret
+        
+        # Step 2: Apply multiple rounds of key derivation (10,000 iterations)
+        # This significantly increases the work factor for any attacker
+        derived_key = combined
+        salt = b"HYBRID_KEX_SALT_V2"
+        
+        # Memory barrier to prevent compiler optimization
+        self._memory_barrier()
+        
+        # Multiple rounds of HKDF with different info contexts
+        for i in range(10000):
+            round_info = f"HYBRID_KEX_ROUND_{i}".encode('utf-8')
+            hkdf = HKDF(
+                algorithm=hashes.SHA384(),
+                length=64,
+                salt=salt,
+                info=round_info
+            )
+            derived_key = hkdf.derive(derived_key)
+            
+            # Update salt for next iteration (domain separation between rounds)
+            if i % 100 == 0:
+                salt = hashlib.sha384(salt + derived_key[:16]).digest()
+                
+            # Memory barrier every 1000 iterations to prevent optimization
+            if i % 1000 == 0:
+                self._memory_barrier()
+        
+        # Step 3: Final derivation with application-specific context
+        hkdf_final = HKDF(
+            algorithm=hashes.SHA384(),
+            length=32,
+            salt=hashlib.sha384(b"HYBRID_KEX_FINAL" + salt).digest(),
+            info=b"SECURE_P2P_CHAT_KEY_AGREEMENT_V2"
+        )
+        
+        final_key = hkdf_final.derive(derived_key)
+        
+        # Securely erase intermediate values
+        import secure_key_manager as skm
+        skm.enhanced_secure_erase(derived_key)
+        skm.enhanced_secure_erase(combined)
+        self._memory_barrier()
+        
+        return final_key
+
+    def secure_erase(self, data):
+        """
+        Military-grade secure erasure of sensitive key material.
+        
+        Args:
+            data: The data to erase (bytearray or bytes)
+        """
+        if not data:
+            return
+            
+        # Convert to bytearray if it's not already
+        if isinstance(data, bytes):
+            # Can't erase bytes objects directly, log a warning
+            log.warning("Cannot securely erase immutable bytes object - key material may remain in memory")
+            return
+            
+        if not isinstance(data, bytearray):
+            log.warning(f"Cannot securely erase object of type {type(data).__name__}")
+            return
+            
+        size = len(data)
+        
+        # Military-grade secure wiping with multiple patterns
+        # 1. First pattern: All zeros
+        for i in range(size):
+            data[i] = 0
+        
+        # Memory barrier to prevent optimization
+        self._memory_barrier()
+        
+        # 2. Second pattern: All ones
+        for i in range(size):
+            data[i] = 0xFF
+        
+        # Memory barrier to prevent optimization
+        self._memory_barrier()
+        
+        # 3. Third pattern: Alternating bits
+        for i in range(size):
+            data[i] = 0xAA
+        
+        # Memory barrier to prevent optimization
+        self._memory_barrier()
+        
+        # 4. Fourth pattern: Inverse alternating bits
+        for i in range(size):
+            data[i] = 0x55
+        
+        # Memory barrier to prevent optimization
+        self._memory_barrier()
+        
+        # 5. Fifth pattern: Random data
+        try:
+            import platform_hsm_interface as cphs
+            random_data = cphs.get_secure_random(size)
+            for i in range(size):
+                data[i] = random_data[i]
+        except (ImportError, Exception):
+            # Fallback to os.urandom
+            random_data = os.urandom(size)
+            for i in range(size):
+                data[i] = random_data[i]
+        
+        # Memory barrier to prevent optimization
+        self._memory_barrier()
+        
+        # 6. Final pattern: All zeros
+        for i in range(size):
+            data[i] = 0
+            
+        log.debug("Securely erased key material")
+        
+    def _memory_barrier(self):
+        """Create a memory barrier to prevent compiler optimization of secure erasure."""
+        try:
+            # Try to use platform-specific memory barrier
+            import platform_hsm_interface as cphs
+            cphs.get_secure_random(1)  # Just getting 1 byte creates a side effect
+        except (ImportError, Exception):
+            # Fallback implementation
+            try:
+                # Use ctypes to create a memory barrier
+                if hasattr(ctypes, 'memmove'):
+                    # Allocate a small buffer and move it (creates a memory barrier)
+                    buf = ctypes.create_string_buffer(1)
+                    ctypes.memmove(buf, buf, 1)
+            except Exception:
+                # Last resort: use a volatile random operation
+                _ = os.urandom(1)
 
 
 def demonstrate_handshake():

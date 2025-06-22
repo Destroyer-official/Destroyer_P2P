@@ -1,10 +1,10 @@
 """
 Secure P2P Chat Application (IPv6 TCP)
-
+ 
 A lightweight peer-to-peer chat application using TCP for direct communication 
 over IPv6 networks with NAT traversal capabilities.
 """
-
+ 
 import asyncio
 import socket
 import random
@@ -14,9 +14,10 @@ import os
 import sys
 import signal
 import re
-import ssl
+import ssl 
 import time
 import enum
+import encodings.idna
 from typing import Optional, Tuple, Union, List, Dict, Any, NamedTuple
 
 # Configure logging

@@ -1,10 +1,10 @@
 """
 Double Ratchet Protocol with Post-Quantum Security Extensions
-
+ 
 Implements a cryptographically secure message encryption protocol combining the Signal
 Double Ratchet algorithm with post-quantum cryptographic primitives for forward secrecy, 
 break-in recovery, and quantum-resistance through a hybrid approach.
-
+ 
 Security features:
 - Classical security: X25519 for DH exchanges
 - Quantum resistance: ML-KEM-1024 for key encapsulation
@@ -16,10 +16,10 @@ Security features:
 - Hardware binding: Device attestation support
 - Advanced threat detection: Behavioral analysis and anomaly detection
 - Key compartmentalization: Split key material across security domains
-"""
+""" 
 # Import standard libraries
 import os
-import hmac
+import hmac 
 import hashlib
 import logging
 import struct
@@ -783,7 +783,18 @@ def secure_erase(key_material: Optional[Union[bytes, bytearray, str]]) -> None:
     if key_material is None:
         return
         
-    # Convert to mutable bytearray if necessary
+    try:
+        # First try to use the enhanced_secure_erase from secure_key_manager
+        import secure_key_manager as skm
+        if hasattr(skm, 'enhanced_secure_erase'):
+            skm.enhanced_secure_erase(key_material)
+            logger.debug(f"Securely erased {type(key_material).__name__} using enhanced technique")
+            return
+    except (ImportError, AttributeError):
+        # Fall back to basic method if enhanced method is unavailable
+        pass
+    
+    # If we can't use enhanced secure erase, fall back to basic implementation
     original_type = type(key_material)
     
     # Create a mutable copy in bytearray format if key_material is immutable
@@ -796,6 +807,7 @@ def secure_erase(key_material: Optional[Union[bytes, bytearray, str]]) -> None:
             buffer_len = len(buffer)
         
         logger.debug(f"Created mutable bytearray copy of immutable {original_type.__name__} for secure erasure ({buffer_len} bytes)")
+        logger.info("Warning: Original immutable object may remain in memory")
     elif isinstance(key_material, bytearray):
         buffer = key_material  # Already mutable
         buffer_len = len(buffer)
@@ -1516,6 +1528,7 @@ class DoubleRatchet:
         # Derive new root key
         logger.debug(f"Updating root key for sending chain ({len(combined_secret)} bytes input)")
         new_root_key = self._kdf(self.root_key, combined_secret, info=info_root, length=self.ROOT_KEY_SIZE)
+        
         
         # Derive new sending chain seed using the new root key as KDF key material
         logger.debug(f"Deriving new sending chain seed")

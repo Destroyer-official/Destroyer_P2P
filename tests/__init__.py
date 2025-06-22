@@ -18,5 +18,8 @@ TEST_CATEGORIES = [
     'tls_security',
     'crypto_suite',
     'padding_security',
-    'chacha20poly1305_vulnerability'
+    'chacha20poly1305_vulnerability',
+    'dep_security',
+    'traffic_analysis',
+    'additional_security'
 ] 

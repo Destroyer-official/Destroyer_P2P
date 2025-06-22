@@ -28,7 +28,7 @@ logger = logging.getLogger('crypto_test')
 logger.setLevel(logging.DEBUG)
 
 # Import the modules we're testing
-from ca_services import CAExchange
+from ca_services import CAExchange, SecurityError
 from hybrid_kex import HybridKeyExchange, verify_key_material
 from double_ratchet import DoubleRatchet
 import tls_channel_manager
@@ -105,7 +105,7 @@ class TestCertificateExchange(unittest.TestCase):
         self.client_ca.xchacha_cipher = MockFailingCipher()
         
         # Attempt to encrypt data
-        with self.assertRaises(ValueError):
+        with self.assertRaises(SecurityError):
             self.client_ca._encrypt_data(b"test data", b"test aad")
 
 class TestHybridKeyExchange(unittest.TestCase):

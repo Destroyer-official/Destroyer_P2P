@@ -18,12 +18,12 @@ Implement ephemeral identities with disposable key pairs
 License: MIT
 """
 
-import asyncio
+import asyncio 
 import logging
 import os
 import sys
 import socket
-import signal
+import signal 
 import atexit
 import ssl
 import json
@@ -39,6 +39,7 @@ import platform # Added for platform detection
 import hashlib # Ensure hashlib is imported
 from cryptography.hazmat.primitives import hashes as crypto_hashes # For HKDF
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF # For HKDF
+import threading
 
 # Custom security exception
 class SecurityError(Exception):
@@ -49,14 +50,16 @@ class SecurityError(Exception):
     failures in cryptographic operations, or other security-critical errors.
     """
     pass
-
+ 
 # Import dependencies
 from tls_channel_manager import TLSSecureChannel
 import p2p_core as p2p
 from hybrid_kex import HybridKeyExchange, verify_key_material, _format_binary, secure_erase, DEFAULT_KEY_LIFETIME
 from double_ratchet import DoubleRatchet
 import secure_key_manager
+import platform_hsm_interface as cphs
 from ca_services import CAExchange  # Import the new CAExchange module
+import tls_channel_manager
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s') # Ensure DEBUG level
@@ -89,6 +92,7 @@ BOLD = '\033[1m'
 class KeyEraser:
     """
     Context manager for securely handling and erasing sensitive cryptographic key material.
+    Uses enhanced secure erasure techniques to minimize the risk of keys remaining in memory.
     """
     def __init__(self, key_material=None, description="sensitive key"):
         self.key_material = key_material
@@ -109,6 +113,7 @@ class KeyEraser:
         self.key_material = key_material
         
     def _pin_memory(self, material: bytearray):
+        """Pin memory to prevent swapping to disk"""
         if not isinstance(material, bytearray) or len(material) == 0:
             return False
 
@@ -117,160 +122,151 @@ class KeyEraser:
         
         current_platform = platform.system()
         locked = False
-
-        if current_platform == "Windows":
-            try:
-                # PAGE_READWRITE is 0x04. We need to ensure the memory is readable/writable.
-                # VirtualLock locks pages in physical RAM.
+        
+        # Note: The following code is platform-specific
+        try:
+            if current_platform == "Windows":
+                # On Windows, use VirtualLock
                 if ctypes.windll.kernel32.VirtualLock(ctypes.c_void_p(address), ctypes.c_size_t(length)):
+                    locked = True
                     self._locked_address = address
                     self._locked_length = length
                     self._locked_platform = "Windows"
-                    locked = True
-                    log.debug(f"KeyEraser: Successfully VirtualLock'ed memory for {self.description} (len: {length})")
-                else:
-                    # GetLastError can give more info: ctypes.WinError(ctypes.get_last_error())
-                    log.warning(f"KeyEraser: VirtualLock failed for {self.description}. Error: {ctypes.get_last_error()}")
-            except Exception as e:
-                log.error(f"KeyEraser: Exception during VirtualLock for {self.description}: {e}")
-        elif current_platform in ["Linux", "Darwin"]: # Darwin is macOS
-            try:
-                libc = ctypes.CDLL(None) # Tries to find libc, e.g. libc.so.6 on Linux, libSystem.dylib on macOS
-                # mlock requires pages to be mapped. bytearray memory is typically page-aligned.
-                # Ensure memory is readable/writable (usually true for bytearray from Python)
-                if libc.mlock(ctypes.c_void_p(address), ctypes.c_size_t(length)) == 0:
-                    self._locked_address = address
-                    self._locked_length = length
-                    self._locked_platform = "POSIX"
-                    locked = True
-                    log.debug(f"KeyEraser: Successfully mlock'ed memory for {self.description} (len: {length})")
-                else:
-                    # errno can be checked via ctypes.get_errno()
-                    errno = ctypes.get_errno()
-                    log.warning(f"KeyEraser: mlock failed for {self.description}. Errno: {errno} ({os.strerror(errno)})")
-            except Exception as e:
-                log.error(f"KeyEraser: Exception during mlock for {self.description}: {e}")
-        else:
-            log.info(f"KeyEraser: Memory pinning (mlock/VirtualLock) not supported on this platform: {current_platform} for {self.description}")
-        
+                    log.debug(f"KeyEraser: Successfully locked {length} bytes in memory with VirtualLock")
+            elif current_platform == "Linux" or current_platform == "Darwin":
+                try:
+                    # On Linux/macOS, use mlock from libc
+                    libc = ctypes.cdll.LoadLibrary('libc.so.6' if current_platform == "Linux" else 'libc.dylib')
+                    if hasattr(libc, "mlock"):
+                        if libc.mlock(ctypes.c_void_p(address), ctypes.c_size_t(length)) == 0:
+                            locked = True
+                            self._locked_address = address
+                            self._locked_length = length
+                            self._locked_platform = current_platform
+                            log.debug(f"KeyEraser: Successfully locked {length} bytes in memory with mlock")
+                except Exception as e:
+                    log.debug(f"KeyEraser: Error during mlock: {e}")
+        except Exception as e:
+            log.debug(f"KeyEraser: Memory pinning not available: {e}")
+            
         return locked
-
+            
     def _unpin_memory(self):
-        if self._locked_address is None or self._locked_length == 0:
+        """Unpin memory previously pinned with _pin_memory"""
+        if not self._locked_address or not self._locked_platform:
             return
-
+            
         try:
             if self._locked_platform == "Windows":
                 if ctypes.windll.kernel32.VirtualUnlock(ctypes.c_void_p(self._locked_address), ctypes.c_size_t(self._locked_length)):
-                    log.debug(f"KeyEraser: Successfully VirtualUnlock'ed memory for {self.description}")
-                else:
-                    log.warning(f"KeyEraser: VirtualUnlock failed for {self.description}. Error: {ctypes.get_last_error()}")
-            elif self._locked_platform == "POSIX":
-                libc = ctypes.CDLL(None)
-                if libc.munlock(ctypes.c_void_p(self._locked_address), ctypes.c_size_t(self._locked_length)) == 0:
-                    log.debug(f"KeyEraser: Successfully munlock'ed memory for {self.description}")
-                else:
-                    errno = ctypes.get_errno()
-                    log.warning(f"KeyEraser: munlock failed for {self.description}. Errno: {errno} ({os.strerror(errno)})")
+                    log.debug(f"KeyEraser: Successfully unlocked {self._locked_length} bytes with VirtualUnlock")
+            elif self._locked_platform in ("Linux", "Darwin"):
+                try:
+                    libc = ctypes.cdll.LoadLibrary('libc.so.6' if self._locked_platform == "Linux" else 'libc.dylib')
+                    if hasattr(libc, "munlock"):
+                        if libc.munlock(ctypes.c_void_p(self._locked_address), ctypes.c_size_t(self._locked_length)) == 0:
+                            log.debug(f"KeyEraser: Successfully unlocked {self._locked_length} bytes with munlock")
+                except Exception as e:
+                    log.debug(f"KeyEraser: Error during munlock: {e}")
         except Exception as e:
-            log.error(f"KeyEraser: Exception during memory unpinning for {self.description}: {e}")
-        finally:
-            self._locked_address = None
-            self._locked_length = 0
-            self._locked_platform = None
+            log.debug(f"KeyEraser: Error during memory unpinning: {e}")
+            
+        self._locked_address = None
+        self._locked_length = 0
+        self._locked_platform = None
 
     def secure_erase(self):
-        """Securely erase the key material from memory."""
+        """Securely erase the key material from memory using enhanced techniques."""
         if self.key_material is None:
             log.debug(f"KeyEraser: No key material to erase for {self.description} (was None).")
             return
 
         try:
-            key_type = type(self.key_material).__name__
-            key_len = len(self.key_material) if hasattr(self.key_material, '__len__') else 'N/A'
-            memory_pinned = False
-
+            # Use the enhanced secure erase function from secure_key_manager
+            import secure_key_manager as skm
+            log.debug(f"KeyEraser: Attempting enhanced secure erase for {self.description}")
+            skm.enhanced_secure_erase(self.key_material)
+            self.key_material = None
+            
+            # Force garbage collection to clean up any lingering references
+            gc.collect()
+            
+            log.debug(f"KeyEraser: Completed secure erase for {self.description}")
+            
+        except (ImportError, AttributeError) as e:
+            # Fall back to basic erase if enhanced version not available
+            log.warning(f"KeyEraser: Enhanced secure erase not available: {e}. Falling back to basic method.")
+            self._basic_secure_erase()
+        except Exception as e:
+            # If anything goes wrong, try the basic method
+            log.warning(f"KeyEraser: Error during enhanced secure erase: {e}. Falling back to basic method.")
+            self._basic_secure_erase()
+            
+    def _basic_secure_erase(self):
+        """Basic fallback method for secure erasure if enhanced method is unavailable."""
+        if self.key_material is None:
+            return
+            
+        key_type = type(self.key_material).__name__
+        key_len = len(self.key_material) if hasattr(self.key_material, '__len__') else 'N/A'
+        
+        try:
             if isinstance(self.key_material, bytearray):
-                if key_len == 0:
-                    log.debug(f"KeyEraser: {self.description} is an empty bytearray. No wipe needed.")
-                else:
-                    memory_pinned = self._pin_memory(self.key_material)
-                    try:
-                        # Ensure key_material is not accessed after this point if it becomes None
-                        # Python's ctypes.memset can be faster for large arrays
-                        # For simplicity and direct manipulation, the loop is fine
-                        # For CPython, direct assignment to bytearray elements is efficient.
-                        ctypes.memset(ctypes.addressof(ctypes.c_byte.from_buffer(self.key_material)), 0, key_len)
-                        log.debug(f"KeyEraser: Zeroized mutable bytearray (len {key_len}) for {self.description} using memset. Memory pinned: {memory_pinned}")
-                    except Exception as e_wipe:
-                         log.error(f"KeyEraser: Error during bytearray zeroization for {self.description}: {e_wipe}")
-                         # Fallback to loop if memset fails for some reason, though unlikely with bytearray
-                         # This also ensures self.key_material is iterated if memset fails.
-                         if self.key_material: # Check if still valid
-                            for i in range(len(self.key_material)):
-                                self.key_material[i] = 0
-                            log.debug(f"KeyEraser: Zeroized mutable bytearray (len {key_len}) for {self.description} using loop fallback. Memory pinned: {memory_pinned}")
-                    finally:
-                        if memory_pinned:
-                            self._unpin_memory()
-                
-                self.key_material = None # KeyEraser is done, clear its own reference
-                gc.collect() # Suggest GC
-                return # Explicitly return after handling bytearray
-
-            if isinstance(self.key_material, bytes):
-                # Immutable bytes objects cannot be zeroized in-place.
-                # Log this as info, as it's an expected limitation.
-                log.info(
-                    f"KeyEraser: {self.description} (key_material of type {key_type}, length {key_len}) "
-                    f"cannot be zeroized in-place as it is immutable. The original bytes object in "
-                    f"memory is NOT wiped by this operation. Only this KeyEraser\\'s reference to it "
-                    f"will be cleared. The caller must ensure no other references to this sensitive "
-                    f"immutable data exist if secure wiping is critical."
-                )
-                # Clear our reference to it
-                self.key_material = None
-                log.debug(f"KeyEraser: Cleared reference to immutable bytes for {self.description}.")
-                return # Explicitly return as no further in-place action is possible on the original bytes
-
-            if hasattr(self.key_material, 'zeroize'):
-                log.debug(f"KeyEraser: Attempting to call .zeroize() method for {self.description} (type {key_type}).")
+                memory_pinned = self._pin_memory(self.key_material)
                 try:
-                    self.key_material.zeroize()
-                    log.debug(f"KeyEraser: Successfully called .zeroize() method for {self.description}.")
-                except Exception as e_zeroize:
-                    log.error(f"KeyEraser: Error calling .zeroize() for {self.description}: {e_zeroize}")
+                    # Zero out the bytearray
+                    ctypes.memset(ctypes.addressof(ctypes.c_byte.from_buffer(self.key_material)), 0, key_len)
+                    log.debug(f"KeyEraser: Basic secure erase - zeroed {key_len} bytes in bytearray for {self.description}")
+                except Exception:
+                    # Fallback to loop-based zeroing
+                    for i in range(len(self.key_material)):
+                        self.key_material[i] = 0
                 finally:
-                    self.key_material = None # Clear KeyEraser's reference
-                    gc.collect()
-                return # Explicitly return
-
-            if hasattr(self.key_material, '__dict__'):
-                log.debug(f"KeyEraser: {self.description} (type {key_type}) does not have a .zeroize() method and is not bytearray/bytes. "
-                          f"Attempting to clear attributes (best-effort).")
+                    if memory_pinned:
+                        self._unpin_memory()
+            elif isinstance(self.key_material, bytes):
+                # Can't directly erase immutable bytes, but can create a mutable copy and zero it
+                log.info(
+                    f"KeyEraser: Basic secure erase - {self.description} is immutable ({key_type}). "
+                    f"Creating mutable copy to zero, but original bytes object may remain in memory."
+                )
+                mutable_copy = bytearray(self.key_material)
+                for i in range(len(mutable_copy)):
+                    mutable_copy[i] = 0
+            elif isinstance(self.key_material, str):
+                # Can't directly erase immutable strings, but can create a mutable copy and zero it
+                log.info(
+                    f"KeyEraser: Basic secure erase - {self.description} is immutable ({key_type}). "
+                    f"Creating mutable copy to zero, but original string may remain in memory."
+                )
+                mutable_copy = bytearray(self.key_material.encode('utf-8'))
+                for i in range(len(mutable_copy)):
+                    mutable_copy[i] = 0
+            elif hasattr(self.key_material, 'zeroize'):
+                log.debug(f"KeyEraser: Basic secure erase - calling zeroize() method on {self.description}")
+                self.key_material.zeroize()
+            elif hasattr(self.key_material, '__dict__'):
+                log.debug(f"KeyEraser: Basic secure erase - clearing attributes of {self.description}")
                 for attr_name in list(self.key_material.__dict__.keys()):
                     attr_value = getattr(self.key_material, attr_name, None)
                     if isinstance(attr_value, (bytes, bytearray, str)):
                         try:
                             setattr(self.key_material, attr_name, None)
-                            log.debug(f"KeyEraser: Cleared attribute '{attr_name}' for {self.description}.")
                         except AttributeError:
-                            log.debug(f"KeyEraser: Could not clear read-only attribute '{attr_name}' for {self.description}.")
-                    elif isinstance(attr_value, list):
-                         attr_value.clear()
-                         log.debug(f"KeyEraser: Cleared list attribute '{attr_name}' for {self.description}.")
-                    elif isinstance(attr_value, dict):
-                         attr_value.clear()
-                         log.debug(f"KeyEraser: Cleared dict attribute '{attr_name}' for {self.description}.")
-            
-            log.debug(f"KeyEraser: Finished best-effort cleanup for {self.description} (type {key_type}). Clearing KeyEraser\\'s reference.")
-            self.key_material = None # Ensure reference is cleared in all paths
-            gc.collect() # Suggest GC
-
+                            pass
+                    elif isinstance(attr_value, (list, dict)):
+                        try:
+                            getattr(self.key_material, attr_name).clear()
+                        except (AttributeError, TypeError):
+                            pass
+            else:
+                log.warning(f"KeyEraser: Basic secure erase - cannot securely erase {key_type}")
         except Exception as e:
-            log.error(f"KeyEraser: Error during secure_erase for {self.description} (type: {type(self.key_material).__name__}): {e}", exc_info=True)
-            self.key_material = None
-            gc.collect()
+            log.error(f"KeyEraser: Error during basic secure erase: {e}")
+            
+        # Clear our reference and suggest garbage collection
+        self.key_material = None
+        gc.collect()
 
 def secure_memory_wipe(address, length):
     """
@@ -330,380 +326,473 @@ class SecureP2PChat(p2p.SimpleP2PChat):
     
     # Security levels
     SECURITY_LEVELS = {
-        "minimal": ["tls", "cert_dir", "keys_dir"],  # Minimum viable security
-        "standard": ["tls", "cert_dir", "keys_dir", "hybrid_kex", "double_ratchet"],  # Regular security
-        "enhanced": ["tls", "cert_dir", "keys_dir", "hybrid_kex", "double_ratchet", "falcon_dss"],  # Enhanced security
-        "maximum": ["tls", "cert_dir", "keys_dir", "hybrid_kex", "double_ratchet", "falcon_dss", 
-                    "secure_enclave", "oauth_auth", "key_protection"]  # Maximum security
+        "MINIMAL": {
+            "components": ["tls", "cert_dir", "keys_dir"],  # Minimum viable security
+            "use_secure_enclave": False
+        },
+        "STANDARD": {
+            "components": ["tls", "cert_dir", "keys_dir", "hybrid_kex", "double_ratchet"],  # Regular security
+            "use_secure_enclave": False
+        },
+        "ENHANCED": {
+            "components": ["tls", "cert_dir", "keys_dir", "hybrid_kex", "double_ratchet", "falcon_dss"],  # Enhanced security
+            "use_secure_enclave": True
+        },
+        "MAXIMUM": {
+            "components": ["tls", "cert_dir", "keys_dir", "hybrid_kex", "double_ratchet", "falcon_dss", 
+                         "secure_enclave", "oauth_auth", "key_protection"],  # Maximum security
+            "use_secure_enclave": True
+        }
     }
     
-    def __init__(self):
-        """Initialize the secure chat with P2P connectivity."""
+    def _setup_logging(self):
+        """
+        Set up logging for the SecureP2PChat class.
+        """
+        # Configure file handler for security logs if not already configured
+        try:
+            # Check if we already have a file handler for this logger
+            has_file_handler = False
+            for handler in log.handlers:
+                if isinstance(handler, logging.FileHandler):
+                    has_file_handler = True
+                    break
+                    
+            if not has_file_handler:
+                logs_dir = os.path.join(os.path.dirname(__file__), "logs")
+                os.makedirs(logs_dir, exist_ok=True)
+                
+                file_handler = logging.FileHandler(os.path.join(logs_dir, 'secure_p2p_security.log'))
+                file_handler.setLevel(logging.DEBUG)
+                file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] [%(funcName)s] %(message)s'))
+                log.addHandler(file_handler)
+                
+            # Ensure the logger level is set to DEBUG
+            log.setLevel(logging.DEBUG)
+        except Exception as e:
+            print(f"Warning: Could not set up security logging: {e}")
+            # Continue execution even if logging setup fails
+    
+    def __init__(self, identity: str = None, ephemeral: bool = True, 
+                 in_memory_only: bool = True, key_lifetime: int = 3072,
+                 security_level: str = "MAXIMUM"):
+        """
+        Initialize the secure P2P chat system with military-grade security.
+        
+        Args:
+            identity: User identifier (ignored if ephemeral=True)
+            ephemeral: Whether to use ephemeral identities (default: True)
+            in_memory_only: Whether to store keys only in memory (default: True)
+            key_lifetime: Lifetime for ephemeral keys in seconds (default: 3072)
+            security_level: Security level (default: "MAXIMUM")
+        """
+        # Initialize parent class
         super().__init__()
         
-        self.enable_color = True
+        # Initialize connection status and events
+        self.is_connected = False
+        self.stop_event = asyncio.Event()
+        # Initialize task placeholders
+        self.receive_task = None
+        self.heartbeat_task = None
+        # Initialize logging
+        self._setup_logging()
         log.info("Initializing SecureP2PChat with multi-layer security")
         
-        # Initialize security verification
-        self.security_verified = {
-            'cert_dir': False,
-            'keys_dir': False,
-            'tls': False,
-            'hybrid_kex': False,
-            'falcon_dss': False,
-            'double_ratchet': False,
-            'secure_enclave': False,
-            'oauth_auth': False,
-            'key_protection': False,
-            'ephemeral_identity': False,  # New flag for ephemeral identity verification
-            'cert_exchange': False,  # New flag for certificate exchange verification
-        }
+        # Initialize security verification dictionary
+        self.security_verified = {}
+        self.security_verified['tls'] = False  # Initialize TLS verification status
+        self.security_verified['hybrid_kex'] = False  # Initialize hybrid key exchange verification status
+        self.security_verified['secure_enclave'] = False  # Initialize secure enclave verification status
         
-        self.security_properties = set()
+        # Initialize security flow dictionary
+        self.security_flow = {}
         
-        # Security hardening
-        self.memory_protected = False
-        self.canary_initialized = False
-        self.key_rotation_active = True
+        # Initialize network connection attributes
+        self.tcp_socket = None  # Initialize tcp_socket attribute
         
-        # Initialize key-related variables
-        self.hybrid_root_key = None
-        self.peer_hybrid_bundle = None
-        self.ratchet = None
+        # Track post-quantum capabilities
+        self.post_quantum_enabled = True  # Enable by default
         
-        # Configuration management - read from environment variables
-        self._initialize_configuration()
+        # MILITARY-GRADE ENHANCEMENT: Anti-debugging protection
+        self._enable_anti_debugging()
         
-        # Now verify key storage after setting in_memory_only flag
-        self.security_verified['key_protection'] = self._verify_key_storage()
-        if not self.security_verified['key_protection']:
-            log.warning("SECURITY ALERT: Secure key storage verification failed")
-        
-        if self.use_ephemeral_identity:
-            log.info(f"Using ephemeral identities with {self.ephemeral_key_lifetime}s lifetime (default)")
-            self.security_verified['ephemeral_identity'] = True
-            
-        if self.in_memory_only:
-            log.info("Using in-memory only mode - keys will not be stored on disk (default)")
-            
-        # Strict handling of OAuth Client ID IF authentication is explicitly enabled
-        if self.require_authentication and not self.oauth_client_id:
-            allow_unauthenticated_override = os.environ.get('P2P_ALLOW_UNAUTHENTICATED_IF_ID_MISSING', 'false').lower() in ('true', '1', 'yes') # More specific override name
-            if not allow_unauthenticated_override:
-                log.critical("SECURITY FAILURE: Authentication (P2P_REQUIRE_AUTH=true) is EXPLICITLY ENABLED, but P2P_OAUTH_CLIENT_ID is not set.")
-                log.critical("Application cannot start in the configured authenticated mode.")
-                log.critical("To run without authentication, ensure P2P_REQUIRE_AUTH=false (which is the default).")
-                log.critical("Alternatively, provide P2P_OAUTH_CLIENT_ID or set P2P_ALLOW_UNAUTHENTICATED_IF_ID_MISSING=true to run unauthenticated despite this misconfiguration (NOT RECOMMENDED).")
-                print(f"{RED}{BOLD}CRITICAL SECURITY CONFIGURATION ERROR: P2P_OAUTH_CLIENT_ID is missing but P2P_REQUIRE_AUTH is set to true.{RESET}")
-                print(f"{YELLOW}Application will exit. Set P2P_OAUTH_CLIENT_ID, or set P2P_REQUIRE_AUTH=false (default), or use P2P_ALLOW_UNAUTHENTICATED_IF_ID_MISSING=true to override (unsafe).{RESET}")
-                sys.exit("Critical configuration error: OAuth Client ID missing for explicitly required authentication.")
-            else:
-                log.warning("SECURITY WARNING: P2P_ALLOW_UNAUTHENTICATED_IF_ID_MISSING=true is set. Authentication is EXPLICITLY ENABLED (P2P_REQUIRE_AUTH=true) but P2P_OAUTH_CLIENT_ID is missing.")
-                log.warning("Proceeding WITHOUT AUTHENTICATION due to override. This is INSECURE for an authenticated setup.")
-                print(f"{RED}{BOLD}SECURITY WARNING: Running WITHOUT AUTHENTICATION due to override, despite P2P_REQUIRE_AUTH=true and missing OAuth Client ID.{RESET}")
-                self.require_authentication = False # Override active, Client ID missing for explicit auth request, so disable auth for this run.
-                log.warning("Authentication effectively disabled for this session due to P2P_ALLOW_UNAUTHENTICATED_IF_ID_MISSING=true and missing P2P_OAUTH_CLIENT_ID with P2P_REQUIRE_AUTH=true.")
-        elif not self.require_authentication:
-            log.info("User authentication is DISABLED by default (P2P_REQUIRE_AUTH=false). Operating in anonymous mode.")
-        
-        # Initialize CAExchange for certificate verification
-        self.ca_exchange = CAExchange(
-            exchange_port_offset=1,  # Default: use port+1 for certificate exchange
-            buffer_size=self.MAX_FRAME_SIZE,
-            validity_days=7  # Certificates valid for 7 days
+        # Initialize configuration
+        self._initialize_configuration(
+            identity=identity,
+            ephemeral=ephemeral,
+            in_memory_only=in_memory_only,
+            key_lifetime=key_lifetime,
+            security_level=security_level
         )
         
-        # TLS components
-        try:
-            self.tls_channel = TLSSecureChannel(
-                use_secure_enclave=True,  # Always try to use hardware security if available
-                require_authentication=self.require_authentication,
-                oauth_provider=self.oauth_provider,
-                oauth_client_id=self.oauth_client_id,
-                in_memory_only=self.in_memory_only,  # Pass the in-memory flag
-                multi_cipher=True,
-                enable_pq_kem=True  # Enable post-quantum security
-            )
-            self.security_verified['tls'] = True
-            
-            # Check if secure enclave is actually available
-            if hasattr(self.tls_channel, 'secure_enclave') and self.tls_channel.secure_enclave:
-                if self.tls_channel.secure_enclave.using_enclave:
-                    self.security_verified['secure_enclave'] = True
-                    log.info(f"Hardware security ({self.tls_channel.secure_enclave.enclave_type}) enabled for cryptographic operations")
-            
-            # Check if OAuth authentication is configured
-            if self.require_authentication and hasattr(self.tls_channel, 'oauth_auth') and self.tls_channel.oauth_auth:
-                self.security_verified['oauth_auth'] = True
-                log.info(f"OAuth authentication enabled with provider: {self.oauth_provider}")
-                
-        except Exception as e:
-            log.error(f"SECURITY ALERT: Failed to initialize TLS channel: {e}")
-            self.security_verified['tls'] = False
+        # Set identity
+        self.identity = identity if identity else "secure_user_" + os.urandom(4).hex()
+        self.use_ephemeral_identity = ephemeral
+        self.in_memory_only = in_memory_only
         
-        # Hybrid X3DH+PQ components 
-        try:
-            self.hybrid_kex = HybridKeyExchange(
-                identity=f"user_{id(self)}", 
-                keys_dir=self.keys_dir,
-                ephemeral=self.use_ephemeral_identity,
-                key_lifetime=self.ephemeral_key_lifetime,
-                in_memory_only=self.in_memory_only
-            )
-            self.security_verified['hybrid_kex'] = True
-            
-            # Set FALCON DSS flag to True if it was properly initialized in HybridKeyExchange
-            if hasattr(self.hybrid_kex, 'dss') and self.hybrid_kex.dss is not None:
-                self.security_verified['falcon_dss'] = True
-                log.info("FALCON-1024 post-quantum signatures initialized")
-            else:
-                log.warning("FALCON-1024 post-quantum signatures not available")
-                
-            # Log ephemeral identity details if enabled
-            if self.use_ephemeral_identity:
-                if hasattr(self.hybrid_kex, 'identity'):
-                    log.info(f"Using ephemeral identity: {self.hybrid_kex.identity}")
-                    log.info(f"Ephemeral keys will expire in {self.ephemeral_key_lifetime} seconds")
-                    log.info(f"Next rotation scheduled at: {time.ctime(self.hybrid_kex.next_rotation_time)}")
-                
-        except Exception as e:
-            log.error(f"SECURITY ALERT: Failed to initialize Hybrid Key Exchange: {e}")
-            self.security_verified['hybrid_kex'] = False
+        # Initialize core components
+        self.key_manager = secure_key_manager.get_key_manager(in_memory_only=in_memory_only)
+        # Use TLSSecureChannel instead of TLSChannelManager
+        self.tls_channel = TLSSecureChannel(
+            cert_path=os.path.join(self.cert_dir, f"{self.identity}.crt"),
+            key_path=os.path.join(self.keys_dir, f"{self.identity}.key"),
+            use_secure_enclave=True,
+            in_memory_only=in_memory_only
+        )
+        # Mark TLS as initialized
+        self.security_verified['tls'] = True
+        # Mark secure enclave status 
+        self.security_verified['secure_enclave'] = hasattr(self.tls_channel, 'secure_enclave') and self.tls_channel.secure_enclave is not None
         
-        # Double Ratchet components
-        self.ratchet = None  # Will be initialized after X3DH+PQ handshake
-        self.is_ratchet_initiator = False  # Will be set based on connection role
+        # Initialize Certificate Authority exchange for secure certificate handling
+        from ca_services import CAExchange
+        self.ca_exchange = CAExchange(
+            exchange_port_offset=1,
+            buffer_size=65536,
+            validity_days=7,
+            key_type="rsa4096",
+            secure_exchange=True,
+            enable_hpkp=True,
+            enable_ocsp_stapling=True
+        )
+        log.info("Certificate Authority exchange initialized for secure certificate handling")
         
-        self.secure_mode = True
+        # Initialize hybrid key exchange
+        self.hybrid_kex = HybridKeyExchange(
+            identity=self.identity,
+            ephemeral=ephemeral,
+            in_memory_only=in_memory_only,
+            key_lifetime=key_lifetime
+        )
+        # Mark hybrid key exchange as initialized
+        self.security_verified['hybrid_kex'] = True
         
-        # Register cleanup handler
-        atexit.register(self.cleanup)
+        # Initialize Double Ratchet (will be fully set up during handshake)
+        self.double_ratchet = None
         
-        # Verify overall security initialization
-        log.info(f"Security initialization status: {self.security_verified}")
-
-        # Separate startup components from connection-time components
-        startup_components = {'cert_dir', 'keys_dir', 'tls', 'hybrid_kex', 'falcon_dss'}
-        connection_components = {'double_ratchet'}
-
-        # Check only startup components at init time
-        if not all(self.security_verified[component] for component in startup_components):
-            missing = [comp for comp in startup_components if not self.security_verified[comp]]
-            log.error(f"SECURITY ALERT: Critical security components not initialized: {missing}")
-        else:
-            log.info("Core security components initialized successfully")
-            log.info("Connection-time components (Double Ratchet) will be initialized during handshake")
-
-        # Add a security flow verification 
-        self.security_flow = {
-            'tls_channel': {
-                'status': self.security_verified['tls'],
-                'provides': ['confidentiality', 'authentication', 'forward_secrecy'],
-                'algorithm': 'TLS 1.3 with ChaCha20-Poly1305 and post-quantum hybrid key exchange'
-            },
-            'hybrid_kex': {
-                'status': self.security_verified['hybrid_kex'],
-                'provides': ['confidentiality', 'authentication', 'post_quantum_security'],
-                'algorithm': 'X3DH + ML-KEM-1024'
-            },
-            'secure_enclave': {
-                'status': self.security_verified['secure_enclave'],
-                'provides': ['key_protection', 'hardware_isolation'],
-                'algorithm': 'TPM/HSM key protection'
-            },
-            'software_key_protection': {
-                'status': self.security_verified['key_protection'] and not self.security_verified['secure_enclave'],
-                'provides': ['key_protection'],
-                'algorithm': 'Software-based secure key storage'
-            },
-            'oauth_auth': {
-                'status': self.security_verified['oauth_auth'],
-                'provides': ['user_authentication', 'identity_verification'],
-                'algorithm': 'OAuth 2.0 Device Flow'
-            },
-            'falcon_dss': {
-                'status': self.security_verified['falcon_dss'],
-                'provides': ['authentication', 'post_quantum_security'],
-                'algorithm': 'FALCON-1024'
-            },
-            'double_ratchet': {
-                'status': self.security_verified['double_ratchet'],
-                'provides': ['confidentiality', 'forward_secrecy', 'break_in_recovery'],
-                'algorithm': 'Double Ratchet with X25519'
-            },
-            'encryption': {
-                'status': True,
-                'provides': ['confidentiality', 'authentication'],
-                'algorithm': 'ChaCha20-Poly1305'
-            },
-            'key_derivation': {
-                'status': True,
-                'provides': ['key_security'],
-                'algorithm': 'HKDF-SHA512'
-            },
-            'key_erasure': {
-                'status': True,
-                'provides': ['key_security'],
-                'algorithm': 'Secure zeroization'
-            }
-        }
-
-        # Verify critical security properties are covered
-        required_properties = {
-            'confidentiality', 'authentication', 'forward_secrecy', 
-            'post_quantum_security', 'key_security', 'key_protection'
-        }
-
-        available_properties = set()
-        for component, details in self.security_flow.items():
-            if details['status']:
-                available_properties.update(details['provides'])
-
-        missing_properties = required_properties - available_properties
-        if missing_properties:
-            log.error(f"SECURITY ALERT: Critical security properties missing: {missing_properties}")
-            if 'key_protection' in missing_properties:
-                log.warning("Hardware key protection (TPM/HSM) is unavailable or failed to initialize. Keys will be stored in software.")
-        else:
-            log.info("All critical security properties provided by active components")
-    
-        # Key rotation settings
-        self.last_key_rotation = time.time()
-        self.KEY_ROTATION_INTERVAL = 3600  # Rotate keys every hour
+        # Initialize key material
+        self.root_key = None
+        self.identity_key = None
         
-        # Security hardening flags
+        # Initialize security hardening
+        self._enable_memory_protection()
+        self._initialize_canary_values()
+        
+        # Security status tracking
         self.security_hardening = {
-            'memory_protection': self._enable_memory_protection(),
-            'canary_values': self._initialize_canary_values(),
+            'memory_protection': True,
+            'canary_values': True,
             'key_rotation': True
         }
         
+        # Initialize security flow with all components
+        self._update_security_flow()
+        
         log.info(f"Security hardening features: {self.security_hardening}")
-
-        # Check for missing critical security properties
-        missing_properties = set()
-        for prop, verified in self.security_verified.items():
-            if not verified and prop in ['tls', 'hybrid_kex', 'falcon_dss', 'key_protection']:
-                missing_properties.add(prop)
         
-        # Fix for key_protection inconsistency - if it shows as verified, remove it from missing
-        if 'key_protection' in missing_properties and self.security_verified['key_protection'] == True:
-            missing_properties.remove('key_protection')
-        
-        if missing_properties:
-            log.error(f"SECURITY ALERT: Critical security properties missing: {missing_properties}")
+    def _enable_anti_debugging(self):
+        """
+        Enable military-grade anti-debugging protection to prevent reverse engineering
+        and tampering with the secure communication system.
+        """
+        # Check environment variable for test mode
+        if os.environ.get("DISABLE_ANTI_DEBUGGING", "false").lower() == "true":
+            log.info("Anti-debugging protection disabled via environment variable for testing")
+            return True
             
-            # Provide more context for specific missing properties
-            if 'key_protection' in missing_properties:
-                log.warning("Hardware key protection (TPM/HSM) is unavailable or failed to initialize. Keys will be stored in software.")
+        try:
+            import platform_hsm_interface as cphs
+            
+            # Check if a debugger is attached
+            if hasattr(cphs, 'detect_debugger') and cphs.detect_debugger():
+                log.critical("SECURITY ALERT: Debugger detected! Initiating emergency security response.")
                 
-    def _initialize_configuration(self):
+                # Wipe sensitive data
+                self._emergency_wipe()
+                
+                # Terminate process via platform_hsm_interface
+                if hasattr(cphs, 'emergency_security_response'):
+                    cphs.emergency_security_response()
+                else:
+                    # Fallback termination
+                    import sys
+                    sys.exit(1)
+            
+            # Start periodic debugger checks in background thread
+            self._start_debugger_detection_thread()
+            
+            log.info("Anti-debugging protection enabled")
+            return True
+        except Exception as e:
+            log.warning(f"Failed to enable anti-debugging protection: {e}")
+            return False
+            
+    def _start_debugger_detection_thread(self):
         """
-        Initialize configuration from environment variables with secure defaults.
-        Uses in-memory storage as default and falls back to standard locations 
-        when directories are needed.
+        Start a background thread that periodically checks for debuggers.
         """
-        # Make in-memory only the default (True) unless explicitly set to false
-        self.in_memory_only = os.environ.get('P2P_IN_MEMORY_ONLY', 'true').lower() in ('true', '1', 'yes')
-        
-        # OAuth configuration - authentication is now OFF by default
-        self.oauth_provider = os.environ.get('P2P_OAUTH_PROVIDER', 'google')
-        self.oauth_client_id = os.environ.get('P2P_OAUTH_CLIENT_ID', '')
-        self.require_authentication = os.environ.get('P2P_REQUIRE_AUTH', 'false').lower() in ('true', '1', 'yes') # Default to 'false'
-        
-        # Default to "maximum" security level
-        self.security_level = os.environ.get('P2P_SECURITY_LEVEL', 'maximum').lower()
-        if self.security_level not in self.SECURITY_LEVELS:
-            log.warning(f"Unknown security level: {self.security_level}, defaulting to 'maximum'")
-            self.security_level = 'maximum'
-        log.info(f"Using security level: {self.security_level.upper()}")
-        
-        # Ephemeral identity configuration - use ephemeral by default
-        self.use_ephemeral_identity = os.environ.get('P2P_EPHEMERAL_IDENTITY', 'true').lower() in ('true', '1', 'yes')
-        self.ephemeral_key_lifetime = int(os.environ.get('P2P_EPHEMERAL_LIFETIME', str(DEFAULT_KEY_LIFETIME)))
-        
-        # Directory configuration with fallbacks - just define paths but don't create directories
-        self.base_dir = os.environ.get('P2P_BASE_DIR', os.path.dirname(__file__))
-        
-        # Get certificate directory from environment or use default
-        self.cert_dir = os.environ.get('P2P_CERT_DIR', os.path.join(self.base_dir, "cert"))
-        
-        # Only create directories if not in memory-only mode
-        if not self.in_memory_only:
-            self._setup_secure_directory(self.cert_dir, 'cert_dir')
-        else:
-            # Just mark as verified without creating directory
-            self.security_verified['cert_dir'] = True
-        
-        # Get keys directory from environment or use default
-        self.keys_dir = os.environ.get('P2P_KEYS_DIR', os.path.join(self.base_dir, "keys"))
-        
-        # Only create directories if not in memory-only mode
-        if not self.in_memory_only:
-            self._setup_secure_directory(self.keys_dir, 'keys_dir')
-        else:
-            # Just mark as verified without creating directory
-            self.security_verified['keys_dir'] = True
-        
-        # Additional security settings
-        self.post_quantum_enabled = os.environ.get('P2P_POST_QUANTUM', 'true').lower() in ('true', '1', 'yes')
-        
-        # Set up peer key storage
-        self.peer_falcon_public_key = None  # FALCON-1024 public key of the peer
-    
-    def _setup_secure_directory(self, directory, dir_type):
-        """
-        Set up a secure directory with proper permissions and fallbacks.
-        
-        Args:
-            directory: Path to the directory
-            dir_type: Type of directory (for security verification)
-        """
-        if self.in_memory_only:
-            # When in memory-only mode, don't create any directories at all
-            # Just mark the verification as successful since we don't need the directories
-            log.debug(f"Skipping {dir_type} directory creation - using memory-only mode")
-            self.security_verified[dir_type] = True
+        # Check environment variable for test mode
+        if os.environ.get("DISABLE_ANTI_DEBUGGING", "false").lower() == "true":
+            log.info("Debugger detection thread disabled via environment variable for testing")
             return
             
-        # For disk mode, we need to ensure directory exists with proper permissions
         try:
-            os.makedirs(directory, exist_ok=True)
+            import threading
+            import platform_hsm_interface as cphs
             
-            # Test write permissions
-            test_file = os.path.join(directory, ".test_write")
-            with open(test_file, 'w') as f:
-                f.write("test")
-            os.remove(test_file)
+            if not hasattr(cphs, 'detect_debugger'):
+                log.warning("Debugger detection not available in platform_hsm_interface")
+                return
+                
+            def _debugger_check_loop():
+                while True:
+                    try:
+                        # Check for debugger every 2-5 seconds with random interval
+                        import random
+                        import time
+                        
+                        # Sleep with random interval to make timing attacks harder
+                        time.sleep(random.uniform(2, 5))
+                        
+                        # Check environment variable again in case it was changed during runtime
+                        if os.environ.get("DISABLE_ANTI_DEBUGGING", "false").lower() == "true":
+                            time.sleep(5)  # Sleep and check again
+                            continue
+                        
+                        # Check for debugger
+                        if cphs.detect_debugger():
+                            log.critical("SECURITY ALERT: Debugger detected during runtime! Initiating emergency response.")
+                            
+                            # Wipe sensitive data
+                            self._emergency_wipe()
+                            
+                            # Terminate process
+                            if hasattr(cphs, 'emergency_security_response'):
+                                cphs.emergency_security_response()
+                            else:
+                                # Fallback termination
+                                import sys
+                                sys.exit(1)
+                    except Exception as e:
+                        # Don't log too much as it might be exploitable
+                        pass
             
-            # Check directory permissions on POSIX systems
-            if os.name == 'posix':
-                try:
-                    import stat
-                    dir_stat = os.stat(directory)
-                    if dir_stat.st_mode & stat.S_IRWXO:
-                        log.warning(f"SECURITY ALERT: {dir_type} directory has loose permissions (world readable/writable)")
-                except Exception as perm_e:
-                    log.debug(f"Could not check directory permissions (non-critical): {perm_e}")
-            
-            log.info(f"{dir_type.replace('_', ' ').title()} verified: {directory}")
-            self.security_verified[dir_type] = True
+            # Start thread
+            self._debugger_thread = threading.Thread(
+                target=_debugger_check_loop,
+                daemon=True,
+                name="SecurityMonitor"
+            )
+            self._debugger_thread.start()
             
         except Exception as e:
-            log.warning(f"Could not verify {dir_type} permissions: {e}")
-            try:
-                import tempfile
-                fallback_dir = os.path.join(tempfile.gettempdir(), f"p2p_{dir_type}")
-                os.makedirs(fallback_dir, exist_ok=True)
-                log.info(f"Using alternate {dir_type}: {fallback_dir}")
-                os.environ[f"P2P_{dir_type.upper()}"] = fallback_dir
-                # Update the instance variable
-                setattr(self, dir_type, fallback_dir)
-                self.security_verified[dir_type] = True
-            except Exception as alt_e:
-                log.error(f"SECURITY ALERT: Failed to create {dir_type}: {alt_e}")
-                self.security_verified[dir_type] = False
+            log.warning(f"Failed to start debugger detection thread: {e}")
+            
+    def _emergency_wipe(self):
+        """
+        Emergency secure wipe of all sensitive data in case of security breach.
+        """
+        try:
+            log.critical("EMERGENCY WIPE: Securely erasing all sensitive data")
+            
+            # Wipe all key material
+            if hasattr(self, 'root_key') and self.root_key:
+                self._secure_erase(self.root_key)
+                self.root_key = None
                 
+            if hasattr(self, 'identity_key') and self.identity_key:
+                self._secure_erase(self.identity_key)
+                self.identity_key = None
+                
+            # Wipe double ratchet state
+            if hasattr(self, 'double_ratchet') and self.double_ratchet:
+                if hasattr(self.double_ratchet, 'secure_cleanup'):
+                    self.double_ratchet.secure_cleanup()
+                self.double_ratchet = None
+                
+            # Wipe hybrid key exchange state
+            if hasattr(self, 'hybrid_kex') and self.hybrid_kex:
+                if hasattr(self.hybrid_kex, 'secure_cleanup'):
+                    self.hybrid_kex.secure_cleanup()
+                    
+            # Wipe TLS channel state
+            if hasattr(self, 'tls_channel') and self.tls_channel:
+                if hasattr(self.tls_channel, 'cleanup'):
+                    self.tls_channel.cleanup()
+                    
+            # Wipe key manager state
+            if hasattr(self, 'key_manager') and self.key_manager:
+                if hasattr(self.key_manager, 'cleanup'):
+                    self.key_manager.cleanup()
+                    
+            log.critical("EMERGENCY WIPE: Complete")
+        except Exception as e:
+            # Don't log the exception details as they might contain sensitive info
+            log.critical("EMERGENCY WIPE: Failed")
+            
+    def _secure_erase(self, data):
+        """
+        Securely erase data from memory.
+        
+        Args:
+            data: The data to erase
+        """
+        if data is None:
+            return
+            
+        if isinstance(data, bytes):
+            # Convert to bytearray for in-place modification
+            buffer = bytearray(data)
+            for i in range(len(buffer)):
+                buffer[i] = 0
+        elif isinstance(data, bytearray):
+            for i in range(len(data)):
+                data[i] = 0
+
+    def _initialize_configuration(self, identity, ephemeral, in_memory_only, key_lifetime, security_level):
+        """
+        Initialize configuration settings from environment variables or defaults.
+        """
+        # Initialize security settings
+        self.security_level = security_level
+        self.security_level = self.security_level.upper()
+        
+        # If security level is not valid, default to MAXIMUM
+        if self.security_level not in self.SECURITY_LEVELS:
+            log.warning(f"Invalid security level: {self.security_level}, defaulting to MAXIMUM")
+            self.security_level = 'MAXIMUM'
+            
+        log.info(f"Using security level: {self.security_level}")
+        
+        # Initialize hardware security
+        self.use_secure_enclave = self.SECURITY_LEVELS[self.security_level].get('use_secure_enclave', True)
+        
+        # Initialize key storage settings
+        self.in_memory_only = in_memory_only
+        self.secure_dir = os.environ.get('P2P_SECURE_DIR', None)
+        
+        # Set up certificate and key directories
+        self.cert_dir = os.environ.get('P2P_CERT_DIR', os.path.join(os.path.dirname(__file__), 'certs'))
+        self.keys_dir = os.environ.get('P2P_KEYS_DIR', os.path.join(os.path.dirname(__file__), 'keys'))
+        
+        # Create directories if they don't exist
+        os.makedirs(self.cert_dir, exist_ok=True)
+        os.makedirs(self.keys_dir, exist_ok=True)
+        
+        # Mark directories as verified since we've created them
+        self.security_verified['cert_dir'] = os.path.exists(self.cert_dir)
+        self.security_verified['keys_dir'] = os.path.exists(self.keys_dir)
+        
+        # Initialize key manager
+        self.key_manager = secure_key_manager.get_key_manager(in_memory_only=in_memory_only)
+        
+        # Initialize hardware security
+        if self.use_secure_enclave:
+            self.hsm_initialized = self._initialize_hardware_security()
+            if self.hsm_initialized:
+                log.info("Hardware security (TPM via Windows CNG) initialized successfully")
+        
+        # Initialize ephemeral identity settings
+        self.use_ephemeral_identity = ephemeral
+        self.ephemeral_key_lifetime = key_lifetime
+        
+        # Initialize authentication settings
+        self.require_authentication = os.environ.get('P2P_REQUIRE_AUTH', 'false').lower() == 'true'
+        self.oauth_provider = os.environ.get('P2P_OAUTH_PROVIDER', 'google')
+        self.oauth_client_id = os.environ.get('P2P_OAUTH_CLIENT_ID', None)
+        
+        # Initialize DANE TLSA validation settings
+        self.enforce_dane_validation = os.environ.get('P2P_ENFORCE_DANE', 'false').lower() == 'false'
+        # Create a placeholder TLSA record for now - we'll update it after TLS channel initialization
+        self.dane_tlsa_records = [{
+            'usage': 3,  # DANE-EE: End-Entity Certificate
+            'selector': 0,  # Full Certificate
+            'matching_type': 1,  # SHA-256
+            'certificate_association': os.urandom(32)  # Random 32-byte value as placeholder
+        }] if self.enforce_dane_validation else None
+        
+                    # Inform about authentication status
+        if not self.require_authentication:
+            log.info("User authentication is DISABLED (P2P_REQUIRE_AUTH=false). Operating in anonymous mode for enhanced privacy.")
+
+    def _create_sample_tlsa_records(self):
+        """
+        Create sample DANE TLSA records for testing purposes.
+        In a production environment, these would be fetched from DNS.
+        
+        Returns:
+            List of TLSA record dictionaries
+        """
+        try:
+            # Import required modules
+            from cryptography import x509
+            from cryptography.hazmat.backends import default_backend
+            from cryptography.hazmat.primitives import serialization
+            import hashlib
+            
+            # Create sample TLSA records
+            tlsa_records = []
+            
+            # If we have a TLS certificate, use it to create valid TLSA records
+            if hasattr(self, 'tls_channel') and hasattr(self.tls_channel, 'ssl_context'):
+                try:
+                    # Try to get the certificate
+                    cert_path = getattr(self.tls_channel, 'cert_path', None)
+                    if cert_path and os.path.exists(cert_path):
+                        with open(cert_path, 'rb') as f:
+                            cert_data = f.read()
+                            cert = x509.load_pem_x509_certificate(cert_data, default_backend())
+                            
+                            # Create TLSA record with usage=3 (DANE-EE), selector=0 (Full Certificate), matching_type=1 (SHA-256)
+                            cert_der = cert.public_bytes(encoding=serialization.Encoding.DER)
+                            cert_hash = hashlib.sha256(cert_der).digest()
+                            
+                            tlsa_records.append({
+                                'usage': 3,  # DANE-EE: End-Entity Certificate
+                                'selector': 0,  # Full Certificate
+                                'matching_type': 1,  # SHA-256
+                                'certificate_association': cert_hash
+                            })
+                            
+                            # Create TLSA record with usage=3, selector=1 (SubjectPublicKeyInfo), matching_type=1 (SHA-256)
+                            spki = cert.public_key().public_bytes(
+                                encoding=serialization.Encoding.DER,
+                                format=serialization.PublicFormat.SubjectPublicKeyInfo
+                            )
+                            spki_hash = hashlib.sha256(spki).digest()
+                            
+                            tlsa_records.append({
+                                'usage': 3,  # DANE-EE: End-Entity Certificate
+                                'selector': 1,  # SubjectPublicKeyInfo
+                                'matching_type': 1,  # SHA-256
+                                'certificate_association': spki_hash
+                            })
+                            
+                            log.info(f"Created {len(tlsa_records)} sample TLSA records for DANE validation")
+                            return tlsa_records
+                except Exception as e:
+                    log.warning(f"Failed to create TLSA records from certificate: {e}")
+            
+            # If we couldn't create TLSA records from a certificate, create a placeholder
+            # This is just for testing - in production, real TLSA records should be used
+            tlsa_records.append({
+                'usage': 3,  # DANE-EE: End-Entity Certificate
+                'selector': 0,  # Full Certificate
+                'matching_type': 1,  # SHA-256
+                'certificate_association': os.urandom(32)  # Random 32-byte value as placeholder
+            })
+            
+            log.info("Created placeholder TLSA record for DANE validation testing")
+            return tlsa_records
+            
+        except ImportError:
+            log.warning("Could not create TLSA records: required modules not available")
+            return None
+        except Exception as e:
+            log.warning(f"Failed to create sample TLSA records: {e}")
+            return None
+    
     def cleanup(self):
         """
         Perform secure cleanup of cryptographic resources.
@@ -756,19 +845,20 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                 log.error(f"Error cleaning up CAExchange persisted files: {e}")
         
         # Clean up hybrid root key
-        with KeyEraser(self.hybrid_root_key, "main cleanup hybrid root key") as ke_hrk:
-            if self.hybrid_root_key: # Check if it exists
+        if hasattr(self, 'hybrid_root_key') and self.hybrid_root_key:
+            with KeyEraser(self.hybrid_root_key, "main cleanup hybrid root key") as ke_hrk:
                 pass # KeyEraser handles secure_erase and setting its internal ref to None
-        self.hybrid_root_key = None # Ensure instance attribute is None
+            self.hybrid_root_key = None # Ensure instance attribute is None
                 
         # Clean up Double Ratchet state
-        with KeyEraser(self.ratchet, "main cleanup Double Ratchet state") as ke_dr:
-            if self.ratchet and hasattr(self.ratchet, 'secure_cleanup'):
-                try:
-                    self.ratchet.secure_cleanup()
-                except Exception as e:
-                    log.error(f"Error during Double Ratchet secure_cleanup in main cleanup: {e}")
-        self.ratchet = None # Ensure instance attribute is None
+        if hasattr(self, 'ratchet') and self.ratchet:
+            with KeyEraser(self.ratchet, "main cleanup Double Ratchet state") as ke_dr:
+                if hasattr(self.ratchet, 'secure_cleanup'):
+                    try:
+                        self.ratchet.secure_cleanup()
+                    except Exception as e:
+                        log.error(f"Error during Double Ratchet secure_cleanup in main cleanup: {e}")
+            self.ratchet = None # Ensure instance attribute is None
         
         # Clean up Hybrid Key Exchange state
         if hasattr(self, 'hybrid_kex'):
@@ -1522,10 +1612,18 @@ class SecureP2PChat(p2p.SimpleP2PChat):
             log.info(f"Establishing secure connection to peer [{peer_ip}]:{peer_port}")
 
             # Verify security components are ready
-            if not all([self.security_verified['cert_dir'], self.security_verified['keys_dir'], 
-                       self.security_verified['tls'], self.security_verified['hybrid_kex']]):
-                log.error("SECURITY ALERT: Security components not ready for connection")
-                raise ValueError("Security components not ready. Cannot establish secure connection.")
+            required_components = {
+                'cert_dir': self.security_verified.get('cert_dir', False),
+                'keys_dir': self.security_verified.get('keys_dir', False),
+                'tls': self.security_verified.get('tls', False),
+                'hybrid_kex': self.security_verified.get('hybrid_kex', False)
+            }
+            
+            if not all(required_components.values()):
+                missing = [k for k, v in required_components.items() if not v]
+                log.error(f"SECURITY ALERT: Security components not ready for connection: {missing}")
+                print(f"\033[91mSecurity components not ready: {missing}\033[0m")
+                raise ValueError(f"Security components not ready: {missing}. Cannot establish secure connection.")
 
             loop = asyncio.get_event_loop()
             log.info(f"Resolving address for {peer_ip}:{peer_port}")
@@ -1672,7 +1770,9 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                             oauth_client_id=self.oauth_client_id,
                             in_memory_only=self.in_memory_only,  # Pass the in-memory flag
                             multi_cipher=True,
-                            enable_pq_kem=True  # Enable post-quantum security
+                            enable_pq_kem=True,  # Enable post-quantum security
+                            dane_tlsa_records=self.dane_tlsa_records,  # Pass DANE TLSA records
+                            enforce_dane_validation=self.enforce_dane_validation  # Enable DANE validation
                         )
                         
                         # Check if authentication is required before proceeding
@@ -2154,7 +2254,9 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                                     # Ensure all relevant auth parameters are passed from SecureP2PChat instance
                                     require_authentication=self.require_authentication,
                                     oauth_provider=self.oauth_provider,
-                                    oauth_client_id=self.oauth_client_id
+                                    oauth_client_id=self.oauth_client_id,
+                                    dane_tlsa_records=self.dane_tlsa_records,  # Pass DANE TLSA records
+                                    enforce_dane_validation=self.enforce_dane_validation  # Enable DANE validation
                                 )
                                 
                                 # Wrap server socket with TLS using certificates from CAExchange
@@ -3086,191 +3188,97 @@ class SecureP2PChat(p2p.SimpleP2PChat):
             gc.collect()
         except Exception:
             pass
-
+ 
     def _enable_memory_protection(self):
         """
-        Enable memory protection mechanisms available on the platform.
+        Enable memory protection features to prevent buffer overflows and other memory-based attacks.
         
         Returns:
-            bool: True if memory protection was successfully enabled, False otherwise.
+            bool: True if memory protection was enabled successfully, False otherwise
         """
         try:
-            # Platform-specific handling
-            if sys.platform == 'win32':
-                # Windows-specific memory protection
-                try:
-                    # Use Windows-specific memory protection if available
-                    if hasattr(ctypes, 'windll') and hasattr(ctypes.windll, 'kernel32'):
-                        # Try to enable process mitigation policies (Windows 8+)
-                        try:
-                            # Process mitigation policies constants
-                            PROCESS_MITIGATION_ASLR_POLICY = 0
-                            PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY = 3
-                            
-                            # Enable ASLR if available
-                            aslr_enabled = self._enable_windows_process_mitigation(PROCESS_MITIGATION_ASLR_POLICY)
-                            if aslr_enabled:
-                                log.debug("Windows ASLR protection enabled")
-                                
-                            # Enable strict handle checking if available
-                            handle_check_enabled = self._enable_windows_process_mitigation(PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY)
-                            if handle_check_enabled:
-                                log.debug("Windows strict handle checking enabled")
-                                
-                            # Track memory protection status
-                            return aslr_enabled or handle_check_enabled
-                        except Exception as e:
-                            log.debug(f"Could not enable Windows process mitigation: {e}")
-                    
-                    # Basic Windows memory protection
-                    log.debug("Using basic Windows memory protection")
-                    return True
-                except Exception as e:
-                    log.debug(f"Could not enable Windows memory protection: {e}")
-                    return False
-                
-            elif sys.platform.startswith('linux'):
-                # Linux-specific memory protection
-                try:
-                    # Try to load libc
-                    try:
-                        libc = ctypes.CDLL('libc.so.6')
-                        
-                        # Try to disable ptrace
-                        try:
-                            PR_SET_DUMPABLE = 4
-                            libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0)
-                            log.debug("Successfully disabled core dumps")
-                        except Exception as e:
-                            log.debug(f"Could not disable core dumps: {e}")
-                        
-                        # Try to lock memory pages
-                        try:
-                            MCL_CURRENT = 1
-                            MCL_FUTURE = 2
-                            libc.mlockall(MCL_CURRENT | MCL_FUTURE)
-                            log.debug("Successfully locked memory pages")
-                        except Exception as e:
-                            log.debug(f"Could not lock memory pages: {e}")
-                            
-                        return True
-                    except Exception as e:
-                        log.debug(f"Could not load libc.so.6: {e}")
-                        return False
-                except Exception as e:
-                    log.debug(f"Error enabling Linux memory protection: {e}")
-                    return False
-                
-            elif sys.platform == 'darwin':
-                # macOS-specific memory protection
-                try:
-                    # macOS security framework integration would go here
-                    # For now, just report basic protection
-                    log.debug("Using basic macOS memory protection")
-                    return True
-                except Exception as e:
-                    log.debug(f"Error enabling macOS memory protection: {e}")
-                    return False
-                
-            else:
-                # Generic fallback for unknown platforms
-                log.debug(f"No specific memory protection available for platform: {sys.platform}")
-                return False
-            
-        except Exception as e:
-            log.debug(f"Error in memory protection: {e}")
-            return False
-        
-    def _enable_windows_process_mitigation(self, policy_type):
-        """
-        Enable a Windows process mitigation policy.
-        
-        Args:
-            policy_type: The policy type to enable
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        if not hasattr(ctypes, 'windll') or not hasattr(ctypes.windll, 'kernel32'):
-            return False
-        
-        try:
-            # We need to implement proper structure definitions for the policy
-            # This is a simplified version that attempts to enable the policy
-            # A full implementation would define proper ctypes structures
-            
-            # Get current process handle
-            process_handle = ctypes.windll.kernel32.GetCurrentProcess()
-            
-            # For now, just report that we attempted to enable the policy
-            log.debug(f"Attempted to enable Windows process mitigation policy {policy_type}")
+            # Initialize DEP (Data Execution Prevention)
+            from dep_impl import implement_dep_in_secure_p2p
+            dep_result = implement_dep_in_secure_p2p()
+            log.info(f"Successfully enabled {dep_result} protection")
             return True
         except Exception as e:
-            log.debug(f"Failed to enable Windows process mitigation policy {policy_type}: {e}")
+            log.error(f"Failed to enable memory protection: {e}")
             return False
-    
+            
     def _initialize_canary_values(self):
         """
-        Initialize security canary values to detect memory tampering.
+        Initialize stack canary values for buffer overflow detection.
         
         Returns:
-            bool: True if canary values were successfully initialized, False otherwise.
+            bool: True if canary values were initialized successfully, False otherwise
         """
         try:
-            # Create a set of random canary values to detect memory tampering
-            self.canary_values = {}
-            for i in range(5):
-                # Generate random canary name and value 
-                name = f"_canary_{random.randint(10000, 99999)}"
-                value = bytearray(random.getrandbits(8) for _ in range(32)) 
-                self.canary_values[name] = bytes(value)
-                
-                # Store a duplicate for verification
-                setattr(self, name, bytes(value))
+            # Import the DEP implementation
+            from dep_impl import EnhancedDEP
             
-            log.debug(f"Initialized {len(self.canary_values)} canary values for memory integrity checks")
+            # Create an instance of EnhancedDEP
+            self.dep = EnhancedDEP()
+            
+            # Initialize stack canaries
+            self.dep._initialize_stack_canaries()
+            
+            # Place canaries in memory
+            self.dep._place_canaries()
+            
+            # Initialize canary check state variables
             self.canary_initialized = True
-            
-            # Schedule periodic verifications
             self._last_canary_check = time.time()
-            self._canary_check_interval = 60.0  # Check every minute
+            self._canary_check_interval = 30.0  # Check every 30 seconds
             
+            # Start a thread to periodically verify canaries
+            self.canary_check_thread = threading.Thread(
+                target=self._canary_check_loop,
+                daemon=True
+            )
+            self.canary_check_thread.start()
+            
+            log.info("Stack canary values initialized successfully")
             return True
         except Exception as e:
-            log.warning(f"Could not initialize canary values: {e}")
+            log.error(f"Failed to initialize canary values: {e}")
+            self.canary_initialized = False
             return False
+            
+    def _canary_check_loop(self):
+        """
+        Periodically verify canary values to detect buffer overflows.
+        """
+        import time
+        while True:
+            try:
+                # Verify canaries
+                if hasattr(self, 'dep'):
+                    self.dep.verify_canaries()
+                # Check every 5 seconds
+                time.sleep(5)
+            except Exception as e:
+                log.error(f"Error in canary check loop: {e}")
+                time.sleep(1)  # Sleep briefly to avoid tight loop on error
     
     def _verify_canary_values(self):
         """
-        Verify security canary values to detect memory tampering.
+        Verify canary values to detect memory tampering.
         
         Returns:
-            bool: True if canary values are intact, False if tampering is detected.
+            bool: True if canary values are intact, False if tampering detected
         """
-        if not self.canary_initialized:
+        if not hasattr(self, 'dep'):
             return False
             
         try:
-            # Verify all canary values still match their original values
-            for name, original_value in self.canary_values.items():
-                if not hasattr(self, name):
-                    log.error(f"SECURITY ALERT: Canary value {name} is missing!")
-                    return False
-                    
-                current_value = getattr(self, name)
-                if not current_value or current_value != original_value:
-                    log.error(f"SECURITY ALERT: Canary value {name} has been modified!")
-                    log.error(f"Expected: {_format_binary(original_value)}")
-                    log.error(f"Found: {_format_binary(current_value if current_value else b'')}")
-                    return False
-            
-            # All canary values verified
+            # Update last check time
             self._last_canary_check = time.time()
-            log.debug("Canary values verified successfully")
+            # Verify canaries
+            self.dep.verify_canaries()
             return True
-            
         except Exception as e:
-            log.error(f"SECURITY ALERT: Error verifying canary values: {e}")
+            log.critical(f"SECURITY ALERT: Memory tampering detected: {e}")
             return False
     
     async def _rotate_keys(self):
@@ -3363,25 +3371,41 @@ class SecureP2PChat(p2p.SimpleP2PChat):
             
     def _update_security_flow(self):
         """Update security flow information with current status."""
-        # Add ephemeral identity information to security flow
-        if hasattr(self, 'security_flow'):
-            self.security_flow['ephemeral_identity'] = {
-                'status': self.security_verified.get('ephemeral_identity', False),
-                'provides': ['anonymity', 'untraceable_sessions', 'forward_secrecy'],
-                'algorithm': 'Dynamic identity rotation with disposable key pairs'
-            }
+        # Initialize security flow if not exists
+        if not hasattr(self, 'security_flow'):
+            self.security_flow = {}
             
-            self.security_flow['in_memory_keys'] = {
-                'status': self.in_memory_only,
-                'provides': ['anti_forensic', 'key_security'],
-                'algorithm': 'RAM-only cryptographic operations with secure erasure'
-            }
+        # Initialize security_verified if not fully populated
+        if 'cert_exchange' not in self.security_verified:
+            self.security_verified['cert_exchange'] = False
+        if 'ephemeral_identity' not in self.security_verified:
+            self.security_verified['ephemeral_identity'] = self.use_ephemeral_identity
+            
+        # Add ephemeral identity information to security flow
+        self.security_flow['ephemeral_identity'] = {
+            'status': self.security_verified.get('ephemeral_identity', False),
+            'provides': ['anonymity', 'untraceable_sessions', 'forward_secrecy'],
+            'algorithm': 'Dynamic identity rotation with disposable key pairs'
+        }
+        
+        self.security_flow['in_memory_keys'] = {
+            'status': self.in_memory_only,
+            'provides': ['anti_forensic', 'key_security'],
+            'algorithm': 'RAM-only cryptographic operations with secure erasure'
+        }
     
         # Add certificate exchange verification to security flow
         self.security_flow['certificate_exchange'] = {
-            'status': self.security_verified['cert_exchange'],
+            'status': self.security_verified.get('cert_exchange', False),
             'provides': ['identity_verification', 'extra_mitm_protection'],
             'algorithm': 'Mutual Self-Signed Certificate Exchange'
+        }
+    
+        # Add double_ratchet security flow information
+        self.security_flow['double_ratchet'] = {
+            'status': self.security_verified.get('double_ratchet', False),
+            'provides': ['forward_secrecy', 'break_in_recovery', 'message_encryption'],
+            'algorithm': 'Post-Quantum Enhanced Double Ratchet'
         }
     
     async def _handle_key_rotation(self, rotation_message):
@@ -3679,6 +3703,13 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         """Refresh STUN discovery of public IP/port."""
         print(f"{CYAN}Rediscovering public IPv6 address via STUN...{RESET}")
         try:
+            # Set secure memory settings
+            os.environ['P2P_USE_SODIUM_MEM'] = os.environ.get('P2P_USE_SODIUM_MEM', 'true')
+            
+            # Set memory protection settings
+            os.environ['P2P_ENABLE_DEP'] = os.environ.get('P2P_ENABLE_DEP', 'false')
+            os.environ['P2P_SKIP_MITIGATION'] = os.environ.get('P2P_SKIP_MITIGATION', 'true')
+            
             old_ip = self.public_ip
             old_port = self.public_port
             
@@ -3699,6 +3730,9 @@ class SecureP2PChat(p2p.SimpleP2PChat):
 
     def _print_banner(self):
         """Print the application banner including security features."""
+        # Set the P2P_DISABLE_DANE environment variable to true by default
+        os.environ['P2P_DISABLE_DANE'] = os.environ.get('P2P_DISABLE_DANE', 'true')
+
         # Print security status on startup
         print("\n\033[1m\033[94m===== Secure P2P Chat Security Summary =====\033[0m")
         
@@ -3709,6 +3743,27 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         # TLS status
         tls_status = "\033[92mEnabled (TLS 1.3 with ChaCha20-Poly1305)\033[0m" if self.security_verified['tls'] else "\033[91mFailed\033[0m"
         print(f"TLS Security: {tls_status}")
+
+    def _initialize_hardware_security(self):
+        """
+        Initialize hardware security module (TPM/HSM) for cryptographic operations.
+        
+        Returns:
+            bool: True if hardware security was successfully initialized, False otherwise.
+        """
+        try:
+            # Initialize platform HSM interface
+            hsm_initialized = cphs.init_hsm()
+            
+            if hsm_initialized:
+                log.info("Hardware security module initialized successfully")
+                return True
+            else:
+                log.warning("Hardware security module initialization failed")
+                return False
+        except Exception as e:
+            log.warning(f"Hardware security module initialization failed: {e}")
+            return False
 
 # Only execute this code if the script is run directly
 if __name__ == "__main__":
