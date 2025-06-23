@@ -50,8 +50,16 @@ def test_secure_memory():
     
     # Test writing data
     print("Writing sensitive data to buffer...")
-    buf[:] = b'TOP_SECRET_CRYPTOGRAPHIC_KEY_DATA' + b'\x00' * 2
-    print(f"Buffer contains: {bytes(buf)}")
+    test_data = b'TOP_SECRET_KEY'
+    if len(buf) >= len(test_data):
+        buf[:len(test_data)] = test_data
+        # Pad the rest with zeros if there's space
+        if len(buf) > len(test_data):
+            buf[len(test_data):] = b'\x00' * (len(buf) - len(test_data))
+        print(f"Buffer contains: {bytes(buf)}")
+    else:
+        print(f"Buffer too small ({len(buf)} bytes) for test data ({len(test_data)} bytes)")
+        return False
     
     # Test secure wiping
     print("Securely wiping buffer with military-grade patterns...")

@@ -17,3 +17,4 @@ python-dateutil>=2.8.2
 pyjwt>=2.6.0
   
 liboqs-python>=0.8.0
+pyspx>=0.5.2  # For SPHINCS+ quantum-resistant signatures

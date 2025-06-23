@@ -766,12 +766,15 @@ class CAExchange:
         
         ctx.options |= self.SECURE_TLS_OPTIONS
         
-        try:
-            group_string = ":".join(HYBRID_PQ_GROUPS)
-            ctx.set_groups(group_string)
-            logger.info(f"Server KEM groups set to: {group_string}")
-        except Exception as e:
-            logger.error(f"Failed to set post-quantum key exchange groups for server: {e}")
+        # Set post-quantum key exchange groups if available
+        if hasattr(ctx, "set_groups"):
+            try:
+                ctx.set_groups(HYBRID_PQ_GROUPS)
+                logger.info(f"Post-quantum key exchange groups set: {HYBRID_PQ_GROUPS}")
+            except Exception as e:
+                logger.error(f"Failed to set post-quantum key exchange groups for server: {e}")
+        else:
+            logger.warning("SSLContext does not support set_groups(). Post-quantum TLS KEX may not be available.")
         
         # Increase DH parameters for non-PQC key agreement.
         try:
@@ -849,18 +852,20 @@ class CAExchange:
         
         ctx.options |= self.SECURE_TLS_OPTIONS
         
-        try:
-            group_string = ":".join(HYBRID_PQ_GROUPS)
-            ctx.set_groups(group_string)
-            logger.info(f"Client KEM groups set to: {group_string}")
-        except Exception as e:
-            logger.error(f"Failed to set post-quantum key exchange groups for client: {e}")
-        
-        ctx.options |= ssl.OP_NO_TICKET
-        
+        # Set post-quantum key exchange groups
+        if hasattr(ctx, "set_groups"):
+            try:
+                ctx.set_groups(HYBRID_PQ_GROUPS)
+                logger.info(f"Post-quantum key exchange groups set: {HYBRID_PQ_GROUPS}")
+            except Exception as e:
+                logger.error(f"Failed to set post-quantum key exchange groups for client: {e}")
+        else:
+            logger.warning("SSLContext does not support set_groups(). Post-quantum TLS KEX may not be available.")
+
         # Hostname verification is disabled because we verify peer certificates manually.
         ctx.check_hostname = False
-
+        ctx.verify_mode = ssl.CERT_NONE
+        
         tmp_cert_file = None
         tmp_key_file = None
         try:

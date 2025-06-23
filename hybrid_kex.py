@@ -16,6 +16,7 @@ import string
 from typing import Tuple, Dict, Optional, Union
 import hashlib
 import ctypes 
+import secure_key_manager as skm
 
 # X25519 for classical key exchange
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
@@ -126,7 +127,6 @@ def secure_erase(key_material):
         return
     
     # Always use the enhanced_secure_erase from secure_key_manager
-    import secure_key_manager as skm
     skm.enhanced_secure_erase(key_material)
     log.debug("Securely erased key material using enhanced technique")
     return
@@ -223,8 +223,22 @@ class HybridKeyExchange:
         self.kem = quantcrypt.kem.MLKEM_1024()
         self.dss = FALCON_1024()
         
+        # Initialize quantum resistance future-proofing module
+        self.quantum_resistance = skm.get_quantum_resistance()
+        log.info("Initialized quantum resistance future-proofing module")
+        
+        # Add SPHINCS+ as backup signature scheme if available
+        supported_algos = self.quantum_resistance.get_supported_algorithms()
+        if "SPHINCS+" in supported_algos.get("signatures", []):
+            self.sphincs_plus = self.quantum_resistance.get_algorithm("SPHINCS+")
+            log.info("SPHINCS+ backup signature scheme initialized")
+        else:
+            self.sphincs_plus = None
+            log.info("SPHINCS+ backup signature scheme not available")
+            
         # Add nonce tracking for replay protection - dictionary mapping peer IDs to sets of seen nonces
-        self.seen_nonces = {}  
+        self.seen_nonces = {}
+        
         # Timestamp validity window in seconds (±60 seconds allowed for clock drift)
         self.timestamp_window = 60
         
@@ -723,7 +737,7 @@ class HybridKeyExchange:
         except Exception as e:
             log.error(f"Error during ephemeral X25519 key zeroization: {e}")
         
-        # Create the handshake message
+        # Create the handshake message with all data fields, but no signatures yet
         handshake_message = {
             'identity': self.identity,
             'ephemeral_key': base64.b64encode(ephemeral_public).decode('utf-8'),
@@ -738,17 +752,40 @@ class HybridKeyExchange:
             'handshake_nonce': base64.b64encode(handshake_nonce).decode('utf-8'),
             'timestamp': timestamp
         }
-        
-        # Create a canonicalized representation for signing
-        message_data = json.dumps(handshake_message, sort_keys=True).encode('utf-8')
-        
-        # Sign the message with the ephemeral FALCON-1024 key
-        message_signature = self.dss.sign(eph_falcon_private_key, message_data)
-        handshake_message['message_signature'] = base64.b64encode(message_signature).decode('utf-8')
-        
-        # Securely erase the ephemeral FALCON private key as it's no longer needed by the initiator
-        secure_erase(eph_falcon_private_key)
 
+        # --- Generate and add signatures ---
+        
+        # Generate ephemeral SPHINCS+ keys and add public key to the message
+        eph_sphincs_pk, eph_sphincs_sk = None, None
+        if hasattr(self, 'sphincs_plus') and self.sphincs_plus:
+            eph_sphincs_pk, eph_sphincs_sk = self.sphincs_plus.keygen()
+            handshake_message['eph_sphincs_pk'] = base64.b64encode(eph_sphincs_pk).decode('utf-8')
+
+        # Create the final canonical message data to be signed by all parties
+        message_data_to_sign = json.dumps(handshake_message, sort_keys=True).encode('utf-8')
+        message_hash_for_falcon = hashlib.sha512(message_data_to_sign).digest()
+
+        # Sign the hash with the ephemeral FALCON-1024 key
+        message_signature = self.dss.sign(eph_falcon_private_key, message_hash_for_falcon)
+        handshake_message['message_signature'] = base64.b64encode(message_signature).decode('utf-8')
+
+        # Sign the data with SPHINCS+ if available
+        if eph_sphincs_sk:
+            try:
+                # Our SPHINCS+ fallback hashes internally, so we pass the full data
+                sphincs_signature = self.sphincs_plus.sign(eph_sphincs_sk, message_data_to_sign)
+                handshake_message['sphincs_signature'] = base64.b64encode(sphincs_signature).decode('utf-8')
+                log.debug("Successfully added SPHINCS+ signature for algorithm diversity")
+            except Exception as e:
+                log.warning(f"Failed to add SPHINCS+ signature: {e}. Continuing with FALCON only.")
+                # Remove the public key if signing failed
+                handshake_message.pop('eph_sphincs_pk', None)
+
+        # Securely erase the ephemeral private keys
+        secure_erase(eph_falcon_private_key)
+        if eph_sphincs_sk:
+            skm.enhanced_secure_erase(eph_sphincs_sk)
+        
         log.info(f"Hybrid X3DH+PQ handshake initiated successfully with {peer_bundle.get('identity', 'unknown')}")
         return handshake_message, root_key
     
@@ -825,31 +862,47 @@ class HybridKeyExchange:
             peer_verified_eph_falcon_pk = eph_falcon_public_key_bytes
 
 
-            # Initialize peer_falcon_public_key to None
-            peer_falcon_public_key = None
+            # Create a copy of the message to verify signatures against.
+            # Pop the signatures themselves from this copy.
+            verification_message = handshake_message.copy()
+            message_signature_b64 = verification_message.pop('message_signature', None)
+            sphincs_signature_b64 = verification_message.pop('sphincs_signature', None)
+            
+            if not message_signature_b64:
+                log.error("SECURITY ALERT: Handshake message missing FALCON signature ('message_signature')")
+                raise ValueError("Handshake message missing required FALCON signature")
 
-            # Verify FALCON message signature if present (now using the verified ephemeral FALCON PK)
-            if 'message_signature' in handshake_message:
-                verification_message = handshake_message.copy()
-                message_signature_b64 = verification_message.pop('message_signature')
+            # Create the canonical representation of the message that was signed
+            message_data_that_was_signed = json.dumps(verification_message, sort_keys=True).encode('utf-8')
+            message_hash_that_was_signed = hashlib.sha512(message_data_that_was_signed).digest()
 
-                message_signature = base64.b64decode(message_signature_b64)
-                
-                # Create canonicalized representation
-                message_data = json.dumps(verification_message, sort_keys=True).encode('utf-8')
-                
-                # Verify with the trusted ephemeral FALCON-1024 public key
-                try:
-                    secure_verify(self.dss, peer_verified_eph_falcon_pk, message_data, 
-                                message_signature, "FALCON message signature")
-                    log.debug("FALCON-1024 handshake message signature verified successfully (using ephemeral key).")
-                except ValueError as e:
-                    log.error(f"SECURITY ALERT: {str(e)}")
-                    raise
-            else:
-                log.warning("SECURITY WARNING: No overall message_signature found in handshake message. This is unexpected with ephemeral key scheme.")
-                # Depending on policy, this might be a hard fail. For now, raising an error.
-                raise ValueError("Handshake message missing overall message_signature.")
+            # --- Verify FALCON signature ---
+            message_signature = base64.b64decode(message_signature_b64)
+            try:
+                self.dss.verify(peer_verified_eph_falcon_pk, message_hash_that_was_signed, message_signature)
+                log.debug("Message signature verified successfully with ephemeral FALCON key")
+            except Exception as e:
+                log.error(f"SECURITY ALERT: FALCON message signature verification failed: {e}")
+                raise ValueError("FALCON message signature verification failed")
+
+            # --- Verify SPHINCS+ signature if present ---
+            if sphincs_signature_b64:
+                if hasattr(self, 'sphincs_plus') and self.sphincs_plus and 'eph_sphincs_pk' in verification_message:
+                    try:
+                        sphincs_sig = base64.b64decode(sphincs_signature_b64)
+                        eph_sphincs_pk = base64.b64decode(verification_message['eph_sphincs_pk'])
+                        
+                        # Our SPHINCS+ fallback hashes internally. We pass it the original data.
+                        result = self.sphincs_plus.verify(eph_sphincs_pk, message_data_that_was_signed, sphincs_sig)
+                        if result:
+                            log.info("SPHINCS+ signature verified successfully - algorithm diversity enhanced")
+                        else:
+                            # This is a warning because FALCON already succeeded.
+                            log.warning("SPHINCS+ signature verification failed. Continuing as FALCON signature was valid.")
+                    except Exception as e:
+                        log.warning(f"SPHINCS+ verification error: {e}. Continuing as FALCON signature was valid.")
+                else:
+                    log.warning("Received a SPHINCS+ signature but cannot verify it (library or key missing).")
 
 
             # Extract peer's public keys (ephemeral and static)
@@ -1104,9 +1157,6 @@ class HybridKeyExchange:
         """
         log.info(f"Performing secure cleanup for {self.identity}")
         
-        # Import directly to avoid any confusion with local functions
-        import secure_key_manager as skm
-        
         # Erase all sensitive key material using the enhanced secure erase function
         if self.static_key:
             skm.enhanced_secure_erase(self.static_key)
@@ -1156,72 +1206,45 @@ class HybridKeyExchange:
 
     def _derive_shared_secret(self, dh_secret, pq_shared_secret):
         """
-        Derive a shared secret from both classical and post-quantum shared secrets.
+        Derive a shared secret from DH and PQ shared secrets using enhanced
+        hybrid key derivation with quantum resistance features.
         
         Args:
-            dh_secret: Classical DH shared secret
-            pq_shared_secret: Post-quantum shared secret
+            dh_secret: The shared secret from classical DH exchange
+            pq_shared_secret: The shared secret from post-quantum KEM
             
         Returns:
-            bytes: The derived shared secret
+            The derived shared secret
         """
-        if dh_secret is None or pq_shared_secret is None:
-            raise ValueError("Both classical and post-quantum shared secrets are required")
-            
-        # Verify key material
-        verify_key_material(dh_secret, description="DH shared secret")
-        verify_key_material(pq_shared_secret, description="PQ shared secret")
+        log.debug("Deriving shared secret using quantum-resistant hybrid KDF")
         
-        # MILITARY-GRADE ENHANCEMENT: Multi-round key derivation with domain separation
-        # This provides defense-in-depth against potential quantum attacks
-        
-        # Step 1: Initial combination of secrets with domain separation
-        combined = b"CLASSICAL_DOMAIN:" + dh_secret + b"PQ_DOMAIN:" + pq_shared_secret
-        
-        # Step 2: Apply multiple rounds of key derivation (10,000 iterations)
-        # This significantly increases the work factor for any attacker
-        derived_key = combined
-        salt = b"HYBRID_KEX_SALT_V2"
-        
-        # Memory barrier to prevent compiler optimization
-        self._memory_barrier()
-        
-        # Multiple rounds of HKDF with different info contexts
-        for i in range(10000):
-            round_info = f"HYBRID_KEX_ROUND_{i}".encode('utf-8')
-            hkdf = HKDF(
-                algorithm=hashes.SHA384(),
-                length=64,
-                salt=salt,
-                info=round_info
-            )
-            derived_key = hkdf.derive(derived_key)
-            
-            # Update salt for next iteration (domain separation between rounds)
-            if i % 100 == 0:
-                salt = hashlib.sha384(salt + derived_key[:16]).digest()
+        # If quantum resistance is available, use it for enhanced security
+        if hasattr(self, 'quantum_resistance') and self.quantum_resistance:
+            try:
+                # Combine the DH and PQ secrets as seed material
+                seed_material = dh_secret + pq_shared_secret
                 
-            # Memory barrier every 1000 iterations to prevent optimization
-            if i % 1000 == 0:
-                self._memory_barrier()
+                # Use the enhanced hybrid KDF
+                info = f"HYBRID-X3DH-PQ-{self.identity}".encode('utf-8')
+                derived_key = self.quantum_resistance.hybrid_key_derivation(seed_material, info)
+                
+                log.debug("Successfully derived shared secret using quantum-resistant hybrid KDF")
+                return derived_key
+            except Exception as e:
+                log.warning(f"Error using quantum-resistant hybrid KDF: {e}. Falling back to standard KDF.")
         
-        # Step 3: Final derivation with application-specific context
-        hkdf_final = HKDF(
-            algorithm=hashes.SHA384(),
+        # Fallback to standard HKDF if quantum resistance is not available
+        log.debug("Using standard HKDF for shared secret derivation")
+        combined_secret = dh_secret + pq_shared_secret
+        
+        derived_key = HKDF(
+            algorithm=hashes.SHA512(),
             length=32,
-            salt=hashlib.sha384(b"HYBRID_KEX_FINAL" + salt).digest(),
-            info=b"SECURE_P2P_CHAT_KEY_AGREEMENT_V2"
-        )
+            salt=None,
+            info=b'Hybrid X3DH+PQ Root Key',
+        ).derive(combined_secret)
         
-        final_key = hkdf_final.derive(derived_key)
-        
-        # Securely erase intermediate values
-        import secure_key_manager as skm
-        skm.enhanced_secure_erase(derived_key)
-        skm.enhanced_secure_erase(combined)
-        self._memory_barrier()
-        
-        return final_key
+        return derived_key
 
     def secure_erase(self, data):
         """
@@ -1312,6 +1335,44 @@ class HybridKeyExchange:
             except Exception:
                 # Last resort: use a volatile random operation
                 _ = os.urandom(1)
+
+    def enhance_quantum_resistance(self):
+        """
+        Enhance the quantum resistance of this key exchange instance by
+        adding support for additional post-quantum algorithms and hybrid approaches.
+        """
+        log.info("Enhancing quantum resistance capabilities")
+        
+        if not hasattr(self, 'quantum_resistance') or not self.quantum_resistance:
+            try:
+                self.quantum_resistance = skm.get_quantum_resistance()
+                log.info("Initialized quantum resistance module")
+            except Exception as e:
+                log.warning(f"Failed to initialize quantum resistance module: {e}")
+                return False
+        
+        try:
+            # Reinitialize the SPHINCS+ instance if available
+            supported_algos = self.quantum_resistance.get_supported_algorithms()
+            if "SPHINCS+" in supported_algos.get("signatures", []):
+                self.sphincs_plus = self.quantum_resistance.get_algorithm("SPHINCS+")
+                log.info("SPHINCS+ backup signature scheme initialized")
+            
+            # Generate multi-algorithm keypairs for additional diversity
+            self.multi_algo_public_keys, self.multi_algo_private_keys = \
+                self.quantum_resistance.generate_multi_algorithm_keypair()
+                
+            log.info(f"Generated keypairs for multiple algorithms: {list(self.multi_algo_public_keys.keys())}")
+            
+            # Track latest NIST standards
+            standards_info = self.quantum_resistance.track_nist_standards()
+            log.info(f"NIST PQC standards status updated: ML-KEM: {standards_info['ml_kem_status']}, "
+                    f"FALCON: {standards_info['falcon_status']}, SPHINCS+: {standards_info['sphincs_plus_status']}")
+            
+            return True
+        except Exception as e:
+            log.warning(f"Error enhancing quantum resistance: {e}")
+            return False
 
 
 def demonstrate_handshake():

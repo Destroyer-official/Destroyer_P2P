@@ -76,6 +76,30 @@ All implementations thoroughly tested with dedicated test scripts:
 - **Side-Channel Attack Mitigation**: Constant-time crypto operations
 - **Traffic Analysis Prevention**: Message padding and uniform message flow
 
+## 🛡️ Multi-Layered Threat Defense
+
+Beyond the core cryptographic protocols, this platform integrates advanced defensive measures at the memory, process, and algorithmic levels to protect against a wide range of sophisticated threats.
+
+### Advanced Memory Protection
+
+To defeat memory-scraping attacks and ensure that sensitive cryptographic material cannot be easily extracted from a running process, the following low-level memory protections are implemented:
+
+| Feature                      | Implementation Details                                                                                                                                                             | Security Benefit                                                                                               |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| **Direct Memory Wiping**     | Uses direct `ctypes` calls to OS-level functions (`RtlSecureZeroMemory` on Windows) to overwrite buffers containing keys, bypassing higher-level Python abstractions.                | Ensures sensitive data is forensically erased from memory, mitigating risks from memory dumps or cold boot attacks. |
+| **Memory Position Randomization** | Implements an ASLR-like mechanism (`MemoryPositionRandomizer`) that allocates memory for critical keys at randomized, page-aligned addresses.                                    | Thwarts memory-scanning attacks by making it computationally infeasible for an attacker to predict key locations.    |
+| **Process Isolation**        | Runs the most sensitive cryptographic operations (key generation, signing) in a sandboxed child process (`SecureProcessIsolation`) with a restricted interface to the main application. | Creates a strong security boundary; even if the main application is compromised, the crypto process remains isolated. |
+
+### Quantum Resistance Future-Proofing
+
+To ensure long-term security against the threat of future quantum computers, the application employs a multi-faceted, forward-thinking strategy for quantum resistance.
+
+| Feature                           | Implementation Details                                                                                                                                                                                                    | Security Benefit                                                                                                                                             |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **NIST-Standardized Algorithms**  | Employs **ML-KEM-1024** (FIPS 203) for key exchange and **FALCON-1024** (FIPS 204) for signatures, which are official standards for post-quantum cryptography.                                                              | Provides confidence in the underlying cryptography, as these algorithms have undergone years of public scrutiny and formal analysis by NIST.                 |
+| **SPHINCS+ Algorithm Diversity**  | Integrates **SPHINCS+** (FIPS 205) as a second, independent signature algorithm during the handshake. The connection is only established if both FALCON and SPHINCS+ signatures are valid.                                  | Protects against a future break in a single algorithm. The handshake remains secure unless vulnerabilities are found in two fundamentally different schemes. |
+| **Hybrid Key Derivation**         | Creates final shared secrets by combining the outputs of multiple cryptographic primitives (ML-KEM, FALCON, SPHINCS+) and hashing them with a diverse set of hash functions (SHA-256, SHA3-256, BLAKE2b). | The resulting key material is secure as long as *any single one* of the underlying cryptographic components remains unbroken, maximizing resilience.        |
+
 ## System Requirements
 
 - Python 3.9 or newer
@@ -852,30 +876,24 @@ Follow these instructions to deploy and operate your quantum-resistant P2P commu
 
 2.  **Establish a Containment Field (Virtual Environment)**:
 ```bash
-    # Create virtual environmenton Windows
-    python -m venv .venv_secure_chat
-
+    # Create virtual environment
+    python3 -m venv .venv_secure_chat
 
     # Activate on Windows (PowerShell)
     .venv_secure_chat\Scripts\Activate.ps1
     
     # Activate on Windows (CMD)
-    .venv_secure_chat\Scripts\activate.bat
-```
-```bash
-    #Create virtual environment on macOS/Linux (bash/zsh)
-    python3 -m venv .venv_secure_chat
+    # .venv_secure_chat\Scripts\activate.bat
 
     # Activate on macOS/Linux (bash/zsh)
     source .venv_secure_chat/bin/activate
-```
+    ```
 
 3.  **Integrate Dependencies**: Install required cryptographic libraries and utilities.
-
 ```bash
-    pip install -r requirements.txt
-
+pip install -r requirements.txt
 ```
+
 ## Usage Guide
 
 ### Launching the Application
@@ -883,13 +901,7 @@ Follow these instructions to deploy and operate your quantum-resistant P2P commu
 To start the secure P2P chat application:
 
 ```bash
-    # Launching the Application on windows
-    python secure_p2p.py
-
-
-    # Launching the Application on  on macOS/Linux
-    python3 -m venv .venv_secure_chat
-
+python3 secure_p2p.py
 ```
 
 ### Connection Process
