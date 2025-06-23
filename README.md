@@ -852,24 +852,30 @@ Follow these instructions to deploy and operate your quantum-resistant P2P commu
 
 2.  **Establish a Containment Field (Virtual Environment)**:
 ```bash
-    # Create virtual environment
-    python3 -m venv .venv_secure_chat
+    # Create virtual environmenton Windows
+    python -m venv .venv_secure_chat
+
 
     # Activate on Windows (PowerShell)
     .venv_secure_chat\Scripts\Activate.ps1
     
     # Activate on Windows (CMD)
-    # .venv_secure_chat\Scripts\activate.bat
+    .venv_secure_chat\Scripts\activate.bat
+```
+```bash
+    #Create virtual environment on macOS/Linux (bash/zsh)
+    python3 -m venv .venv_secure_chat
 
     # Activate on macOS/Linux (bash/zsh)
     source .venv_secure_chat/bin/activate
-    ```
-
-3.  **Integrate Dependencies**: Install required cryptographic libraries and utilities.
-```bash
-pip install -r requirements.txt
 ```
 
+3.  **Integrate Dependencies**: Install required cryptographic libraries and utilities.
+
+```bash
+    pip install -r requirements.txt
+
+```
 ## Usage Guide
 
 ### Launching the Application
@@ -877,7 +883,13 @@ pip install -r requirements.txt
 To start the secure P2P chat application:
 
 ```bash
-python3 secure_p2p.py
+    # Launching the Application on windows
+    python secure_p2p.py
+
+
+    # Launching the Application on  on macOS/Linux
+    python3 -m venv .venv_secure_chat
+
 ```
 
 ### Connection Process
