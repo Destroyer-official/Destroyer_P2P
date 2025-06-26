@@ -871,27 +871,35 @@ Follow these instructions to deploy and operate your quantum-resistant P2P commu
 1.  **Secure the Source Code**: Clone the repository from its official source.
 ```bash
     git clone https://github.com/Destroyer-official/Destroyer_P2P.git 
+
     cd Destroyer_P2P
 ```
 
 2.  **Establish a Containment Field (Virtual Environment)**:
 ```bash
-    # Create virtual environment
+    # Create virtual environment on windows
+    python -m venv .venv_secure_chat
+
+    # Create virtual environment on macOS/Linux
     python3 -m venv .venv_secure_chat
 
     # Activate on Windows (PowerShell)
-    .venv_secure_chat\Scripts\Activate.ps1
+    .venv_secure_chat\Scripts\activate
     
     # Activate on Windows (CMD)
-    # .venv_secure_chat\Scripts\activate.bat
+    .venv_secure_chat\Scripts\activate
 
     # Activate on macOS/Linux (bash/zsh)
     source .venv_secure_chat/bin/activate
-    ```
 
-3.  **Integrate Dependencies**: Install required cryptographic libraries and utilities.
+```
+
+3.  **Integrate Dependencies**:
+
 ```bash
-pip install -r requirements.txt
+# Install required cryptographic libraries and utilities.
+
+  pip install -r requirements.txt
 ```
 
 ## Usage Guide
@@ -901,6 +909,10 @@ pip install -r requirements.txt
 To start the secure P2P chat application:
 
 ```bash
+# On Windows
+python secure_p2p.py
+
+# On macOS/Linux
 python3 secure_p2p.py
 ```
 

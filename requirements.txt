@@ -1,20 +1,20 @@
-cryptography>=3.4.0
+cryptography
 quantcrypt
 # PyNaCl is optional - our cross-platform secure memory implementation provides an alternative
 PyNaCl
-keyring>=23.0.0
-pyzmq>=22.0.0
+keyring
+pyzmq
 WMI; sys_platform == "win32"
-dnspython>=2.3.0
-requests>=2.28.0
+dnspython
+requests
 
 # PKCS#11 is only needed for non-Windows platforms
 python-pkcs11; sys_platform != "win32"
 
 # DANE and Certificate Transparency dependencies
-pyopenssl>=23.0.0
-python-dateutil>=2.8.2
-pyjwt>=2.6.0
+pyopenssl
+python-dateutil
+pyjwt
   
-liboqs-python>=0.8.0
-pyspx>=0.5.2  # For SPHINCS+ quantum-resistant signatures
+liboqs-python
+pyspx; sys_platform != "win32" # For SPHINCS+ quantum-resistant signatures
