@@ -4,7 +4,7 @@ Hybrid Key Exchange Module
 Combines X3DH (Extended Triple Diffie-Hellman) with Post-Quantum Cryptography
 for establishing secure shared secrets resistant to both classical and quantum attacks.
 """ 
- 
+
 import os
 import json 
 import time
@@ -13,11 +13,11 @@ import logging
 import uuid
 import random
 import string
-from typing import Tuple, Dict, Optional, Union
 import hashlib
-import ctypes 
+from typing import Tuple, Dict, Optional, Union
+import math
+import ctypes
 import secure_key_manager as skm
-
 # X25519 for classical key exchange
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives import serialization
@@ -34,6 +34,10 @@ from cryptography.hazmat.primitives import hashes
 import quantcrypt.kem
 import quantcrypt.cipher
 from quantcrypt.dss import FALCON_1024
+from pqc_algorithms import EnhancedFALCON_1024, EnhancedMLKEM_1024
+
+# Defer secure_key_manager import to avoid circular import
+# secure_key_manager will be imported on-demand when needed
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s')
@@ -96,7 +100,6 @@ def verify_key_material(key_material, expected_length=None, description="key mat
     log.debug(f"Verified {description}: length={len(key_material)}, entropy=OK")
     return True
 
-
 def _format_binary(data, max_len=8):
     """
     Format binary data for logging in a readable way.
@@ -115,7 +118,6 @@ def _format_binary(data, max_len=8):
         return f"{b64}... ({len(data)} bytes)"
     return base64.b64encode(data).decode('utf-8')
 
-
 def secure_erase(key_material):
     """
     Securely erase key material from memory.
@@ -126,16 +128,20 @@ def secure_erase(key_material):
     if key_material is None:
         return
     
+    # Import secure_key_manager only when needed to avoid circular imports
+    import secure_key_manager as skm
+    
     # Always use the enhanced_secure_erase from secure_key_manager
     skm.enhanced_secure_erase(key_material)
     log.debug("Securely erased key material using enhanced technique")
     return
 
-
 # Flag indicating we're using the real post-quantum implementation
 HAVE_REAL_PQ = True
 log.info("Using real post-quantum cryptography implementation: ML-KEM-1024 and FALCON-1024")
 
+# Log that we're using enhanced FALCON parameters
+log.info("Activating enhanced FALCON-1024 parameters based on research paper recommendations")
 
 class HybridKeyExchange:
     """
@@ -220,10 +226,16 @@ class HybridKeyExchange:
         self.pending_rotation = False
         
         # Initialize KEM and DSS instances
-        self.kem = quantcrypt.kem.MLKEM_1024()
-        self.dss = FALCON_1024()
+        # Use enhanced ML-KEM implementation with side-channel protections
+        self.kem = EnhancedMLKEM_1024()
+        
+        # Use the enhanced FALCON implementation with improved parameters
+        self.dss = EnhancedFALCON_1024()
+        log.info("Using EnhancedFALCON_1024 with improved parameters for stronger security guarantees")
         
         # Initialize quantum resistance future-proofing module
+        # Import here to avoid circular import
+        import secure_key_manager as skm
         self.quantum_resistance = skm.get_quantum_resistance()
         log.info("Initialized quantum resistance future-proofing module")
         
@@ -784,6 +796,8 @@ class HybridKeyExchange:
         # Securely erase the ephemeral private keys
         secure_erase(eph_falcon_private_key)
         if eph_sphincs_sk:
+            # Import secure_key_manager to use enhanced_secure_erase
+            
             skm.enhanced_secure_erase(eph_sphincs_sk)
         
         log.info(f"Hybrid X3DH+PQ handshake initiated successfully with {peer_bundle.get('identity', 'unknown')}")
@@ -1159,35 +1173,35 @@ class HybridKeyExchange:
         
         # Erase all sensitive key material using the enhanced secure erase function
         if self.static_key:
-            skm.enhanced_secure_erase(self.static_key)
+            secure_erase(self.static_key)
             self.static_key = None
             
         if self.signing_key:
-            skm.enhanced_secure_erase(self.signing_key)
+            secure_erase(self.signing_key)
             self.signing_key = None
             
         if self.signed_prekey:
-            skm.enhanced_secure_erase(self.signed_prekey)
+            secure_erase(self.signed_prekey)
             self.signed_prekey = None
             
         if self.prekey_signature:
-            skm.enhanced_secure_erase(self.prekey_signature)
+            secure_erase(self.prekey_signature)
             self.prekey_signature = None
             
         if self.kem_private_key:
-            skm.enhanced_secure_erase(self.kem_private_key)
+            secure_erase(self.kem_private_key)
             self.kem_private_key = None
             
         if self.kem_public_key:
-            skm.enhanced_secure_erase(self.kem_public_key)
+            secure_erase(self.kem_public_key)
             self.kem_public_key = None
             
         if self.falcon_private_key:
-            skm.enhanced_secure_erase(self.falcon_private_key)
+            secure_erase(self.falcon_private_key)
             self.falcon_private_key = None
             
         if self.falcon_public_key:
-            skm.enhanced_secure_erase(self.falcon_public_key)
+            secure_erase(self.falcon_public_key)
             self.falcon_public_key = None
 
         # Clear nonce tracking
@@ -1245,96 +1259,6 @@ class HybridKeyExchange:
         ).derive(combined_secret)
         
         return derived_key
-
-    def secure_erase(self, data):
-        """
-        Military-grade secure erasure of sensitive key material.
-        
-        Args:
-            data: The data to erase (bytearray or bytes)
-        """
-        if not data:
-            return
-            
-        # Convert to bytearray if it's not already
-        if isinstance(data, bytes):
-            # Can't erase bytes objects directly, log a warning
-            log.warning("Cannot securely erase immutable bytes object - key material may remain in memory")
-            return
-            
-        if not isinstance(data, bytearray):
-            log.warning(f"Cannot securely erase object of type {type(data).__name__}")
-            return
-            
-        size = len(data)
-        
-        # Military-grade secure wiping with multiple patterns
-        # 1. First pattern: All zeros
-        for i in range(size):
-            data[i] = 0
-        
-        # Memory barrier to prevent optimization
-        self._memory_barrier()
-        
-        # 2. Second pattern: All ones
-        for i in range(size):
-            data[i] = 0xFF
-        
-        # Memory barrier to prevent optimization
-        self._memory_barrier()
-        
-        # 3. Third pattern: Alternating bits
-        for i in range(size):
-            data[i] = 0xAA
-        
-        # Memory barrier to prevent optimization
-        self._memory_barrier()
-        
-        # 4. Fourth pattern: Inverse alternating bits
-        for i in range(size):
-            data[i] = 0x55
-        
-        # Memory barrier to prevent optimization
-        self._memory_barrier()
-        
-        # 5. Fifth pattern: Random data
-        try:
-            import platform_hsm_interface as cphs
-            random_data = cphs.get_secure_random(size)
-            for i in range(size):
-                data[i] = random_data[i]
-        except (ImportError, Exception):
-            # Fallback to os.urandom
-            random_data = os.urandom(size)
-            for i in range(size):
-                data[i] = random_data[i]
-        
-        # Memory barrier to prevent optimization
-        self._memory_barrier()
-        
-        # 6. Final pattern: All zeros
-        for i in range(size):
-            data[i] = 0
-            
-        log.debug("Securely erased key material")
-        
-    def _memory_barrier(self):
-        """Create a memory barrier to prevent compiler optimization of secure erasure."""
-        try:
-            # Try to use platform-specific memory barrier
-            import platform_hsm_interface as cphs
-            cphs.get_secure_random(1)  # Just getting 1 byte creates a side effect
-        except (ImportError, Exception):
-            # Fallback implementation
-            try:
-                # Use ctypes to create a memory barrier
-                if hasattr(ctypes, 'memmove'):
-                    # Allocate a small buffer and move it (creates a memory barrier)
-                    buf = ctypes.create_string_buffer(1)
-                    ctypes.memmove(buf, buf, 1)
-            except Exception:
-                # Last resort: use a volatile random operation
-                _ = os.urandom(1)
 
     def enhance_quantum_resistance(self):
         """
@@ -1470,13 +1394,65 @@ def secure_verify(dss, public_key, payload, signature, description="signature"):
         ValueError: If verification fails or throws an exception
     """
     try:
-        if not dss.verify(public_key, payload, signature):
-            log.error(f"SECURITY ALERT: {description} verification failed")
-            raise ValueError(f"Handshake aborted: invalid {description}")
-        return True
+        # Check if inputs are valid
+        if not public_key or not payload or not signature:
+            log.error(f"SECURITY ALERT: {description} verification failed - missing input")
+            raise ValueError(f"Handshake aborted: invalid {description} - missing input")
+            
+        # Handle Enhanced FALCON signature format (EFS-2)
+        if isinstance(signature, bytes) and signature.startswith(b"EFS-"):
+            try:
+                # Extract version and signature data
+                version = int(signature[4:5])
+                stripped_signature = signature[5:]  # Remove the "EFS-2" prefix
+                log.debug(f"Detected enhanced FALCON signature format version {version}")
+                
+                # Handle Enhanced FALCON public key format (EFPK-2)
+                if isinstance(public_key, bytes) and public_key.startswith(b"EFPK-"):
+                    pk_version = int(public_key[5:6])
+                    stripped_public_key = public_key[6:]  # Remove the "EFPK-2" prefix
+                    log.debug(f"Detected enhanced FALCON public key format version {pk_version}")
+                    
+                    # Try verification with stripped values first
+                    if hasattr(dss, 'base_falcon'):
+                        # If this is our enhanced FALCON implementation, try the base implementation
+                        if dss.base_falcon.verify(stripped_public_key, payload, stripped_signature):
+                            log.debug(f"Enhanced FALCON verification succeeded with stripped prefixes")
+                            return True
+            except Exception as e:
+                log.debug(f"Error handling enhanced format: {e}, falling back to standard verification")
+        
+        # Attempt verification with original values
+        if dss.verify(public_key, payload, signature):
+            return True
+            
+        # If verification fails, try with stripped prefixes as a fallback
+        if isinstance(signature, bytes) and signature.startswith(b"EFS-"):
+            stripped_signature = signature[5:]
+            if isinstance(public_key, bytes) and public_key.startswith(b"EFPK-"):
+                stripped_public_key = public_key[6:]
+                
+                # Try direct verification with base implementation if available
+                if hasattr(dss, 'base_falcon'):
+                    if dss.base_falcon.verify(stripped_public_key, payload, stripped_signature):
+                        log.info(f"Direct base FALCON verification succeeded for {description}")
+                        return True
+        
+        # If we reach here, verification failed
+        log.error(f"SECURITY ALERT: {description} verification failed")
+        log.debug(f"Public key length: {len(public_key) if public_key else 'None'}, " +
+                 f"Payload length: {len(payload) if payload else 'None'}, " +
+                 f"Signature length: {len(signature) if signature else 'None'}")
+        
+        raise ValueError(f"Handshake aborted: invalid {description}")
     except Exception as e:
         # Log at most "signature mismatch" (avoid printing raw data)
-        log.error(f"SECURITY ALERT: {description} verification error", exc_info=True)
+        log.error(f"SECURITY ALERT: {description} verification error: {str(e)}")
+        
+        # For debugging purposes, log more details about the error
+        log.debug(f"Error type: {type(e).__name__}, Public key type: {type(public_key).__name__}, " +
+                 f"Payload type: {type(payload).__name__}, Signature type: {type(signature).__name__}")
+        
         raise ValueError(f"Handshake aborted: invalid {description}")
 
 

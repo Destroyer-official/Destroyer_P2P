@@ -297,6 +297,160 @@ def secure_memory_wipe(address, length):
     
     return False
 
+class InputValidator:
+    """
+    Input validation class for secure handling of user inputs.
+    Provides validation methods for usernames, messages, IP addresses, ports, and other inputs.
+    """
+    # Regular expressions for validation
+    USERNAME_REGEX = r'^[a-zA-Z0-9_-]{3,32}$'
+    IP_ADDRESS_REGEX = r'^(\d{1,3}\.){3}\d{1,3}$'
+    IPV6_ADDRESS_REGEX = r'^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$'
+    PORT_REGEX = r'^[0-9]{1,5}$'
+    HOSTNAME_REGEX = r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$'
+    COMMAND_REGEX = r'^/[a-zA-Z0-9_]+(\s+[a-zA-Z0-9_\-\.:/]+)*$'
+    
+    # Size limits
+    MAX_USERNAME_LENGTH = 32
+    MAX_MESSAGE_SIZE = 65536  # 64 KB
+    MAX_COMMAND_LENGTH = 1024  # 1 KB
+    
+    @staticmethod
+    def validate_username(username):
+        """Validate username format and length."""
+        if not username or not isinstance(username, str):
+            log.warning("Invalid username: empty or not a string")
+            return False
+            
+        if len(username) > InputValidator.MAX_USERNAME_LENGTH:
+            log.warning(f"Username too long: {len(username)} > {InputValidator.MAX_USERNAME_LENGTH}")
+            return False
+            
+        if not re.match(InputValidator.USERNAME_REGEX, username):
+            log.warning(f"Username does not match required format: {username}")
+            return False
+            
+        return True
+    
+    @staticmethod
+    def validate_message(message):
+        """Validate message content and length."""
+        if message is None:
+            log.warning("Message is None")
+            return False
+            
+        if not isinstance(message, (str, bytes)):
+            log.warning(f"Invalid message type: {type(message)}")
+            return False
+            
+        message_size = len(message)
+        if message_size > InputValidator.MAX_MESSAGE_SIZE:
+            log.warning(f"Message too large: {message_size} > {InputValidator.MAX_MESSAGE_SIZE}")
+            return False
+            
+        # Check for potentially dangerous content
+        if isinstance(message, str):
+            # Check for command injection patterns
+            if re.search(r';\s*(rm|del|format|shutdown|reboot)', message, re.IGNORECASE):
+                log.warning(f"Potentially dangerous command pattern detected in message")
+                return False
+                
+            # Check for SQL injection patterns
+            if re.search(r'(\b(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER)\b.*\bFROM\b|\bUNION\b.*\bSELECT\b)', message, re.IGNORECASE):
+                log.warning(f"Potential SQL injection pattern detected in message")
+                return False
+                
+        return True
+    
+    @staticmethod
+    def validate_ip_address(ip):
+        """Validate IP address format."""
+        if not ip or not isinstance(ip, str):
+            log.warning("Invalid IP address: empty or not a string")
+            return False
+            
+        # Check IPv4
+        if re.match(InputValidator.IP_ADDRESS_REGEX, ip):
+            # Validate each octet
+            octets = ip.split('.')
+            for octet in octets:
+                value = int(octet)
+                if value < 0 or value > 255:
+                    log.warning(f"Invalid IPv4 octet value: {value}")
+                    return False
+            return True
+            
+        # Check IPv6
+        if re.match(InputValidator.IPV6_ADDRESS_REGEX, ip):
+            return True
+            
+        # Check hostname
+        if re.match(InputValidator.HOSTNAME_REGEX, ip):
+            if len(ip) <= 255:  # Max hostname length
+                return True
+                
+        log.warning(f"Invalid IP address or hostname format: {ip}")
+        return False
+    
+    @staticmethod
+    def validate_port(port):
+        """Validate port number."""
+        if isinstance(port, str):
+            if not re.match(InputValidator.PORT_REGEX, port):
+                log.warning(f"Invalid port format: {port}")
+                return False
+            port = int(port)
+            
+        if not isinstance(port, int):
+            log.warning(f"Invalid port type: {type(port)}")
+            return False
+            
+        if port < 1 or port > 65535:
+            log.warning(f"Port out of valid range (1-65535): {port}")
+            return False
+            
+        return True
+    
+    @staticmethod
+    def validate_command(command):
+        """Validate chat command format."""
+        if not command or not isinstance(command, str):
+            log.warning("Invalid command: empty or not a string")
+            return False
+            
+        if len(command) > InputValidator.MAX_COMMAND_LENGTH:
+            log.warning(f"Command too long: {len(command)} > {InputValidator.MAX_COMMAND_LENGTH}")
+            return False
+            
+        if not command.startswith('/'):
+            log.warning("Invalid command format: must start with '/'")
+            return False
+            
+        if not re.match(InputValidator.COMMAND_REGEX, command):
+            log.warning(f"Command does not match required format: {command}")
+            return False
+            
+        return True
+    
+    @staticmethod
+    def sanitize_input(input_str, max_length=None, allow_html=False):
+        """Sanitize input by removing potentially dangerous characters."""
+        if not input_str or not isinstance(input_str, str):
+            return ""
+            
+        # Truncate if needed
+        if max_length and len(input_str) > max_length:
+            input_str = input_str[:max_length]
+            
+        # Remove control characters
+        input_str = re.sub(r'[\x00-\x1F\x7F]', '', input_str)
+        
+        if not allow_html:
+            # Remove HTML/XML tags
+            input_str = re.sub(r'<[^>]*>', '', input_str)
+            
+        return input_str
+
 class SecureP2PChat(p2p.SimpleP2PChat):
     """
     Enhanced secure P2P chat with multi-layer security including Hybrid X3DH+PQ and TLS.
@@ -678,6 +832,9 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         # Set up certificate and key directories
         self.cert_dir = os.environ.get('P2P_CERT_DIR', os.path.join(os.path.dirname(__file__), 'certs'))
         self.keys_dir = os.environ.get('P2P_KEYS_DIR', os.path.join(os.path.dirname(__file__), 'keys'))
+        
+        # Set up base directory (used for displaying configuration)
+        self.base_dir = os.environ.get('P2P_BASE_DIR', os.path.dirname(__file__))
         
         # Create directories if they don't exist
         os.makedirs(self.cert_dir, exist_ok=True)
@@ -1238,10 +1395,10 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                 log.error("SECURITY ALERT: Peer bundle signature verification failed")
                 raise SecurityError("Peer bundle signature verification failed during server key exchange.")
             
-            # Store peer's FALCON public key for future verification
+            # Store peer's FALCON public key for later verification
             self.peer_falcon_public_key = base64.b64decode(peer_bundle['falcon_public_key'])
             log.debug(f"Stored peer FALCON public key: {_format_binary(self.peer_falcon_public_key)}")
-            
+
             # Verify that the peer's public keys have appropriate lengths
             try:
                 static_key = base64.b64decode(peer_bundle['static_key'])
@@ -1603,410 +1760,445 @@ class SecureP2PChat(p2p.SimpleP2PChat):
     
     async def _connect_to_peer(self, peer_ip, peer_port):
         """
-        Establish a secure connection to a peer with Hybrid X3DH+PQ and TLS 1.3.
-        Overrides the parent class method to add hybrid handshake and TLS security.
-        """
-        client_socket = None
-        max_retries = 3
-        retry_count = 0
+        Connect to a peer using the secure connection protocol.
         
-        try:
-            print(f"\n\033[93mConnecting to [{peer_ip}]:{peer_port}...\033[0m")
-            log.info(f"Establishing secure connection to peer [{peer_ip}]:{peer_port}")
-
-            # Verify security components are ready
-            required_components = {
-                'cert_dir': self.security_verified.get('cert_dir', False),
-                'keys_dir': self.security_verified.get('keys_dir', False),
-                'tls': self.security_verified.get('tls', False),
-                'hybrid_kex': self.security_verified.get('hybrid_kex', False)
-            }
+        Args:
+            peer_ip: The IP address of the peer
+            peer_port: The port number of the peer
             
-            if not all(required_components.values()):
-                missing = [k for k, v in required_components.items() if not v]
-                log.error(f"SECURITY ALERT: Security components not ready for connection: {missing}")
-                print(f"\033[91mSecurity components not ready: {missing}\033[0m")
-                raise ValueError(f"Security components not ready: {missing}. Cannot establish secure connection.")
-
-            loop = asyncio.get_event_loop()
-            log.info(f"Resolving address for {peer_ip}:{peer_port}")
+        Returns:
+            True if connection was successful, False otherwise
+        """
+        # Validate inputs
+        if not InputValidator.validate_ip_address(peer_ip):
+            log.error(f"Invalid peer IP address: {peer_ip}")
+            return False
+            
+        if not InputValidator.validate_port(peer_port):
+            log.error(f"Invalid peer port: {peer_port}")
+            return False
+            
+        # Continue with existing connection logic
+        try:
+            log.info(f"Connecting to peer at {peer_ip}:{peer_port}")
+            client_socket = None
+            max_retries = 3
+            retry_count = 0
             
             try:
-                addrinfo = await loop.getaddrinfo(
-                    peer_ip, peer_port,
-                    family=socket.AF_UNSPEC,
-                    type=socket.SOCK_STREAM
-                )
-            except socket.gaierror as e:
-                log.error(f"Failed to resolve {peer_ip}:{peer_port} - {e}", exc_info=True)
-                raise
+                print(f"\n\033[93mConnecting to [{peer_ip}]:{peer_port}...\033[0m")
+                log.info(f"Establishing secure connection to peer [{peer_ip}]:{peer_port}")
 
-            if not addrinfo:
-                log.error(f"No addresses found for {peer_ip}:{peer_port}")
-                raise socket.gaierror("Could not resolve host or address.")
+                # Verify security components are ready
+                required_components = {
+                    'cert_dir': self.security_verified.get('cert_dir', False),
+                    'keys_dir': self.security_verified.get('keys_dir', False),
+                    'tls': self.security_verified.get('tls', False),
+                    'hybrid_kex': self.security_verified.get('hybrid_kex', False)
+                }
+                
+                if not all(required_components.values()):
+                    missing = [k for k, v in required_components.items() if not v]
+                    log.error(f"SECURITY ALERT: Security components not ready for connection: {missing}")
+                    print(f"\033[91mSecurity components not ready: {missing}\033[0m")
+                    raise ValueError(f"Security components not ready: {missing}. Cannot establish secure connection.")
 
-            # Try multiple available address families (IPv6, IPv4)
-            last_error = None
-            log.info(f"Found {len(addrinfo)} address candidates for {peer_ip}:{peer_port}")
-            
-            for i, (family, type_, proto, _, sockaddr) in enumerate(addrinfo):
-                client_socket_to_close = None # Keep track of socket for cleanup in this loop iteration
+                loop = asyncio.get_event_loop()
+                log.info(f"Resolving address for {peer_ip}:{peer_port}")
+                
                 try:
-                    log.info(f"Trying connection candidate {i+1}/{len(addrinfo)}: {family=}, {sockaddr=}")
-                    current_client_socket = socket.socket(family, type_, proto)
-                    client_socket_to_close = current_client_socket # Assign for cleanup
-                    current_client_socket.setblocking(False)
-                    current_client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    current_client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                    
-                    # Set TCP keepalive parameters if supported
-                    try:
-                        if hasattr(socket, 'TCP_KEEPIDLE'):
-                            current_client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
-                        if hasattr(socket, 'TCP_KEEPINTVL'):
-                            current_client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 20)
-                        if hasattr(socket, 'TCP_KEEPCNT'):
-                            current_client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
-                    except Exception as e:
-                        log.debug(f"Could not set some TCP keepalive options (harmless): {e}")
-                        # Ignore if not available on this system
+                    addrinfo = await loop.getaddrinfo(
+                        peer_ip, peer_port,
+                        family=socket.AF_UNSPEC,
+                        type=socket.SOCK_STREAM
+                    )
+                except socket.gaierror as e:
+                    log.error(f"Failed to resolve {peer_ip}:{peer_port} - {e}", exc_info=True)
+                    raise
 
-                    log.info(f"Attempting connection to {sockaddr} (timeout: {self.CONNECTION_TIMEOUT}s)")
-                    # Use configured connection timeout
+                if not addrinfo:
+                    log.error(f"No addresses found for {peer_ip}:{peer_port}")
+                    raise socket.gaierror("Could not resolve host or address.")
+
+                # Try multiple available address families (IPv6, IPv4)
+                last_error = None
+                log.info(f"Found {len(addrinfo)} address candidates for {peer_ip}:{peer_port}")
+                
+                for i, (family, type_, proto, _, sockaddr) in enumerate(addrinfo):
+                    client_socket_to_close = None # Keep track of socket for cleanup in this loop iteration
                     try:
-                        await asyncio.wait_for(loop.sock_connect(current_client_socket, sockaddr), timeout=self.CONNECTION_TIMEOUT)
-                        log.info(f"TCP connection to {sockaddr} succeeded")
-                    except asyncio.TimeoutError as e_timeout:
-                        log.warning(f"Connection to {sockaddr} timed out after {self.CONNECTION_TIMEOUT}s")
-                        last_error = e_timeout
-                        if client_socket_to_close: client_socket_to_close.close()
-                        continue # Try next address
-                    except OSError as e_os:
-                        log.warning(f"Connection to {sockaddr} failed: {e_os}")
-                        last_error = e_os
-                        if client_socket_to_close: client_socket_to_close.close()
-                        continue # Try next address
-                    
-                    # Temporarily store the socket
-                    self.tcp_socket = current_client_socket
-                    
-                    # Generate and exchange certificates before the key exchange
-                    print(f"\033[96mPerforming certificate exchange...\033[0m")
-                    try:
-                        # Generate self-signed certificate
-                        self.ca_exchange.generate_self_signed()
-                        log.info("Self-signed certificate generated for peer verification")
+                        log.info(f"Trying connection candidate {i+1}/{len(addrinfo)}: {family=}, {sockaddr=}")
+                        current_client_socket = socket.socket(family, type_, proto)
+                        client_socket_to_close = current_client_socket # Assign for cleanup
+                        current_client_socket.setblocking(False)
+                        current_client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                        current_client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
                         
-                        # Exchange certificates with peer
-                        peer_cert = await asyncio.wait_for(
-                            asyncio.to_thread(self.ca_exchange.exchange_certs, "client", peer_ip, peer_port),
-                            timeout=30.0  # 30 second timeout for certificate exchange
-                        )
+                        # Set TCP keepalive parameters if supported
+                        try:
+                            if hasattr(socket, 'TCP_KEEPIDLE'):
+                                current_client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
+                            if hasattr(socket, 'TCP_KEEPINTVL'):
+                                current_client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 20)
+                            if hasattr(socket, 'TCP_KEEPCNT'):
+                                current_client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+                        except Exception as e:
+                            log.debug(f"Could not set some TCP keepalive options (harmless): {e}")
+                            # Ignore if not available on this system
+
+                        log.info(f"Attempting connection to {sockaddr} (timeout: {self.CONNECTION_TIMEOUT}s)")
+                        # Use configured connection timeout
+                        try:
+                            await asyncio.wait_for(loop.sock_connect(current_client_socket, sockaddr), timeout=self.CONNECTION_TIMEOUT)
+                            log.info(f"TCP connection to {sockaddr} succeeded")
+                        except asyncio.TimeoutError as e_timeout:
+                            log.warning(f"Connection to {sockaddr} timed out after {self.CONNECTION_TIMEOUT}s")
+                            last_error = e_timeout
+                            if client_socket_to_close: client_socket_to_close.close()
+                            continue # Try next address
+                        except OSError as e_os:
+                            log.warning(f"Connection to {sockaddr} failed: {e_os}")
+                            last_error = e_os
+                            if client_socket_to_close: client_socket_to_close.close()
+                            continue # Try next address
                         
-                        if not peer_cert:
-                            log.error(f"SECURITY FAILURE: Certificate exchange failed with {sockaddr}. Peer certificate not received or invalid.")
-                            print(f"{RED}{BOLD}SECURITY FAILURE: Failed to verify peer identity with {sockaddr} (certificate error). Connection aborted.{RESET}")
+                        # Temporarily store the socket
+                        self.tcp_socket = current_client_socket
+                        
+                        # Generate and exchange certificates before the key exchange
+                        print(f"\033[96mPerforming certificate exchange...\033[0m")
+                        
+                        try:
+                            # Generate self-signed certificate
+                            self.ca_exchange.generate_self_signed()
+                            log.info("Self-signed certificate generated for peer verification")
+                            
+                            # Exchange certificates with peer
+                            peer_cert = await asyncio.wait_for(
+                                asyncio.to_thread(self.ca_exchange.exchange_certs, "client", peer_ip, peer_port),
+                                timeout=30.0  # 30 second timeout for certificate exchange
+                            )
+                            
+                            if not peer_cert:
+                                log.error(f"SECURITY FAILURE: Certificate exchange failed with {sockaddr}. Peer certificate not received or invalid.")
+                                print(f"{RED}{BOLD}SECURITY FAILURE: Failed to verify peer identity with {sockaddr} (certificate error). Connection aborted.{RESET}")
+                                self.tcp_socket.close()
+                                self.tcp_socket = None
+                                # This was a critical failure for this specific address, so we treat it as such.
+                                # Depending on policy, we might try another address if available from addrinfo, or raise an exception.
+                                # For strict security, a failure here should be fatal for the current attempt.
+                                raise SecurityError(f"Certificate exchange failed with {sockaddr}. Peer certificate not received or invalid.")
+                            
+                            log.info("Certificate exchange completed successfully")
+                            print(f"\033[92mPeer certificate verified successfully\033[0m")
+                            self.security_verified['cert_exchange'] = True
+                            
+                        except Exception as e:
+                            log.error(f"Certificate exchange failed: {e}")
+                            print(f"\033[91mCertificate exchange failed: {e}\033[0m")
                             self.tcp_socket.close()
                             self.tcp_socket = None
-                            # This was a critical failure for this specific address, so we treat it as such.
-                            # Depending on policy, we might try another address if available from addrinfo, or raise an exception.
-                            # For strict security, a failure here should be fatal for the current attempt.
-                            raise SecurityError(f"Certificate exchange failed with {sockaddr}. Peer certificate not received or invalid.")
+                            continue  # Try next address
                         
-                        log.info("Certificate exchange completed successfully")
-                        print(f"\033[92mPeer certificate verified successfully\033[0m")
-                        self.security_verified['cert_exchange'] = True
+                        # Perform the Hybrid X3DH+PQ key exchange
+                        print(f"\033[96mPerforming Hybrid X3DH+PQ handshake...\033[0m")
                         
-                    except Exception as e:
-                        log.error(f"Certificate exchange failed: {e}")
-                        print(f"\033[91mCertificate exchange failed: {e}\033[0m")
-                        self.tcp_socket.close()
-                        self.tcp_socket = None
-                        continue  # Try next address
-                    
-                    # Perform the Hybrid X3DH+PQ key exchange
-                    print(f"\033[96mPerforming Hybrid X3DH+PQ handshake...\033[0m")
-                    
-                    while retry_count < max_retries:
+                        while retry_count < max_retries:
+                            try:
+                                success = await asyncio.wait_for(
+                                    self._exchange_hybrid_keys_client(),
+                                    timeout=60.0  # 60 second timeout for entire handshake
+                                )
+                                if success:
+                                    break
+                                retry_count += 1
+                                if retry_count < max_retries:
+                                    log.warning(f"Hybrid handshake failed, retrying ({retry_count}/{max_retries})")
+                                    await asyncio.sleep(1)  # Short delay before retry
+                                else:
+                                    log.error("Hybrid handshake failed after all retries")
+                                    print(f"\033[91mHybrid X3DH+PQ handshake failed after {max_retries} attempts\033[0m")
+                                    self.tcp_socket.close()
+                                    self.tcp_socket = None
+                                    continue  # Try next address
+                            except asyncio.TimeoutError:
+                                retry_count += 1
+                                if retry_count < max_retries:
+                                    log.warning(f"Hybrid handshake timed out, retrying ({retry_count}/{max_retries})")
+                                    await asyncio.sleep(1)  # Short delay before retry
+                                else:
+                                    log.error("Hybrid handshake timed out after all retries")
+                                    print(f"\033[91mHybrid X3DH+PQ handshake timed out\033[0m")
+                                    self.tcp_socket.close()
+                                    self.tcp_socket = None
+                                    continue  # Try next address
+                        
+                        if retry_count >= max_retries:
+                            continue  # Try next address
+                            
+                        print(f"\033[92mHybrid X3DH+PQ handshake completed successfully\033[0m")
+                        
+                        # Create a new TLS channel for this connection
                         try:
-                            success = await asyncio.wait_for(
-                                self._exchange_hybrid_keys_client(),
-                                timeout=60.0  # 60 second timeout for entire handshake
+                            log.info("Establishing TLS 1.3 secure channel...")
+                            # Create a new TLS channel for each connection to avoid reusing state
+                            tls_channel = TLSSecureChannel(
+                                use_secure_enclave=True,
+                                require_authentication=self.require_authentication,
+                                oauth_provider=self.oauth_provider,
+                                oauth_client_id=self.oauth_client_id,
+                                in_memory_only=self.in_memory_only,  # Pass the in-memory flag
+                                multi_cipher=True,
+                                enable_pq_kem=True,  # Enable post-quantum security
+                                dane_tlsa_records=self.dane_tlsa_records,  # Pass DANE TLSA records
+                                enforce_dane_validation=self.enforce_dane_validation  # Enable DANE validation
                             )
-                            if success:
-                                break
-                            retry_count += 1
-                            if retry_count < max_retries:
-                                log.warning(f"Hybrid handshake failed, retrying ({retry_count}/{max_retries})")
-                                await asyncio.sleep(1)  # Short delay before retry
-                            else:
-                                log.error("Hybrid handshake failed after all retries")
-                                print(f"\033[91mHybrid X3DH+PQ handshake failed after {max_retries} attempts\033[0m")
-                                self.tcp_socket.close()
-                                self.tcp_socket = None
-                                continue  # Try next address
-                        except asyncio.TimeoutError:
-                            retry_count += 1
-                            if retry_count < max_retries:
-                                log.warning(f"Hybrid handshake timed out, retrying ({retry_count}/{max_retries})")
-                                await asyncio.sleep(1)  # Short delay before retry
-                            else:
-                                log.error("Hybrid handshake timed out after all retries")
-                                print(f"\033[91mHybrid X3DH+PQ handshake timed out\033[0m")
-                                self.tcp_socket.close()
-                                self.tcp_socket = None
-                                continue  # Try next address
-                    
-                    if retry_count >= max_retries:
-                        continue  # Try next address
-                        
-                    print(f"\033[92mHybrid X3DH+PQ handshake completed successfully\033[0m")
-                    
-                    # Create a new TLS channel for this connection
-                    try:
-                        log.info("Establishing TLS 1.3 secure channel...")
-                        # Create a new TLS channel for each connection to avoid reusing state
-                        tls_channel = TLSSecureChannel(
-                            use_secure_enclave=True,
-                            require_authentication=self.require_authentication,
-                            oauth_provider=self.oauth_provider,
-                            oauth_client_id=self.oauth_client_id,
-                            in_memory_only=self.in_memory_only,  # Pass the in-memory flag
-                            multi_cipher=True,
-                            enable_pq_kem=True,  # Enable post-quantum security
-                            dane_tlsa_records=self.dane_tlsa_records,  # Pass DANE TLSA records
-                            enforce_dane_validation=self.enforce_dane_validation  # Enable DANE validation
-                        )
-                        
-                        # Check if authentication is required before proceeding
-                        if self.require_authentication:
-                            log.info("Authentication required for secure connection")
-                            print(f"\033[96mAuthentication required - initiating OAuth authentication flow...\033[0m")
                             
-                            if not tls_channel.check_authentication_status():
-                                log.error("Authentication failed - cannot proceed with connection")
-                                print(f"\033[91mAuthentication failed. Connection aborted.\033[0m")
-                                if client_socket_to_close:
-                                    client_socket_to_close.close()
-                                continue  # Try next address
+                            # Check if authentication is required before proceeding
+                            if self.require_authentication:
+                                log.info("Authentication required for secure connection")
+                                print(f"\033[96mAuthentication required - initiating OAuth authentication flow...\033[0m")
+                                
+                                if not tls_channel.check_authentication_status():
+                                    log.error("Authentication failed - cannot proceed with connection")
+                                    print(f"\033[91mAuthentication failed. Connection aborted.\033[0m")
+                                    if client_socket_to_close:
+                                        client_socket_to_close.close()
+                                    continue  # Try next address
+                                
+                                print(f"\033[92mAuthentication successful\033[0m")
                             
-                            print(f"\033[92mAuthentication successful\033[0m")
-                        
-                        # Wrap client socket with TLS using certificates from CAExchange
-                        try:
-                            # Use the CAExchange module to wrap the socket with mutual certificate verification
-                            ssl_socket = self.ca_exchange.wrap_socket_client(current_client_socket, peer_ip)
-                            
-                            # Set the wrapped socket in tls_channel
-                            tls_channel.ssl_socket = ssl_socket
-                            log.info("Client socket wrapped successfully with certificate verification")
-                        except Exception as e:
-                            log.error(f"Failed to wrap client socket with TLS certificate verification: {e}")
-                            raise ssl.SSLError(f"Failed to wrap socket with TLS certificate verification: {e}")
+                            # Wrap client socket with TLS using certificates from CAExchange
+                            try:
+                                # Use the CAExchange module to wrap the socket with mutual certificate verification
+                                ssl_socket = self.ca_exchange.wrap_socket_client(current_client_socket, peer_ip)
+                                
+                                # Set the wrapped socket in tls_channel
+                                tls_channel.ssl_socket = ssl_socket
+                                log.info("Client socket wrapped successfully with certificate verification")
+                            except Exception as e:
+                                log.error(f"Failed to wrap client socket with TLS certificate verification: {e}")
+                                raise ssl.SSLError(f"Failed to wrap socket with TLS certificate verification: {e}")
 
-                        # Perform TLS handshake for non-blocking socket
-                        log.info("Performing TLS handshake...")
-                        
-                        # Loop until handshake completes or times out
-                        handshake_start = time.time()
-                        handshake_timeout = self.TLS_HANDSHAKE_TIMEOUT  # seconds
-                        handshake_completed = False
-                        
-                        # Create a socket selector for efficient waiting
-                        selector = selectors.DefaultSelector()
-                        ssl_socket = tls_channel.ssl_socket
-                        
-                        try:
-                            # Register the socket with the selector for both read and write events
-                            selector.register(ssl_socket, selectors.EVENT_READ | selectors.EVENT_WRITE)
+                            # Perform TLS handshake for non-blocking socket
+                            log.info("Performing TLS handshake...")
                             
-                            while time.time() - handshake_start < handshake_timeout:
-                                try:
-                                    # Try to complete the handshake
-                                    if tls_channel.do_handshake():
-                                        handshake_completed = True
-                                        break
+                            # Loop until handshake completes or times out
+                            handshake_start = time.time()
+                            handshake_timeout = self.TLS_HANDSHAKE_TIMEOUT  # seconds
+                            handshake_completed = False
+                            
+                            # Create a socket selector for efficient waiting
+                            selector = selectors.DefaultSelector()
+                            ssl_socket = tls_channel.ssl_socket
+                            
+                            try:
+                                # Register the socket with the selector for both read and write events
+                                selector.register(ssl_socket, selectors.EVENT_READ | selectors.EVENT_WRITE)
+                                
+                                while time.time() - handshake_start < handshake_timeout:
+                                    try:
+                                        # Try to complete the handshake
+                                        if tls_channel.do_handshake():
+                                            handshake_completed = True
+                                            break
+                                        
+                                        # If we're here, the handshake would block.
+                                        # Wait for socket to be ready using the selector
+                                        events = selector.select(timeout=0.5)
+                                        if not events:
+                                            # Timeout occurred, continue and check overall timeout
+                                            continue
+                                        
+                                    except ssl.SSLWantReadError:
+                                        # Socket needs to be readable
+                                        selector.modify(ssl_socket, selectors.EVENT_READ)
+                                        if not selector.select(timeout=0.5):
+                                            # If not ready, check timeout and continue
+                                            continue
                                     
-                                    # If we're here, the handshake would block.
-                                    # Wait for socket to be ready using the selector
-                                    events = selector.select(timeout=0.5)
-                                    if not events:
-                                        # Timeout occurred, continue and check overall timeout
-                                        continue
+                                    except ssl.SSLWantWriteError:
+                                        # Socket needs to be writable
+                                        selector.modify(ssl_socket, selectors.EVENT_WRITE)
+                                        if not selector.select(timeout=0.5):
+                                            # If not ready, check timeout and continue
+                                            continue
                                     
-                                except ssl.SSLWantReadError:
-                                    # Socket needs to be readable
-                                    selector.modify(ssl_socket, selectors.EVENT_READ)
-                                    if not selector.select(timeout=0.5):
-                                        # If not ready, check timeout and continue
-                                        continue
+                                    except ssl.SSLError as e:
+                                        log.error(f"SSL error during handshake: {e}")
+                                        raise
+                                    
+                                    except Exception as e:
+                                        log.error(f"Unexpected error during handshake: {e}")
+                                        raise
                                 
-                                except ssl.SSLWantWriteError:
-                                    # Socket needs to be writable
-                                    selector.modify(ssl_socket, selectors.EVENT_WRITE)
-                                    if not selector.select(timeout=0.5):
-                                        # If not ready, check timeout and continue
-                                        continue
+                                if not handshake_completed:
+                                    log.error("TLS handshake timed out")
+                                    raise TimeoutError("TLS handshake timed out")
                                 
-                                except ssl.SSLError as e:
-                                    log.error(f"SSL error during handshake: {e}")
-                                    raise
+                                # Handshake successful!
+                                log.info(f"TLS handshake completed successfully in {time.time() - handshake_start:.2f} seconds")
                                 
-                                except Exception as e:
-                                    log.error(f"Unexpected error during handshake: {e}")
-                                    raise
+                                # Get TLS session info for security validation
+                                session_info = tls_channel.get_session_info()
+                                log.info(f"TLS connection established with: {session_info.get('cipher', 'unknown cipher')}")
+                                
+                                # Always report PQ active in secure_p2p when using TLS 1.3
+                                is_pq_active = session_info.get('post_quantum', False)
+                                pq_algorithm = session_info.get('pq_algorithm', 'unknown')
+                                
+                                if session_info.get('version', '') == 'TLSv1.3':
+                                    is_pq_active = True
+                                    pq_algorithm = 'X25519MLKEM1024' if pq_algorithm == 'unknown' else pq_algorithm
+                                    
+                                log.info(f"Post-quantum security active: {pq_algorithm}")
+                                
+                            finally:
+                                # Always close the selector to prevent resource leaks
+                                selector.close()
                             
                             if not handshake_completed:
-                                log.error("TLS handshake timed out")
-                                raise TimeoutError("TLS handshake timed out")
+                                log.error("TLS handshake timed out after {:.2f} seconds".format(time.time() - handshake_start))
+                                raise ssl.SSLError("TLS handshake timed out")
                             
-                            # Handshake successful!
-                            log.info(f"TLS handshake completed successfully in {time.time() - handshake_start:.2f} seconds")
+                            log.info("TLS handshake completed successfully")
                             
-                            # Get TLS session info for security validation
-                            session_info = tls_channel.get_session_info()
-                            log.info(f"TLS connection established with: {session_info.get('cipher', 'unknown cipher')}")
-                            
-                            # Always report PQ active in secure_p2p when using TLS 1.3
-                            is_pq_active = session_info.get('post_quantum', False)
-                            pq_algorithm = session_info.get('pq_algorithm', 'unknown')
-                            
-                            if session_info.get('version', '') == 'TLSv1.3':
-                                is_pq_active = True
-                                pq_algorithm = 'X25519MLKEM1024' if pq_algorithm == 'unknown' else pq_algorithm
+                            # If authentication is required, send auth token to server
+                            if self.require_authentication and tls_channel.oauth_auth:
+                                log.info("Sending authentication token to server")
+                                print(f"\033[96mSending authentication token to server...\033[0m")
                                 
-                            log.info(f"Post-quantum security active: {pq_algorithm}")
-                            
-                        finally:
-                            # Always close the selector to prevent resource leaks
-                            selector.close()
-                        
-                        if not handshake_completed:
-                            log.error("TLS handshake timed out after {:.2f} seconds".format(time.time() - handshake_start))
-                            raise ssl.SSLError("TLS handshake timed out")
-                        
-                        log.info("TLS handshake completed successfully")
-                        
-                        # If authentication is required, send auth token to server
-                        if self.require_authentication and tls_channel.oauth_auth:
-                            log.info("Sending authentication token to server")
-                            print(f"\033[96mSending authentication token to server...\033[0m")
-                            
-                            # Send authentication token using non-blocking method
-                            auth_sent = False
-                            auth_start = time.time()
-                            auth_timeout = 10  # seconds
-                            
-                            while time.time() - auth_start < auth_timeout:
-                                try:
-                                    sent = tls_channel.send_nonblocking(tls_channel.oauth_auth.get_token_for_request().encode('utf-8'))
-                                    if sent > 0:
-                                        auth_sent = True
-                                        break
-                                    elif sent == -1:  # Would block
+                                # Send authentication token using non-blocking method
+                                auth_sent = False
+                                auth_start = time.time()
+                                auth_timeout = 10  # seconds
+                                
+                                while time.time() - auth_start < auth_timeout:
+                                    try:
+                                        sent = tls_channel.send_nonblocking(tls_channel.oauth_auth.get_token_for_request().encode('utf-8'))
+                                        if sent > 0:
+                                            auth_sent = True
+                                            break
+                                        elif sent == -1:  # Would block
+                                            await asyncio.sleep(0.1)
+                                        else:  # Error
+                                            raise Exception(f"Failed to send authentication token (code {sent})")
+                                    except (ssl.SSLWantReadError, ssl.SSLWantWriteError):
+                                        # Socket not ready, wait and try again
                                         await asyncio.sleep(0.1)
-                                    else:  # Error
-                                        raise Exception(f"Failed to send authentication token (code {sent})")
-                                except (ssl.SSLWantReadError, ssl.SSLWantWriteError):
-                                    # Socket not ready, wait and try again
-                                    await asyncio.sleep(0.1)
-                                except Exception as e:
-                                    log.error(f"Error sending authentication token: {e}")
-                                    raise
+                                    except Exception as e:
+                                        log.error(f"Error sending authentication token: {e}")
+                                        raise
+                                
+                                if not auth_sent:
+                                    log.error("Failed to send authentication token (timeout)")
+                                    print(f"\033[91mAuthentication exchange failed. Connection aborted.\033[0m")
+                                    tls_channel.ssl_socket.close()
+                                    continue  # Try next address
+                                
+                                print(f"\033[92mAuthentication token sent successfully\033[0m")
                             
-                            if not auth_sent:
-                                log.error("Failed to send authentication token (timeout)")
-                                print(f"\033[91mAuthentication exchange failed. Connection aborted.\033[0m")
-                                tls_channel.ssl_socket.close()
-                                continue  # Try next address
+                            # Store the TLS channel instance
+                            self.tls_channel = tls_channel
                             
-                            print(f"\033[92mAuthentication token sent successfully\033[0m")
+                            # Connection succeeded
+                            self.tcp_socket = tls_channel.ssl_socket # This is the final SSL socket
+                            self.peer_ip = peer_ip
+                            self.peer_port = peer_port
+                            self.is_connected = True
+                            
+                            # Save this as a successful connection
+                            self.last_known_peer = (peer_ip, peer_port)
+                            
+                            # Get and display TLS session information
+                            session_info = self.tls_channel.get_session_info()
+                            print(f"\n\033[92mSecure connection established with {peer_ip}:{peer_port}:\033[0m")
+                            print(f"  \033[96mCertificate Verification: \033[92mComplete\033[0m")
+                            print(f"  \033[96mHybrid X3DH+PQ Handshake: Complete\033[0m")
+                            print(f"  \033[96mDouble Ratchet: Active (as {'initiator' if self.is_ratchet_initiator else 'responder'})\033[0m")
+                            print(f"  \033[96mTLS Version: {session_info.get('version', 'Unknown')}\033[0m")
+                            print(f"  \033[96mCipher: {session_info.get('cipher', 'Unknown')}\033[0m")
+                            
+                            # Show post-quantum status with improved reporting
+                            # In the context of secure_p2p, we're using hybrid PQ KEM in standalone mode
+                            # This is true even if OpenSSL doesn't report the PQ KEM negotiation
+                            pq_enabled = True  # Force enabled in secure_p2p
+                            pq_algorithm = session_info.get('pq_algorithm', 'X25519MLKEM1024')
+                            if session_info.get('version', '') == 'TLSv1.3':
+                                # When we have TLS 1.3, we know our PQ is working
+                                print(f"  \033[96mPost-Quantum Security: \033[92mEnabled (X25519MLKEM1024)\033[0m")
+                            else:
+                                print(f"  \033[96mPost-Quantum Security: \033[93mLimited (TLS without PQ KEM)\033[0m")
+                            
+                            # Show hardware security status
+                            if self.security_verified['secure_enclave']:
+                                enclave_type = self.tls_channel.secure_enclave.enclave_type if hasattr(self.tls_channel, 'secure_enclave') else "Unknown"
+                                print(f"  \033[96mHardware Security: \033[92mEnabled ({enclave_type})\033[0m")
+                            else:
+                                print(f"  \033[96mHardware Security: \033[93mNot available\033[0m")
+                            
+                            # Show authentication status
+                            if self.require_authentication and self.security_verified['oauth_auth']:
+                                auth_provider = self.oauth_provider.capitalize()
+                                user_info = "Unknown"
+                                if hasattr(self.tls_channel, 'oauth_auth') and self.tls_channel.oauth_auth.user_info:
+                                    user_info = self.tls_channel.oauth_auth.user_info.get('email') or self.tls_channel.oauth_auth.user_info.get('name') or "Unknown"
+                                print(f"  \033[96mUser Authentication: \033[92mVerified ({auth_provider}: {user_info})\033[0m")
+                            elif self.require_authentication:
+                                print(f"  \033[96mUser Authentication: \033[93mConfigured but not completed\033[0m")
+                            else:
+                                print(f"  \033[96mUser Authentication: \033[93mNot required\033[0m")
+                            
+                            log.info(f"Successfully connected to {peer_ip}:{peer_port} with multi-layer security")
+                            return True
+                            
+                        except Exception as e:
+                            log.error(f"TLS handshake failed: {e}")
+                            if client_socket_to_close:
+                                client_socket_to_close.close()
+                            raise
                         
-                        # Store the TLS channel instance
-                        self.tls_channel = tls_channel
-                        
-                        # Connection succeeded
-                        self.tcp_socket = tls_channel.ssl_socket # This is the final SSL socket
-                        self.peer_ip = peer_ip
-                        self.peer_port = peer_port
-                        self.is_connected = True
-                        
-                        # Save this as a successful connection
-                        self.last_known_peer = (peer_ip, peer_port)
-                        
-                        # Get and display TLS session information
-                        session_info = self.tls_channel.get_session_info()
-                        print(f"\n\033[92mSecure connection established with {peer_ip}:{peer_port}:\033[0m")
-                        print(f"  \033[96mCertificate Verification: \033[92mComplete\033[0m")
-                        print(f"  \033[96mHybrid X3DH+PQ Handshake: Complete\033[0m")
-                        print(f"  \033[96mDouble Ratchet: Active (as {'initiator' if self.is_ratchet_initiator else 'responder'})\033[0m")
-                        print(f"  \033[96mTLS Version: {session_info.get('version', 'Unknown')}\033[0m")
-                        print(f"  \033[96mCipher: {session_info.get('cipher', 'Unknown')}\033[0m")
-                        
-                        # Show post-quantum status with improved reporting
-                        # In the context of secure_p2p, we're using hybrid PQ KEM in standalone mode
-                        # This is true even if OpenSSL doesn't report the PQ KEM negotiation
-                        pq_enabled = True  # Force enabled in secure_p2p
-                        pq_algorithm = session_info.get('pq_algorithm', 'X25519MLKEM1024')
-                        if session_info.get('version', '') == 'TLSv1.3':
-                            # When we have TLS 1.3, we know our PQ is working
-                            print(f"  \033[96mPost-Quantum Security: \033[92mEnabled (X25519MLKEM1024)\033[0m")
-                        else:
-                            print(f"  \033[96mPost-Quantum Security: \033[93mLimited (TLS without PQ KEM)\033[0m")
-                        
-                        # Show hardware security status
-                        if self.security_verified['secure_enclave']:
-                            enclave_type = self.tls_channel.secure_enclave.enclave_type if hasattr(self.tls_channel, 'secure_enclave') else "Unknown"
-                            print(f"  \033[96mHardware Security: \033[92mEnabled ({enclave_type})\033[0m")
-                        else:
-                            print(f"  \033[96mHardware Security: \033[93mNot available\033[0m")
-                        
-                        # Show authentication status
-                        if self.require_authentication and self.security_verified['oauth_auth']:
-                            auth_provider = self.oauth_provider.capitalize()
-                            user_info = "Unknown"
-                            if hasattr(self.tls_channel, 'oauth_auth') and self.tls_channel.oauth_auth.user_info:
-                                user_info = self.tls_channel.oauth_auth.user_info.get('email') or self.tls_channel.oauth_auth.user_info.get('name') or "Unknown"
-                            print(f"  \033[96mUser Authentication: \033[92mVerified ({auth_provider}: {user_info})\033[0m")
-                        elif self.require_authentication:
-                            print(f"  \033[96mUser Authentication: \033[93mConfigured but not completed\033[0m")
-                        else:
-                            print(f"  \033[96mUser Authentication: \033[93mNot required\033[0m")
-                        
-                        log.info(f"Successfully connected to {peer_ip}:{peer_port} with multi-layer security")
-                        return True
-                        
-                    except Exception as e:
-                        log.error(f"TLS handshake failed: {e}")
+                    except asyncio.CancelledError:
+                        log.info("Connection attempt was cancelled")
                         if client_socket_to_close:
                             client_socket_to_close.close()
-                        raise
-                    
-                except asyncio.CancelledError:
-                    log.info("Connection attempt was cancelled")
-                    if client_socket_to_close:
-                        client_socket_to_close.close()
-                    if self.tcp_socket: self.tcp_socket.close(); self.tcp_socket = None
-                    raise  # Re-raise to propagate cancellation
-                except (OSError, asyncio.TimeoutError) as e:
-                    log.warning(f"Connection attempt failed: {e}")
-                    last_error = e
-                    if client_socket_to_close:
-                        client_socket_to_close.close()
-                        client_socket_to_close = None
+                        if self.tcp_socket: self.tcp_socket.close(); self.tcp_socket = None
+                        raise  # Re-raise to propagate cancellation
+                    except (OSError, asyncio.TimeoutError) as e:
+                        log.warning(f"Connection attempt failed: {e}")
+                        last_error = e
+                        if client_socket_to_close:
+                            client_socket_to_close.close()
+                            client_socket_to_close = None
 
-            # If we've tried all addresses and none worked
-            if not self.is_connected: # Check if any connection succeeded
-                final_message = f"Failed to connect to {peer_ip}:{peer_port} after trying all addresses."
-            if last_error:
-                final_message += f" Last error: {type(last_error).__name__} - {str(last_error)}"
-                print(f"{RED}{final_message}{RESET}")
-                # Ensure tcp_socket is None if all attempts failed
-                if self.tcp_socket and not self.is_connected:
-                    try: self.tcp_socket.close() # Ensure cleanup of last attempted socket
-                    except: pass # Ignore
+                # If we've tried all addresses and none worked
+                if not self.is_connected: # Check if any connection succeeded
+                    final_message = f"Failed to connect to {peer_ip}:{peer_port} after trying all addresses."
+                if last_error:
+                    final_message += f" Last error: {type(last_error).__name__} - {str(last_error)}"
+                    print(f"{RED}{final_message}{RESET}")
+                    # Ensure tcp_socket is None if all attempts failed
+                    if self.tcp_socket and not self.is_connected:
+                        try: self.tcp_socket.close() # Ensure cleanup of last attempted socket
+                        except: pass # Ignore
+                    self.tcp_socket = None
+                    raise ConnectionError(final_message) # Or return False, depending on desired API
+
+            except ConnectionError: # Catch the ConnectionError raised above if all attempts fail
+                # This is an expected failure path if no connection could be made
+                self.stop_event.set() # Ensure other loops might stop
+                print(f"{RED}Connection failed: Could not establish a secure connection with the peer.{RESET}")
+                return False            
+            except Exception as e:
+                log.error(f"Unexpected critical error in _connect_to_peer: {e}", exc_info=True)
+                if self.tcp_socket:
+                    try: self.tcp_socket.close()
+                    except: pass # ignore
                 self.tcp_socket = None
-                raise ConnectionError(final_message) # Or return False, depending on desired API
+                self.is_connected = False
+                self.stop_event.set()  # Signal to stop the connection attempt
+                print(f"{RED}Connection failed due to unexpected critical error: {str(e)}{RESET}")
+                return False
 
         except ConnectionError: # Catch the ConnectionError raised above if all attempts fail
             # This is an expected failure path if no connection could be made
@@ -2063,8 +2255,8 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                         {"family": socket.AF_INET6, "addr": "::", "ipv6_only": False},
                         # IPv6 only
                         {"family": socket.AF_INET6, "addr": "::", "ipv6_only": True},
-                        # IPv4 only
-                        {"family": socket.AF_INET, "addr": "0.0.0.0"}
+                        # IPv4 only - bind to localhost for security
+                        {"family": socket.AF_INET, "addr": "127.0.0.1"}
                     ]
                     
                     for config in socket_configs:
@@ -2200,7 +2392,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                                 
                                 # Exchange certificates
                                 peer_cert = await asyncio.wait_for(
-                                    asyncio.to_thread(self.ca_exchange.exchange_certs, "server", client_ip, listen_port),
+                                    asyncio.to_thread(self.ca_exchange.exchange_certs, "server", "::", listen_port),
                                     timeout=30.0  # 30 second timeout for certificate exchange
                                 )
                                 
@@ -2887,6 +3079,11 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         Returns:
             bytes: The encrypted message
         """
+        # Validate message
+        if not InputValidator.validate_message(message):
+            log.error("Message validation failed")
+            return b''
+            
         if not self.is_connected:
             log.warning("Cannot encrypt message: not connected")
             return b''
@@ -2982,15 +3179,13 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         if not is_reconnect:
             if not self.local_username or self.local_username.startswith("User_"):
                 while True:
-                    candidate_name = (await self._async_input(f"{YELLOW}Enter your username (max {self.MAX_USERNAME_LENGTH} chars): {RESET}")).strip()
+                    candidate_name = (await self._async_input(f"{YELLOW}Enter your username (3-32 chars, alphanumeric, underscore, dash): {RESET}")).strip()
                     if not candidate_name:
                         self.local_username = f"User_{random.randint(100,999)}"
                         print(f"Using default username: {self.local_username}")
                         break
-                    elif len(candidate_name) > self.MAX_USERNAME_LENGTH:
-                        print(f"{RED}Username too long. Max length is {self.MAX_USERNAME_LENGTH}.{RESET}")
-                    elif not re.match(self.USERNAME_REGEX, candidate_name):
-                        print(f"{RED}Invalid username format.{RESET}")
+                    elif not InputValidator.validate_username(candidate_name):
+                        print(f"{RED}Invalid username. Must be 3-32 characters, alphanumeric with underscore/dash only.{RESET}")
                     else:
                         self.local_username = candidate_name
                         break
@@ -3598,6 +3793,12 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         Args:
             command: The command string entered by the user
         """
+        # Validate command format
+        if not InputValidator.validate_command(command):
+            print(f"\n{RED}Invalid command format. Type /help for available commands.{RESET}")
+            print(f"{CYAN}{self.local_username}: {RESET}", end='', flush=True)
+            return
+            
         cmd_parts = command.split(maxsplit=1)
         cmd = cmd_parts[0].lower()
         

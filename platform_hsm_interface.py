@@ -866,10 +866,12 @@ def get_hardware_unique_id() -> bytes:
             ps_cmd = [
                 "powershell",
                 "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
                 "-Command",
                 "Get-WmiObject -Class Win32_ComputerSystemProduct | Select-Object -ExpandProperty UUID",
             ]
-            output = subprocess.check_output(ps_cmd, stderr=subprocess.DEVNULL, text=True)
+            # Use list arguments for security, with additional hardening
+            output = subprocess.check_output(ps_cmd, stderr=subprocess.DEVNULL, text=True, shell=False)
             uuid_str = output.strip()
             if uuid_str:
                 return hashlib.sha256(uuid_str.encode()).digest()[:16]
@@ -898,8 +900,9 @@ def get_hardware_unique_id() -> bytes:
     # macOS: IOPlatformUUID via ioreg
     if IS_DARWIN:
         try:
+            # Use list arguments with explicit shell=False for security
             output = subprocess.check_output(
-                ["ioreg", "-d2", "-c", "IOPlatformExpertDevice"], stderr=subprocess.DEVNULL
+                ["ioreg", "-d2", "-c", "IOPlatformExpertDevice"], stderr=subprocess.DEVNULL, shell=False
             )
             for line in output.decode().splitlines():
                 line = line.strip()
@@ -1558,9 +1561,10 @@ def attest_device() -> dict:
     # macOS: fallback to SIP status (limited attestation)
     if IS_DARWIN:
         try:
+            # Use list arguments with explicit shell=False for security
             sip_status = subprocess.check_output([
                 "csrutil", "status"
-            ], stderr=subprocess.DEVNULL).decode().strip()
+            ], stderr=subprocess.DEVNULL, shell=False).decode().strip()
             attestation_info["checks"].append({
                 "type": "SIP_Status",
                 "status": "Found",

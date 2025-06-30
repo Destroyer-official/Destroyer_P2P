@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.x509.extensions import TLSFeature, TLSFeatureType
 from cryptography.x509 import ocsp
+import sys
 
 # Import XChaCha20Poly1305 from tls_channel_manager
 try:
@@ -540,10 +541,15 @@ class CAExchange:
             
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             
+            # Calculate the exchange port by adding the offset to the base port
+            exchange_port = port + self.exchange_port_offset
+            
             if role == "server":
-                sock.bind((host, port))
+                # Use "::" for IPv6 or "0.0.0.0" for IPv4 to listen on all interfaces
+                bind_addr = "::" if is_ipv6 else "0.0.0.0"
+                sock.bind((bind_addr, exchange_port))
                 sock.listen(1)
-                logger.info(f"Server listening on [{host}]:{port} for cert exchange.")
+                logger.info(f"Server listening on [{bind_addr}]:{exchange_port} for cert exchange.")
                 
                 if ready_event:
                     ready_event.set()
@@ -553,8 +559,8 @@ class CAExchange:
                 logger.info(f"Client connected from {client_addr} for cert exchange.")
                 peer_sock = client_sock
             else:
-                logger.info(f"Client connecting to [{host}]:{port} for cert exchange.")
-                sock.connect((host, port))
+                logger.info(f"Client connecting to [{host}]:{exchange_port} for cert exchange.")
+                sock.connect((host, exchange_port))
                 logger.info("Client connected to server.")
                 peer_sock = sock
                 
@@ -675,7 +681,11 @@ class CAExchange:
                                     break
                                     
                         if not hostname:
-                            hostname = host if host != "0.0.0.0" else socket.gethostname()
+                            # Don't use 0.0.0.0 for security reasons
+                            if host == "0.0.0.0" or host == "::":
+                                hostname = socket.gethostname()
+                            else:
+                                hostname = host
                             
                         self.add_hpkp_pin(hostname, hpkp_pin)
                         logger.info(f"Added HPKP pin for {hostname}: {hpkp_pin}")
@@ -739,6 +749,20 @@ class CAExchange:
         ssl.OP_SINGLE_DH_USE | ssl.OP_SINGLE_ECDH_USE
     )
     
+    def _configure_pq_groups(self, context: ssl.SSLContext):
+        """Attempts to configure post-quantum key exchange groups on the SSLContext."""
+        try:
+            context.set_groups(HYBRID_PQ_GROUPS)
+            logger.info(f"SSLContext configured with post-quantum groups: {HYBRID_PQ_GROUPS}")
+        except AttributeError:
+            py_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+            logger.warning("SSLContext.set_groups() not available. Post-quantum TLS KEX may not be available.")
+            logger.warning(f"This is likely due to an outdated Python ({py_version}) or OpenSSL version.")
+            logger.warning("For PQ KEX support, Python 3.8+ and a compatible OpenSSL (e.g., OpenSSL 3.2+ or OQS-provider) are required.")
+            logger.info(f"Current OpenSSL version: {ssl.OPENSSL_VERSION}")
+        except ssl.SSLError as e:
+            logger.warning(f"Failed to set post-quantum groups: {e}. PQ TLS KEX may not be available.")
+    
     def create_server_ctx(self) -> ssl.SSLContext:
         """Creates a high-security SSLContext for a server.
 
@@ -767,14 +791,7 @@ class CAExchange:
         ctx.options |= self.SECURE_TLS_OPTIONS
         
         # Set post-quantum key exchange groups if available
-        if hasattr(ctx, "set_groups"):
-            try:
-                ctx.set_groups(HYBRID_PQ_GROUPS)
-                logger.info(f"Post-quantum key exchange groups set: {HYBRID_PQ_GROUPS}")
-            except Exception as e:
-                logger.error(f"Failed to set post-quantum key exchange groups for server: {e}")
-        else:
-            logger.warning("SSLContext does not support set_groups(). Post-quantum TLS KEX may not be available.")
+        self._configure_pq_groups(ctx)
         
         # Increase DH parameters for non-PQC key agreement.
         try:
@@ -853,14 +870,7 @@ class CAExchange:
         ctx.options |= self.SECURE_TLS_OPTIONS
         
         # Set post-quantum key exchange groups
-        if hasattr(ctx, "set_groups"):
-            try:
-                ctx.set_groups(HYBRID_PQ_GROUPS)
-                logger.info(f"Post-quantum key exchange groups set: {HYBRID_PQ_GROUPS}")
-            except Exception as e:
-                logger.error(f"Failed to set post-quantum key exchange groups for client: {e}")
-        else:
-            logger.warning("SSLContext does not support set_groups(). Post-quantum TLS KEX may not be available.")
+        self._configure_pq_groups(ctx)
 
         # Hostname verification is disabled because we verify peer certificates manually.
         ctx.check_hostname = False
@@ -925,8 +935,8 @@ class CAExchange:
             logger.warning(f"Could not securely delete {file_path}: {e}")
             try:
                 os.remove(file_path)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to remove file after secure deletion attempt: {e}")
         
     def secure_cleanup(self):
         """Securely erases sensitive data like private keys from memory."""
@@ -1000,8 +1010,8 @@ class CAExchange:
         """Ensures secure_cleanup is called when the object is destroyed."""
         try:
             self.secure_cleanup()
-        except:
-            pass
+        except Exception as e:
+            logger.debug(f"Error during secure cleanup in __del__: {e}")
 
     def add_hpkp_pin(self, hostname: str, pin_value: str) -> None:
         """Adds a public key pin for a hostname.

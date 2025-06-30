@@ -44,6 +44,11 @@ import tests.test_dep_impl
 import tests.test_secure_memory
 import tests.test_secure_memory_app
 import tests.test_dep
+import tests.test_enhanced_crypto
+import tests.test_sphincs_plus
+import tests.test_pqc_algorithms
+import tests.test_pqc_execution
+import tests.test_pqc_benchmark
 
 # Configure logging for test output
 logging.basicConfig(
@@ -173,6 +178,8 @@ class SecurityTestResult(unittest.TextTestResult):
             return "Secure Connection Flow"
         elif "military_grade_security" in test_id:
             return "Military-Grade Security Features"
+        elif "enhanced_crypto" in test_id or "sphincs_plus" in test_id:
+            return "Post-Quantum Cryptography"
         else:
             return "Other Security Tests"
 
@@ -361,6 +368,30 @@ class SecurityReportGenerator:
             return "02"
         elif "double_ratchet_security" in test_id or "test_double_ratchet" in test_id:
             return "03"
+        elif "tls_channel_security" in test_id:
+            return "04"
+        elif "crypto_suite" in test_id:
+            return "05"
+        elif "enhanced_crypto" in test_id or "sphincs_plus" in test_id:
+            return "06"
+        elif "padding" in test_id:
+            return "07"
+        elif "dep_security" in test_id or "test_dep_impl" in test_id or "test_dep" in test_id:
+            return "08"
+        elif "chacha20poly1305" in test_id:
+            return "09"
+        elif "traffic_analysis" in test_id:
+            return "10"
+        elif "additional_security" in test_id:
+            return "11"
+        elif "secure_memory" in test_id:
+            return "12"
+        elif "test_attributes" in test_id:
+            return "13"
+        elif "test_secure_connect" in test_id or "test_server_startup" in test_id:
+            return "14"
+        elif "military_grade_security" in test_id:
+            return "15"
         # ... add others as needed
         else:
             return "99"
@@ -373,6 +404,30 @@ class SecurityReportGenerator:
             return "Hybrid Key Exchange"
         elif "double_ratchet_security" in test_id or "test_double_ratchet" in test_id:
             return "Double Ratchet Messaging"
+        elif "tls_channel_security" in test_id:
+            return "TLS Channel Security"
+        elif "crypto_suite" in test_id:
+            return "Cryptographic Suite"
+        elif "enhanced_crypto" in test_id or "sphincs_plus" in test_id:
+            return "Post-Quantum Cryptography"
+        elif "padding" in test_id:
+            return "Padding Security"
+        elif "dep_security" in test_id or "test_dep_impl" in test_id or "test_dep" in test_id:
+            return "DEP Security"
+        elif "chacha20poly1305" in test_id:
+            return "ChaCha20-Poly1305 Vulnerability"
+        elif "traffic_analysis" in test_id:
+            return "Traffic Analysis Protection"
+        elif "additional_security" in test_id:
+            return "Additional Security Features"
+        elif "secure_memory" in test_id:
+            return "Secure Memory Management"
+        elif "test_attributes" in test_id:
+            return "Core Attributes"
+        elif "test_secure_connect" in test_id or "test_server_startup" in test_id:
+            return "Secure Connection Flow"
+        elif "military_grade_security" in test_id:
+            return "Military-Grade Security Features"
         # ... similar to _get_test_component
         else:
             return "Other Security Tests"
@@ -447,6 +502,13 @@ def create_security_test_suite():
     suite.addTests(loader.loadTestsFromModule(tests.test_secure_memory_app))
     suite.addTests(loader.loadTestsFromModule(tests.test_dep))
     
+    # Add new test modules
+    suite.addTests(loader.loadTestsFromModule(tests.test_enhanced_crypto))
+    suite.addTests(loader.loadTestsFromModule(tests.test_sphincs_plus))
+    suite.addTests(loader.loadTestsFromModule(tests.test_pqc_algorithms))
+    suite.addTests(loader.loadTestsFromModule(tests.test_pqc_execution))
+    suite.addTests(loader.loadTestsFromModule(tests.test_pqc_benchmark))
+    
     return suite
 
 
@@ -477,7 +539,14 @@ def verify_test_modules():
         'tests.test_dep_impl',
         'tests.test_secure_memory',
         'tests.test_secure_memory_app',
-        'tests.test_dep'
+        'tests.test_dep',
+        
+        # New test modules
+        'tests.test_enhanced_crypto',
+        'tests.test_sphincs_plus',
+        'tests.test_pqc_algorithms',
+        'tests.test_pqc_execution',
+        'tests.test_pqc_benchmark'
     ]
     
     failed_modules = []
@@ -539,8 +608,8 @@ if __name__ == "__main__":
                         help="Output file for the security report (JSON format)")
     parser.add_argument("--skip-verification", action="store_true",
                         help="Skip the initial verification of test modules")
-    parser.add_argument("--disable-anti-debugging", action="store_true",
-                        help="Disable anti-debugging protection during tests")
+    parser.add_argument("--disable-anti-debugging", action="store_true", default=True,
+                        help="Disable anti-debugging protection during tests (enabled by default)")
     
     args = parser.parse_args()
     
