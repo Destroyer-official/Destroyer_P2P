@@ -15,7 +15,7 @@ import stat
 import base64
 import logging
 import hashlib
-import sys
+import sys 
 import tempfile
 import platform
 import threading
@@ -2362,7 +2362,7 @@ class QuantumResistanceFutureProfing:
         self.logger.info("Initializing Quantum Resistance Future-Proofing module")
         
         # Check for SPHINCS+ availability
-        self._has_sphincsplus = self._check_sphincsplus_availability()
+        self._has_sphincs = self._check_sphincs_availability()
         
         # Initialize with supported PQ algorithms
         self.supported_pq_algorithms = {
@@ -2371,7 +2371,7 @@ class QuantumResistanceFutureProfing:
         }
         
         # Add SPHINCS+ if available
-        if self._has_sphincsplus:
+        if self._has_sphincs:
             self.supported_pq_algorithms["signatures"].append("SPHINCS+")
             self.logger.info("SPHINCS+ successfully loaded as backup signature scheme")
         
@@ -2381,20 +2381,20 @@ class QuantumResistanceFutureProfing:
         # Initialize algorithm instances
         self._init_algorithm_instances()
         
-    def _check_sphincsplus_availability(self):
+    def _check_sphincs_availability(self):
         """Check if SPHINCS+ is available in the environment"""
         try:
             # Skip external library checks and use our fallback implementation directly
             # This ensures cross-platform compatibility
             self.logger.info("Using internal SPHINCS+ fallback implementation for quantum resistance")
-            self._sphincsplus_impl = "fallback"
-            self._create_sphincsplus_fallback()
+            self._sphincs_impl = "fallback"
+            self._create_sphincs_fallback()
             return True
         except Exception as e:
             self.logger.warning(f"Error setting up SPHINCS+ fallback implementation: {e}")
             return False
     
-    def _create_sphincsplus_fallback(self):
+    def _create_sphincs_fallback(self):
         """Create a fallback implementation for SPHINCS+ using other quantum-resistant algorithms"""
         try:
             # Import required modules for the fallback
@@ -2405,9 +2405,9 @@ class QuantumResistanceFutureProfing:
             import os
             import time
             
-            # Define the SPHINCSPlusFallback class that combines FALCON and ML-KEM
+            # Define the sphincsFallback class that combines FALCON and ML-KEM
             # for signature generation/verification
-            class SPHINCSPlusFallback:
+            class sphincsFallback:
                 def __init__(self):
                     self.falcon = FALCON_1024()
                     self.kem = quantcrypt.kem.MLKEM_1024()
@@ -2579,15 +2579,15 @@ class QuantumResistanceFutureProfing:
                     return True
             
             # Save the fallback implementation for direct use in _init_algorithm_instances
-            self._sphincs_fallback_class = SPHINCSPlusFallback
+            self._sphincs_fallback_class = sphincsFallback
             
             # Try to register in the quantcrypt namespace for backwards compatibility
             try:
                 if 'quantcrypt' not in sys.modules:
                     sys.modules['quantcrypt'] = type('', (), {})()
-                if not hasattr(sys.modules['quantcrypt'], 'sphincsplus'):
-                    sys.modules['quantcrypt'].sphincsplus = type('', (), {})()
-                sys.modules['quantcrypt'].sphincsplus.SPHINCSPLUS = SPHINCSPlusFallback
+                if not hasattr(sys.modules['quantcrypt'], 'sphincs'):
+                    sys.modules['quantcrypt'].sphincs = type('', (), {})()
+                sys.modules['quantcrypt'].sphincs.sphincs = sphincsFallback
             except Exception as e:
                 self.logger.warning(f"Could not register SPHINCS+ fallback in quantcrypt namespace: {e}")
             
@@ -2686,23 +2686,23 @@ class QuantumResistanceFutureProfing:
                 self.logger.warning(f"Falling back to standard ML-KEM-1024: {e}")
             
             # Initialize SPHINCS+ using our fallback implementation
-            if self._has_sphincsplus and hasattr(self, '_sphincsplus_impl') and self._sphincsplus_impl == "fallback":
+            if self._has_sphincs and hasattr(self, '_sphincs_impl') and self._sphincs_impl == "fallback":
                 # Use our saved fallback class directly if available
                 if hasattr(self, '_sphincs_fallback_class'):
                     self._algorithm_instances["SPHINCS+"] = self._sphincs_fallback_class()
                     self.logger.info("Using SPHINCS+ fallback class directly")
                 else:
                     # Create a new fallback implementation
-                    self._create_sphincsplus_fallback()
-            elif self._has_sphincsplus:
+                    self._create_sphincs_fallback()
+            elif self._has_sphincs:
                 # Use native implementation if available
                 try:
-                    import sphincsplus
-                    self._algorithm_instances["SPHINCS+"] = sphincsplus.Sphincs()
+                    import sphincs
+                    self._algorithm_instances["SPHINCS+"] = sphincs.Sphincs()
                     self.logger.info("Native SPHINCS+ implementation initialized")
                 except ImportError:
                     self.logger.warning("Native SPHINCS+ module import failed, creating fallback")
-                    self._create_sphincsplus_fallback()
+                    self._create_sphincs_fallback()
                     
             # Count and log the algorithms we've initialized
             algo_count = len(self._algorithm_instances)
@@ -2838,14 +2838,14 @@ class QuantumResistanceFutureProfing:
                 derived_keys.append(hashlib.sha512(sha256_input + blake2_input).digest())
         
         # Use SPHINCS+ if available (with SHA3-256 input)
-        sphincsplus = self._algorithm_instances.get("SPHINCS+")
-        if sphincsplus:
+        sphincs = self._algorithm_instances.get("SPHINCS+")
+        if sphincs:
             try:
                 # Generate a deterministic keypair from the sha3 input
                 sphincs_seed = sha3_256_input + blake2_input
-                pk, sk = sphincsplus.keygen()  # Not actually deterministic, but we'll use the keys
+                pk, sk = sphincs.keygen()  # Not actually deterministic, but we'll use the keys
                 # Sign the seed
-                signature = sphincsplus.sign(sk, sphincs_seed)
+                signature = sphincs.sign(sk, sphincs_seed)
                 # Use the signature as input 2
                 derived_keys.append(hashlib.sha256(signature).digest())
             except Exception as e:

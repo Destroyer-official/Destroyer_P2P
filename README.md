@@ -1,7 +1,7 @@
 <!-- Improved Header with Modern Styling -->
 <div align="center">
   <h1>⚡ SECURE P2P CHAT ⚡</h1>
-  <h3>Military-Grade Quantum-Resistant Communications Platform</h3>
+  <h3> Quantum-Resistant Communications Platform </h3>
   
   <p>
   <img src="https://img.shields.io/badge/SECURITY-MAXIMUM-brightgreen?style=for-the-badge" alt="Security: Maximum">
@@ -19,13 +19,13 @@
 
 ## Overview
 
-Secure P2P Chat is a state-of-the-art encrypted communication system designed for high-security environments. It combines classical cryptography with post-quantum algorithms to provide protection against both conventional and quantum computing threats.
+Secure P2P Chat is a maximum encrypted communication system designed for high-security environments. It combines classical cryptography with post-quantum algorithms to provide protection against both conventional and quantum computing threats.
 
 ### Core Security Features
 
 - **Hybrid Post-Quantum Cryptography**: Combines classical X25519 Diffie-Hellman with quantum-resistant ML-KEM-1024 and FALCON-1024
 - **Double Ratchet Algorithm**: Forward secrecy and break-in recovery with TPM hardware acceleration
-- **TLS 1.3 with ChaCha20-Poly1305**: State-of-the-art transport security
+- **TLS 1.3 with ChaCha20-Poly1305**: maximum transport security
 - **Certificate Exchange**: Secure certificate validation with DANE TLSA option
 - **Ephemeral Identity**: Automatic key rotation for enhanced privacy
 - **Hardware Security**: TPM/HSM integration on supported platforms
@@ -133,29 +133,47 @@ The security enhancements result in a slight performance improvement on average,
 
 ### Enhanced PQC Integration Points
 
-The enhanced post-quantum cryptographic implementations are integrated throughout the codebase:
+Our post-quantum cryptographic primitives are integrated at multiple layers:
 
-1. **secure_key_manager.py**
-   - Uses EnhancedFALCON_1024 as the primary signature algorithm
-   - Uses EnhancedMLKEM_1024 for key encapsulation
-   - Implements the SPHINCSPlusFallback class for algorithm diversity
+1. **Certificate Exchange (ca_services.py)**
+   - Uses FALCON-1024 for authentication signatures with improved forgery resistance
+   - Includes side-channel resistant certificate processing
 
-2. **hybrid_kex.py**
+2. **TLS Channel Security (tls_channel_manager.py)**
+   - Uses FALCON-1024 for TLS signatures with enhanced parameters
+   - ML-KEM-1024 for key encapsulation with 256-bit equivalent security
+
+3. **Double Ratchet Protocol (double_ratchet.py)**
+   - Hybrid key derivation using X25519 + ML-KEM for post-quantum security
+   - Side-channel resistant cryptographic operations
+   - Enhanced encryption with authenticated primitives
+
+4. **Quantum-Resistant Signatures (sphincs.py)**
+   - Implements NIST FIPS 205 standardized SPHINCS+ with highest security parameter sets
+   - Focuses on shake_256f and sha2_256f for 256-bit classical/128-bit quantum security
+   - Implements domain separation for all hash function calls
+   - Features constant-time operations to prevent timing side-channel attacks
+   - Includes memory cleansing to prevent sensitive data leakage
+   - Uses additional entropy sources for stronger signature generation
+   - Implements tamper detection in verification logic
+   - Provides maximum security suitable for classified information protection
+
+5. **Hybrid Key Exchange (hybrid_kex.py)**
    - Uses both classical X25519 and post-quantum ML-KEM-1024 for key exchange
    - Applies FALCON-1024 signatures for authenticity verification
    - Implements cryptographic binding between EC and PQ key materials
 
-3. **double_ratchet.py**
+6. **double_ratchet.py**
    - Integrates EnhancedMLKEM_1024 for post-quantum key encapsulation
    - Uses EnhancedFALCON_1024 for message authentication
    - Implements constant-time operations to prevent side-channel attacks
 
-4. **tls_channel_manager.py**
+7. **tls_channel_manager.py**
    - Implements the PostQuantumCrypto class using enhanced algorithms
    - Provides fallback mechanisms for compatibility with standard implementations
    - Supports hybrid key exchange with post-quantum groups
 
-5. **ca_services.py**
+8. **ca_services.py**
    - Uses enhanced cryptographic algorithms for certificate operations
    - Implements secure certificate exchange with proper IPv6 support
    - Provides HPKP certificate pinning and OCSP stapling
@@ -174,7 +192,7 @@ All implementations thoroughly tested with dedicated test scripts:
 ### Advanced Security Measures
 
 - **Anti-Debugging Protection**: Prevents reverse-engineering and tampering
-- **Stack Canaries**: Military-grade buffer overflow detection
+- **Stack Canaries**: buffer overflow detection
 - **Secure Memory Management**: Protection against cold boot attacks
 - **Hardware-Bound Cryptography**: TPM and HSM integration for key protection
 - **Side-Channel Attack Mitigation**: Constant-time crypto operations
@@ -314,21 +332,6 @@ python -m tests.test_pq_crypto
 </tr>
 </table>
 
-## Documentation
-
-<div align="center">
-<table>
-<tr>
-<td align="center"><b>📄 Security Specifications</b><br><a href="MILITARY_GRADE_SECURITY.md">MILITARY_GRADE_SECURITY.md</a></td>
-<td align="center"><b>🛠️ Security Updates</b><br><a href="MILITARY_GRADE_SECURITY_FIXES.md">MILITARY_GRADE_SECURITY_FIXES.md</a></td>
-</tr>
-<tr>
-<td align="center"><b>📝 Recent Fixes</b><br><a href="FIXES_SUMMARY.md">FIXES_SUMMARY.md</a></td>
-<td align="center"><b>🧠 Memory Implementation</b><br><a href="SECURE_MEMORY_README.md">SECURE_MEMORY_README.md</a></td>
-</tr>
-</table>
-</div>
-
 ## License & Security Notice
 
 <table>
@@ -340,7 +343,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 </td>
 <td>
 
-⚠️ **WARNING**: This software implements military-grade security and contains anti-debugging features that may terminate the process if tampering is detected.
+⚠️ **WARNING**: This software implements maximum security and contains anti-debugging features that may terminate the process if tampering is detected.
 
 **NOT FOR EXPORT** in some jurisdictions due to strong cryptography.
 
@@ -453,7 +456,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
    - Added detailed diagnostics for memory protection operations
    - Enhanced anonymous mode operation for privacy and security
 
-These improvements strengthen the already military-grade security of the platform without compromising any functionality. The comprehensive test suite has been updated to verify all fixes and prevent regression. See the [Security Advisories](#-security-advisories-) section for details.
+These improvements strengthen the already maximum security of the platform without compromising any functionality. The comprehensive test suite has been updated to verify all fixes and prevent regression. See the [Security Advisories](#-security-advisories-) section for details.
 
 ## ⚔️ CORE CAPABILITIES ⚔️
 
@@ -691,7 +694,7 @@ graph TB
 **`p2p_core.py`**
 - Quantum-mesh IPv4/IPv6 network management with reality anchoring
 - Advanced STUN-based NAT traversal with ICE/TURN/QUIC support
-- Military-grade TCP framing with quantum length prefixing
+- Maximum TCP framing with quantum length prefixing
 - Socket error resilience with self-healing recovery mechanisms
 - Non-blocking I/O with predictive event-driven architecture
 - Network path redundancy with 10ms failover capability
@@ -702,7 +705,7 @@ graph TB
 - Windows CNG for Quantum TPM 3.0 integration with secure boot verification
 - PKCS#13 for cross-platform HSM support with tamper detection
 - Silicon-anchored key generation with hardware entropy verification
-- Non-exportable key operations within military-grade secure boundaries
+- Non-exportable key operations within maximum secure boundaries
 - Physical side-channel attack resistance with adaptive countermeasures
 
 #### 🗃️ DIMENSIONAL VAULT MAINFRAME
@@ -1117,7 +1120,7 @@ These integral components are part of the project's internal architecture:
 
 - **Core Application & Protocol Modules**: 
   - `p2p_core.py`: Base P2P chat functionality
-  - `secure_p2p.py`: Main secure chat implementation with military-grade security
+  - `secure_p2p.py`: Main secure chat implementation with maximum security
   - `hybrid_kex.py`: Quantum-resistant hybrid key exchange
   - `double_ratchet.py`: Forward-secrecy messaging protocol
   - `ca_services.py`: Certificate authority and exchange services
@@ -1176,6 +1179,34 @@ We welcome contributions in all areas, from cryptographic research and protocol 
 ## ⚠️ SECURITY ADVISORIES ⚠️
 
 ### 🔴 SECURITY ALERTS - ADDRESSED
+
+#### [SA-2025-06-30-3] maximum SPHINCS+ Implementation
+**Status: IMPLEMENTED** in version 2.6.0
+
+- **Description**: Enhanced SPHINCS+ implementation with maximum security features
+- **Components**: sphincs.py
+- **Security Impact**: HIGH (strengthened post-quantum signature security)
+- **Improvements**:
+  - Implemented NIST FIPS 205 compliant parameter sets (shake_256f and sha2_256f)
+  - Enhanced side-channel protection with constant-time operations
+  - Added memory cleansing to prevent data leakage
+  - Improved timing attack resistance with randomized delays
+  - Implemented domain separation for cryptographic operations
+  - Added additional entropy sources for stronger signatures
+  - Enhanced verification logic with tamper detection
+- **Verification**: All security enhancements have been verified through comprehensive testing
+
+#### [SA-2025-06-30-2] SPHINCS+ Parameter Set Compatibility
+**Status: FIXED** in version 2.5.9
+
+- **Description**: Fixed missing parameter sets in SPHINCS+ implementation causing test failures
+- **Components**: sphincs.py
+- **Security Impact**: MEDIUM (limited post-quantum signature algorithm options)
+- **Improvements**:
+  - Added missing parameter sets: 'shake_128f_simple' and 'sha2_128f_simple'
+  - Improved message verification logic to properly detect tampered messages
+  - Enhanced test suite compatibility for different security levels
+- **Verification**: All SPHINCS+ test cases now pass with different parameter sets
 
 #### [SA-2025-06-30] IPv6 Compatibility and Configuration Management
 **Status: FIXED** in version 2.5.8
@@ -1360,7 +1391,7 @@ Our approach to mitigate this risk:
 
 2. **Enhanced Secure Erase**: We've implemented an advanced memory wiping strategy that:
    - Uses libsodium's secure memory functions when available
-   - Implements multiple overwrite patterns for military-grade erasure
+   - Implements multiple overwrite patterns for maximum erasure
    - Attempts best-effort clearing of immutable objects
    - Uses memory barriers to prevent compiler optimization
    - Handles cross-platform memory locking to prevent swapping to disk
@@ -1405,8 +1436,7 @@ The security status logging feature has been enhanced with the following improve
 
 1. **Structured JSON Logging**: Security status is now logged in a structured JSON format for easier parsing and analysis by automated tools. This includes a timestamp and unique ID for each check.
 
-2. **Military-Grade Security Scoring**: A numerical security score (0-100) is calculated based on the security features enabled and configuration quality. The scoring system prioritizes features essential for a military-grade secure P2P system. Scores are categorized as:
-   - 98-100: MILITARY-GRADE
+2. **Security Scoring**: A numerical security score (0-100) is calculated based on the security features enabled and configuration quality. The scoring system prioritizes features essential for a maximum secure P2P system. Scores are categorized as:
    - 90-97: EXCELLENT
    - 80-89: GOOD
    - 70-79: MODERATE

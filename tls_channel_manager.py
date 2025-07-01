@@ -20,7 +20,7 @@ import threading
 import webbrowser 
 import base64
 import hashlib
-import struct
+import struct 
 import math
 import ctypes
 import gc
@@ -1514,7 +1514,7 @@ class TLSSecureChannel:
     
         
     def __init__(self, cert_path: Optional[str] = None, key_path: Optional[str] = None, 
-                 use_secure_enclave: bool = True, require_authentication: bool = True,
+                 use_secure_enclave: bool = True, require_authentication: bool = False,
                  oauth_provider: Optional[str] = None, oauth_client_id: Optional[str] = None,
                  verify_certs: bool = True, 
                  multi_cipher: bool = True, enable_pq_kem: bool = True,

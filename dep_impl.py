@@ -80,7 +80,7 @@ if platform.system() == "Windows":
         
         Enable = property(_get_Enable, _set_Enable)
 
-        def _get_DisableAtlThunkEmulation(self):
+        def _get_DisableAtlThunkEmulation(self): 
             return (self.Flags >> 1) & 1
 
         def _set_DisableAtlThunkEmulation(self, value):

@@ -840,7 +840,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         os.makedirs(self.cert_dir, exist_ok=True)
         os.makedirs(self.keys_dir, exist_ok=True)
         
-        # Mark directories as verified since we've created them
+        # Mark directories as verified since we've created them51408
         self.security_verified['cert_dir'] = os.path.exists(self.cert_dir)
         self.security_verified['keys_dir'] = os.path.exists(self.keys_dir)
         
@@ -856,7 +856,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         # Initialize ephemeral identity settings
         self.use_ephemeral_identity = ephemeral
         self.ephemeral_key_lifetime = key_lifetime
-        
+         
         # Initialize authentication settings
         self.require_authentication = os.environ.get('P2P_REQUIRE_AUTH', 'false').lower() == 'true'
         self.oauth_provider = os.environ.get('P2P_OAUTH_PROVIDER', 'google')

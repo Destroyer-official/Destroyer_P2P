@@ -10,7 +10,7 @@ Features:
      • Windows TPM via tbs.dll (if available)
      • Linux TPM2 via tpm2-pytss (if available)
      • Fallback to Python's secrets module
-  2. Hardware-Bound Identity
+  2. Hardware-Bound Identity 
      • Windows: WMI (via Python's wmi module or PowerShell) for UUID
      • Linux: DMI product_uuid or /etc/machine-id
      • macOS: IOPlatformUUID via ioreg

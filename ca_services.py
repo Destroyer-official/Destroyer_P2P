@@ -1198,7 +1198,7 @@ class CAExchange:
         except Exception as e:
             logger.error(f"Error retrieving cached OCSP response: {e}")
             return None
-
+ 
 
 def setup_logger(level=logging.INFO):
     """Configures the logger for the CAExchange module.

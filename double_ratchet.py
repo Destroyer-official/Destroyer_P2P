@@ -9,7 +9,7 @@ Security features:
 - Classical security: X25519 for DH exchanges
 - Quantum resistance: ML-KEM-1024 for key encapsulation
 - Message signing: FALCON-1024 signatures
-- Symmetric encryption: ChaCha20-Poly1305 AEAD
+- Symmetric encryption: ChaCha20-Poly1305 AEAD 
 - Key derivation: HKDF with domain separation
 - Hardware security: TPM/SGX/Secure Enclave integration when available
 - Side-channel resistance: Constant-time operations

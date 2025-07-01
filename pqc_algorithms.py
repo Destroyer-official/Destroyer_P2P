@@ -424,7 +424,7 @@ class EnhancedMLKEM_1024:
         # Enhance the shared secret with domain separation
         enhanced_secret = hashlib.sha3_256(self.domain_separator + shared_secret).digest()
         
-        return ciphertext, enhanced_secret
+        return ciphertext, enhanced_secret 
         
     def decaps(self, private_key, ciphertext):
         """Decapsulate a shared secret with enhanced security."""
