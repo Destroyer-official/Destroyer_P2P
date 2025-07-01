@@ -2172,24 +2172,26 @@ def detect_debugger() -> bool:
             except Exception as e:
                 logger.warning(f"Could not check TracerPid: {e}")
                 
-            # Check for ptrace
-            try:
-                # Try to attach to ourselves - if we can't, someone else is attached
-                libc = ctypes.CDLL('libc.so.6')
-                ptrace = libc.ptrace
-                ptrace.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
-                ptrace.restype = ctypes.c_int
-                
-                # PTRACE_TRACEME = 0
-                if ptrace(0, 0, 0, 0) < 0:
-                    logger.critical("SECURITY ALERT: Debugger detected on Linux via ptrace!")
-                    return True
-                    
-                # Detach
-                # PTRACE_DETACH = 17
-                ptrace(17, 0, 0, 0)
-            except Exception as e:
-                logger.warning(f"Could not check ptrace: {e}")
+            # The ptrace check is too aggressive and can cause crashes on hardened systems.
+            # It is disabled to ensure stability. The TracerPid check is sufficient.
+            #
+            # try:
+            #     # Try to attach to ourselves - if we can't, someone else is attached
+            #     libc = ctypes.CDLL('libc.so.6')
+            #     ptrace = libc.ptrace
+            #     ptrace.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
+            #     ptrace.restype = ctypes.c_int
+            #     
+            #     # PTRACE_TRACEME = 0
+            #     if ptrace(0, 0, 0, 0) < 0:
+            #         logger.critical("SECURITY ALERT: Debugger detected on Linux via ptrace!")
+            #         return True
+            #         
+            #     # Detach
+            #     # PTRACE_DETACH = 17
+            #     ptrace(17, 0, 0, 0)
+            # except Exception as e:
+            #     logger.warning(f"Could not check ptrace: {e}")
                 
         # macOS detection
         elif IS_DARWIN:
