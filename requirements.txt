@@ -9,13 +9,13 @@ tpm2-pytss==2.0.0; platform_system == "Linux"
 wmi
 cryptography
 # PyNaCl is optional - our cross‑platform secure memory implementation provides an alternative
-
+python-pkcs11
 tqdm
 pyzmq
 requests 
 
 # PKCS#11 is only needed for non‑Windows platforms
-python-pkcs11; sys_platform != "win32"
+
 
 # DANE and Certificate Transparency dependencies
 python-dateutil
