@@ -20,13 +20,10 @@
 ## Overview
 
 Secure P2P Chat is a maximum encrypted communication system designed for high-security environments. It combines classical cryptography with post-quantum algorithms to provide protection against both conventional and quantum computing threats.
-<<<<<<< HEAD
 
 ### 🚀 NEW: Enhanced Post-Quantum Cryptography
 
 This project now integrates enhanced post-quantum cryptographic implementations from `pqc_algorithms.py`, providing state-of-the-art, military-grade, future-proof security with improved side-channel resistance, constant-time operations, and protection against emerging threats.
-=======
->>>>>>> 979c39aab35023924fc0b55b837b097b0135c5af
 
 ### Core Security Features
 
