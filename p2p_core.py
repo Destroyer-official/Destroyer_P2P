@@ -3,13 +3,33 @@ Secure P2P Chat Application (IPv6 TCP)
  
 A lightweight peer-to-peer chat application using TCP for direct communication 
 over IPv6 networks with NAT traversal capabilities.
+
+Core features:
+- IPv6 support with IPv4 fallback
+- NAT traversal using STUN protocol (RFC 5389)
+- Direct peer-to-peer connections without central servers
+- Reliable message delivery with framing protocol
+- Automatic reconnection and session persistence
+- Heartbeat mechanism to detect connection failures
+- Structured message protocol with type safety
+
+This module provides the foundation for the secure P2P chat application,
+handling the networking layer and basic chat functionality. Higher-level
+security features (encryption, authentication, etc.) are implemented in
+the secure_p2p.py module that extends this base implementation.
+
+Network architecture:
+- Uses TCP for reliable message delivery
+- Implements a custom framing protocol for message boundaries
+- Supports both client and server modes for connection establishment
+- Uses STUN for NAT traversal and public endpoint discovery
 """
  
 import asyncio
 import socket
 import random
 import logging
-import struct
+import struct 
 import os
 import sys
 import signal
@@ -20,8 +40,34 @@ import enum
 import encodings.idna
 from typing import Optional, Tuple, Union, List, Dict, Any, NamedTuple
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+# Setup dedicated logger for P2P Core
+p2p_logger = logging.getLogger("p2p_core")
+p2p_logger.setLevel(logging.DEBUG)
+
+# Create logs directory if it doesn't exist
+if not os.path.exists("logs"):
+    os.makedirs("logs")
+
+# Create file handler for p2p_core.log
+p2p_file_handler = logging.FileHandler(os.path.join("logs", "p2p_core.log"))
+p2p_file_handler.setLevel(logging.DEBUG)
+
+# Create formatter
+formatter = logging.Formatter('%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s')
+p2p_file_handler.setFormatter(formatter)
+
+# Add file handler to logger
+p2p_logger.addHandler(p2p_file_handler)
+
+# Also log to console for immediate visibility
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(formatter)
+p2p_logger.addHandler(console_handler)
+
+p2p_logger.info("P2P Core logger initialized")
+
+# Standard logging setup for backward compatibility
 log = logging.getLogger(__name__)
 
 # Terminal colors
@@ -35,11 +81,27 @@ BOLD = '\033[1m'
 RESET = '\033[0m'
 
 # Default STUN server configuration
-DEFAULT_STUN_SERVER = "stun.l.google.com"
+DEFAULT_STUN_SERVER = "stun2.l.google.com"  # Most reliable for IPv6
 DEFAULT_STUN_PORT = 19302
 
 # Message protocol definitions
 class MessageType(enum.Enum):
+    """
+    Enumeration of message types used in the P2P protocol.
+    
+    These types define the purpose and structure of messages exchanged
+    between peers, enabling proper parsing and handling of different
+    message categories.
+    
+    Types:
+        USERNAME: Identifies a peer by their chosen username
+        MESSAGE: Standard chat message with content
+        EXIT: Signals intention to disconnect
+        HEARTBEAT: Connection keep-alive signal
+        HEARTBEAT_ACK: Acknowledgment of heartbeat
+        RECONNECTED: Signals successful reconnection after disconnect
+        ERROR: Indicates an error condition
+    """
     USERNAME = "USERNAME"
     MESSAGE = "MSG"
     EXIT = "EXIT"
@@ -49,14 +111,39 @@ class MessageType(enum.Enum):
     ERROR = "ERROR"
 
 class Message(NamedTuple):
-    """Structured message representation with type and payload."""
+    """
+    Structured message representation with type and payload.
+    
+    This class provides a type-safe container for messages exchanged
+    between peers, with serialization and parsing capabilities.
+    
+    Attributes:
+        type (MessageType): The category of message
+        sender (str): Username of the message sender
+        content (str): The actual message content
+        timestamp (float): Unix timestamp when message was created
+    
+    Methods:
+        __str__: Serializes the message for network transmission
+        parse: Class method to parse raw network data into a Message object
+    """
     type: MessageType
     sender: str = ""
     content: str = ""
     timestamp: float = 0.0
     
     def __str__(self) -> str:
-        """Return the serialized message for transmission."""
+        """
+        Return the serialized message for transmission.
+        
+        Formats the message according to the protocol specification:
+        - USERNAME: "USERNAME:username"
+        - MESSAGE: "MSG:sender:content"
+        - Others: Just the message type value
+        
+        Returns:
+            str: The formatted message string ready for transmission
+        """
         if self.type == MessageType.USERNAME:
             return f"{self.type.value}:{self.sender}"
         elif self.type == MessageType.MESSAGE:
@@ -66,7 +153,24 @@ class Message(NamedTuple):
     
     @classmethod
     def parse(cls, data: bytes) -> Optional['Message']:
-        """Parse a message from raw bytes received over the network."""
+        """
+        Parse a message from raw bytes received over the network.
+        
+        This method handles decoding and validation of incoming messages,
+        ensuring they conform to the expected protocol format.
+        
+        Args:
+            data (bytes): Raw data received from the network
+            
+        Returns:
+            Optional[Message]: A parsed Message object, or a Message with
+                              ERROR type if parsing fails
+                              
+        Note:
+            This method never raises exceptions; it returns an ERROR
+            message instead, ensuring the chat application remains robust
+            against malformed input.
+        """
         try:
             text = data.decode('utf-8').strip()
             timestamp = time.time()
@@ -89,14 +193,14 @@ class Message(NamedTuple):
                     return cls(type=MessageType.MESSAGE, sender=parts[1], content=parts[2], timestamp=timestamp)
             
             # Unknown format
-            log.warning(f"Received message with unknown format: {text[:50]}...")
+            p2p_logger.warning(f"Received message with unknown format: {text[:50]}...")
             return cls(type=MessageType.ERROR, content=f"Invalid message format: {text[:50]}...", timestamp=timestamp)
             
         except UnicodeDecodeError:
-            log.warning("Received non-UTF8 data, ignoring")
+            p2p_logger.warning("Received non-UTF8 data, ignoring")
             return cls(type=MessageType.ERROR, content="Non-UTF8 data received", timestamp=timestamp)
         except Exception as e:
-            log.error(f"Error parsing message: {e}", exc_info=True)
+            p2p_logger.error(f"Error parsing message: {e}", exc_info=True)
             return cls(type=MessageType.ERROR, content=f"Error parsing message: {str(e)}", timestamp=timestamp)
 
 async def get_public_ip_port(stun_host: str = DEFAULT_STUN_SERVER, stun_port: int = DEFAULT_STUN_PORT) -> Tuple[Optional[str], Optional[int]]:
@@ -104,42 +208,72 @@ async def get_public_ip_port(stun_host: str = DEFAULT_STUN_SERVER, stun_port: in
     Discovers the public IPv6 address and port using STUN protocol.
     
     Implements a basic STUN client following RFC 5389 to determine the public
-    endpoint (IPv6 address and port) for NAT traversal.
+    endpoint (IPv6 address and port) for NAT traversal. This enables peers
+    behind NATs to establish direct connections.
+    
+    The implementation includes:
+    - Multiple STUN server fallbacks for reliability
+    - Server randomization to distribute load
+    - Retry logic with exponential backoff
+    - Proper error handling for network failures
     
     Args:
-        stun_host: STUN server hostname
-        stun_port: STUN server port
+        stun_host: STUN server hostname (default: stun2.l.google.com)
+        stun_port: STUN server port (default: 19302)
         
     Returns:
         Tuple containing (public_ip, public_port) or (None, None) if discovery fails
+        
+    Technical details:
+        Uses the STUN Binding Request method to discover the public endpoint.
+        The implementation follows RFC 5389 with a custom message format:
+        - 2 bytes: Message Type (0x0001 for Binding Request)
+        - 2 bytes: Message Length
+        - 4 bytes: Magic Cookie (0x2112A442)
+        - 12 bytes: Transaction ID (random bytes)
     """
     sock = None
     try:
         # Try multiple STUN servers if the default fails
         stun_servers = [
+            # Start with servers known to work well with IPv6
+            ("stun2.l.google.com", 19302),  # Known good server
+            ("stun.nextcloud.com", 443),    # Known good server
             (stun_host, stun_port),
-            ("stun.stunprotocol.org", 3478),
-            ("stun.sipgate.net", 3478)
+            ("stun1.l.google.com", 19302),
+            ("stun3.l.google.com", 19302),
+            ("stun4.l.google.com", 19302),
+            # Removed non-working servers:
+            # - stun.freeswitch.org (doesn't support IPv6 properly)
+            # - stun.stunprotocol.org (unreliable)
+            # - stun.sipgate.net (unreliable)
         ]
+        
+        # Shuffle the list to distribute requests
+        random.shuffle(stun_servers)
         
         # Try each STUN server until successful
         for curr_stun_host, curr_stun_port in stun_servers:
-            log.info(f"Trying STUN server: {curr_stun_host}:{curr_stun_port}")
+            p2p_logger.info(f"Trying STUN server: {curr_stun_host}:{curr_stun_port}")
             
-            addrinfo = await asyncio.get_event_loop().getaddrinfo(
-                curr_stun_host, curr_stun_port,
-                family=socket.AF_INET6,
-                type=socket.SOCK_DGRAM
-            )
+            try:
+                addrinfo = await asyncio.get_event_loop().getaddrinfo(
+                    curr_stun_host, curr_stun_port,
+                    family=socket.AF_INET6,
+                    type=socket.SOCK_DGRAM
+                )
+            except socket.gaierror as e:
+                p2p_logger.warning(f"DNS resolution failed for {curr_stun_host}: {e}")
+                continue # Try next server
 
             target_addr = None
             for _, _, _, _, sockaddr in addrinfo:
                 target_addr = sockaddr
-                log.info(f"Using STUN server IPv6 address: {target_addr}")
+                p2p_logger.info(f"Using STUN server IPv6 address: {target_addr}")
                 break
 
             if not target_addr:
-                log.warning(f"Could not resolve IPv6 address for STUN server: {curr_stun_host}")
+                p2p_logger.warning(f"Could not resolve IPv6 address for STUN server: {curr_stun_host}")
                 continue  # Try next server
 
             # Create new socket for each attempt
@@ -152,11 +286,11 @@ async def get_public_ip_port(stun_host: str = DEFAULT_STUN_SERVER, stun_port: in
             try:
                 sock.bind(("::", 0))
             except OSError as e:
-                log.warning(f"Failed to bind socket: {e}")
+                p2p_logger.warning(f"Failed to bind socket: {e}")
                 continue  # Try next server
 
             local_ip, local_port = sock.getsockname()[:2]
-            log.info(f"UDP Socket bound to: {local_ip}:{local_port}")
+            p2p_logger.info(f"UDP Socket bound to: {local_ip}:{local_port}")
 
             # Build the STUN request (RFC 5389)
             transaction_id = os.urandom(12)
@@ -178,7 +312,7 @@ async def get_public_ip_port(stun_host: str = DEFAULT_STUN_SERVER, stun_port: in
                     finally:
                         sock.setblocking(False)
                         
-                    log.debug(f"Sent STUN request to {target_addr} (attempt {retry+1}/{max_retries})")
+                    p2p_logger.debug(f"Sent STUN request to {target_addr} (attempt {retry+1}/{max_retries})")
                     
                     # Wait for response with timeout
                     try:
@@ -201,10 +335,10 @@ async def get_public_ip_port(stun_host: str = DEFAULT_STUN_SERVER, stun_port: in
                             timeout=2.0
                         )
                         
-                        log.debug(f"Received STUN response from {addr}")
+                        p2p_logger.debug(f"Received STUN response from {addr}")
 
                         if len(data) < 20 or data[4:8] != magic_cookie or data[8:20] != transaction_id:
-                            log.warning("Received invalid STUN response (header mismatch).")
+                            p2p_logger.warning("Received invalid STUN response (header mismatch).")
                             continue  # Try again with the same server
 
                         # Parse the STUN response
@@ -225,10 +359,10 @@ async def get_public_ip_port(stun_host: str = DEFAULT_STUN_SERVER, stun_port: in
                                     for i in range(16):
                                         ip_bytes[i] ^= xor_mask[i]
                                     ip = socket.inet_ntop(socket.AF_INET6, bytes(ip_bytes))
-                                    log.info(f"STUN discovered Public IPv6: {ip}:{port}")
+                                    p2p_logger.info(f"STUN discovered Public IPv6: {ip}:{port}")
                                     return ip, port
                                 else:
-                                    log.warning(f"Non-IPv6 address family in STUN response: {family_byte}")
+                                    p2p_logger.warning(f"Non-IPv6 address family in STUN response: {family_byte}")
                                     break  # Try next server
                             
                             # Move to next attribute
@@ -236,38 +370,35 @@ async def get_public_ip_port(stun_host: str = DEFAULT_STUN_SERVER, stun_port: in
                             if attr_len % 4 != 0:
                                 pos += 4 - (attr_len % 4)
 
-                        log.warning("XOR-MAPPED-ADDRESS attribute not found in STUN response.")
+                        p2p_logger.warning("XOR-MAPPED-ADDRESS attribute not found in STUN response.")
                         break  # Try next server
 
                     except asyncio.TimeoutError:
-                        log.warning(f"STUN request timed out (attempt {retry+1}/{max_retries}).")
+                        p2p_logger.warning(f"STUN request timed out (attempt {retry+1}/{max_retries}).")
                         if retry == max_retries - 1:
                             break  # Try next server
                         await asyncio.sleep(0.5 * (retry + 1))  # Exponential backoff
 
                 except OSError as e:
-                    log.warning(f"Socket error during STUN request: {e}")
+                    p2p_logger.warning(f"Socket error during STUN request: {e}")
                     break  # Try next server
                 except Exception as e:
-                    log.warning(f"Error during STUN request: {e}")
+                    p2p_logger.warning(f"Error during STUN request: {e}")
                     if retry == max_retries - 1:
                         break
                     await asyncio.sleep(0.5 * (retry + 1))  # Exponential backoff
         
         # All STUN servers failed
-        log.error("All STUN servers failed. Could not determine public IPv6.")
+        p2p_logger.error("All STUN servers failed. Could not determine public IPv6.")
         return None, None
 
-    except socket.gaierror as e:
-        log.error(f"DNS resolution failed for STUN servers: {e}")
-        return None, None
     except Exception as e:
-        log.error(f"Error during STUN operation: {e}", exc_info=True)
+        p2p_logger.error(f"Error during STUN operation: {e}", exc_info=True)
         return None, None
     finally:
         if sock:
             sock.close()
-            log.debug("Closed STUN UDP socket.")
+            p2p_logger.debug("Closed STUN UDP socket.")
 
 async def recv_all(sock: socket.socket, n: int) -> Union[bytes, None]:
     """
@@ -289,7 +420,7 @@ async def recv_all(sock: socket.socket, n: int) -> Union[bytes, None]:
     
     while len(data) < n:
         if asyncio.get_event_loop().time() - start_time > timeout:
-            log.warning(f"Timeout receiving {n} bytes (got {len(data)} bytes so far)")
+            p2p_logger.warning(f"Timeout receiving {n} bytes (got {len(data)} bytes so far)")
             return None
             
         try:
@@ -301,13 +432,13 @@ async def recv_all(sock: socket.socket, n: int) -> Union[bytes, None]:
             )
             
             if not packet:  # Connection closed
-                log.debug(f"Connection closed while receiving data (got {len(data)}/{n} bytes)")
+                p2p_logger.debug(f"Connection closed while receiving data (got {len(data)}/{n} bytes)")
                 return None
                 
             data.extend(packet)
             
         except asyncio.CancelledError:
-            log.debug("recv_all operation cancelled")
+            p2p_logger.debug("recv_all operation cancelled")
             raise  # Re-raise to propagate the cancellation
         except asyncio.TimeoutError:
             # Short timeout for this attempt, but continue trying
@@ -316,14 +447,14 @@ async def recv_all(sock: socket.socket, n: int) -> Union[bytes, None]:
             await asyncio.sleep(0.01)
             continue
         except ConnectionResetError:
-            log.warning("Connection reset while receiving data")
+            p2p_logger.warning("Connection reset while receiving data")
             return None
         except OSError as e:
             error_code = getattr(e, 'errno', None)
-            log.error(f"Socket error during recv_all: {e} (errno: {error_code})", exc_info=True)
+            p2p_logger.error(f"Socket error during recv_all: {e} (errno: {error_code})", exc_info=True)
             return None
         except Exception as e:
-            log.error(f"Unexpected error in recv_all: {e}", exc_info=True)
+            p2p_logger.error(f"Unexpected error in recv_all: {e}", exc_info=True)
             return None
     
     return bytes(data)
@@ -387,19 +518,19 @@ async def send_framed(sock: socket.socket, data: bytes) -> bool:
             )
             return True
     except asyncio.TimeoutError:
-        log.error(f"Timeout sending {len(data)} bytes")
+        p2p_logger.error(f"Timeout sending {len(data)} bytes")
         return False
     except ConnectionResetError:
-        log.warning("Connection reset while sending data")
+        p2p_logger.warning("Connection reset while sending data")
         return False
     except BrokenPipeError:
-        log.warning("Broken pipe while sending data")
+        p2p_logger.warning("Broken pipe while sending data")
         return False
     except OSError as e:
-        log.error(f"Failed to send framed data: {e}")
+        p2p_logger.error(f"Failed to send framed data: {e}")
         return False
     except Exception as e:
-        log.error(f"Unexpected error sending framed data: {e}", exc_info=True)
+        p2p_logger.error(f"Unexpected error sending framed data: {e}", exc_info=True)
         return False
 
 async def receive_framed(sock: socket.socket, timeout: float = 60.0) -> Union[bytes, None]:
@@ -435,18 +566,18 @@ async def receive_framed(sock: socket.socket, timeout: float = 60.0) -> Union[by
                 )
                 
                 if len_bytes is None or len(len_bytes) < 4:
-                    log.warning("Connection closed or timeout while receiving frame length")
+                    p2p_logger.warning("Connection closed or timeout while receiving frame length")
                     return None
                     
                 msg_len = struct.unpack(">I", len_bytes)[0]
                 
                 # Sanity check: 50MB maximum message size
                 if msg_len > 50 * 1024 * 1024:
-                    log.error(f"Frame length too large: {msg_len}. Possible corruption.")
+                    p2p_logger.error(f"Frame length too large: {msg_len}. Possible corruption.")
                     return None
                     
                 if msg_len > 100:
-                    log.debug(f"Receiving framed message of length: {msg_len}")
+                    p2p_logger.debug(f"Receiving framed message of length: {msg_len}")
                 
                 # Read the message data
                 msg_data = bytearray()
@@ -459,7 +590,7 @@ async def receive_framed(sock: socket.socket, timeout: float = 60.0) -> Union[by
                     )
                     
                     if not chunk:
-                        log.warning("Connection closed while receiving frame data")
+                        p2p_logger.warning("Connection closed while receiving frame data")
                         return None
                         
                     msg_data.extend(chunk)
@@ -474,49 +605,49 @@ async def receive_framed(sock: socket.socket, timeout: float = 60.0) -> Union[by
             # Regular socket
             len_bytes = await asyncio.wait_for(recv_all(sock, 4), timeout=timeout)
             if len_bytes is None:
-                log.warning("Connection closed or timeout while receiving frame length")
+                p2p_logger.warning("Connection closed or timeout while receiving frame length")
                 return None
 
             msg_len = struct.unpack(">I", len_bytes)[0]
             
             # Sanity check: 50MB maximum message size
             if msg_len > 50 * 1024 * 1024:
-                log.error(f"Frame length too large: {msg_len}. Possible corruption.")
+                p2p_logger.error(f"Frame length too large: {msg_len}. Possible corruption.")
                 return None
                 
             if msg_len > 100:
-                log.debug(f"Receiving framed message of length: {msg_len}")
+                p2p_logger.debug(f"Receiving framed message of length: {msg_len}")
 
             # Read the message data
             msg_data = await asyncio.wait_for(recv_all(sock, msg_len), timeout=timeout)
             if msg_data is None:
-                log.warning("Connection closed or timeout while receiving frame data")
+                p2p_logger.warning("Connection closed or timeout while receiving frame data")
                 return None
 
             return msg_data
 
     except asyncio.TimeoutError:
-        log.debug("Timeout while receiving framed message")
+        p2p_logger.debug("Timeout while receiving framed message")
         return None
     except ConnectionResetError:
-        log.warning("Connection reset while receiving framed message")
+        p2p_logger.warning("Connection reset while receiving framed message")
         return None
     except ssl.SSLWantReadError:
-        log.debug("SSL needs more data to read, but none available now")
+        p2p_logger.debug("SSL needs more data to read, but none available now")
         await asyncio.sleep(0.1)  # Give time for data to arrive
         return None
     except ssl.SSLWantWriteError:
-        log.debug("SSL needs to write before reading")
+        p2p_logger.debug("SSL needs to write before reading")
         await asyncio.sleep(0.1)
         return None
     except OSError as e:
-        log.error(f"Socket error receiving framed data: {e}")
+        p2p_logger.error(f"Socket error receiving framed data: {e}")
         return None
     except struct.error as e:
-        log.error(f"Struct unpacking error: {e} - possibly corrupted data")
+        p2p_logger.error(f"Struct unpacking error: {e} - possibly corrupted data")
         return None
     except Exception as e:
-        log.error(f"Unexpected error receiving framed data: {e}", exc_info=True)
+        p2p_logger.error(f"Unexpected error receiving framed data: {e}", exc_info=True)
         return None
 
 class SimpleP2PChat:
@@ -580,7 +711,7 @@ class SimpleP2PChat:
             attempt_reconnect: If True, try to reconnect to the last peer
         """
         async with self.connection_lock:
-            log.info("Closing TCP connection.")
+            p2p_logger.info("Closing TCP connection.")
             was_connected = self.is_connected
             self.is_connected = False
             self.stop_event.set()
@@ -601,7 +732,7 @@ class SimpleP2PChat:
                     try:
                         task.cancel()
                     except Exception as e:
-                        log.error(f"Error cancelling {task_name}: {e}", exc_info=True)
+                        p2p_logger.error(f"Error cancelling {task_name}: {e}", exc_info=True)
                 
                 # Wait briefly for tasks to clean up
                 await asyncio.sleep(0.2)
@@ -619,9 +750,9 @@ class SimpleP2PChat:
                         pass  # Socket may already be closed
                     
                     socket_to_close.close()
-                    log.info("Socket closed successfully")
+                    p2p_logger.info("Socket closed successfully")
                 except Exception as e:
-                    log.error(f"Error closing socket: {e}", exc_info=True)
+                    p2p_logger.error(f"Error closing socket: {e}", exc_info=True)
                 
             # Store peer info for potential reconnect
             if self.peer_ip and self.peer_port:
@@ -635,13 +766,13 @@ class SimpleP2PChat:
                 print(f"\n{YELLOW}Connection lost. Attempting to reconnect ({self.reconnect_attempts}/{self.MAX_RECONNECT_ATTEMPTS})...{RESET}")
                 try:
                     backoff_time = min(1.0 * self.reconnect_attempts, 5.0)  # Exponential backoff, max 5 seconds
-                    log.info(f"Waiting {backoff_time:.1f}s before reconnection attempt {self.reconnect_attempts}")
+                    p2p_logger.info(f"Waiting {backoff_time:.1f}s before reconnection attempt {self.reconnect_attempts}")
                     await asyncio.sleep(backoff_time)
                     
                     await self._connect_to_peer(peer_ip, peer_port)
                     if self.is_connected:
                         print(f"\n{GREEN}Reconnected successfully!{RESET}")
-                        log.info(f"Reconnected to {peer_ip}:{peer_port}")
+                        p2p_logger.info(f"Reconnected to {peer_ip}:{peer_port}")
                         self.reconnect_attempts = 0
                         self.stop_event.clear()
                         
@@ -649,10 +780,10 @@ class SimpleP2PChat:
                         asyncio.create_task(self._chat_session(is_reconnect=True))
                         return
                 except asyncio.CancelledError:
-                    log.info("Reconnection attempt cancelled")
+                    p2p_logger.info("Reconnection attempt cancelled")
                     raise
                 except Exception as e:
-                    log.error(f"Reconnection attempt failed: {e}", exc_info=True)
+                    p2p_logger.error(f"Reconnection attempt failed: {e}", exc_info=True)
             
             if attempt_reconnect and self.reconnect_attempts >= self.MAX_RECONNECT_ATTEMPTS:
                 print(f"\n{RED}Failed to reconnect after {self.MAX_RECONNECT_ATTEMPTS} attempts.{RESET}")
@@ -689,7 +820,7 @@ class SimpleP2PChat:
             print("\nInput interrupted")
             return "exit"
         except Exception as e:
-            log.error(f"Error getting input: {e}")
+            p2p_logger.error(f"Error getting input: {e}")
             return ""
 
     async def _process_message(self, data: bytes) -> None:
@@ -708,7 +839,7 @@ class SimpleP2PChat:
             
         # Handle message based on type
         if message.type == MessageType.ERROR:
-            log.warning(f"Message error: {message.content}")
+            p2p_logger.warning(f"Message error: {message.content}")
             return
             
         elif message.type == MessageType.USERNAME:
@@ -719,12 +850,12 @@ class SimpleP2PChat:
                 print(f"\n{GREEN}{BOLD}Connected with {self.peer_username}{RESET}\n")
                 print(f"{CYAN}{self.local_username}: {RESET}", end='', flush=True)
             else:
-                log.warning(f"Received invalid username: '{message.sender}'")
+                p2p_logger.warning(f"Received invalid username: '{message.sender}'")
                 
         elif message.type == MessageType.EXIT:
             print("\r" + " " * 100)
             print(f"\n{YELLOW}{self.peer_username} has left the chat.{RESET}")
-            log.info(f"Peer {self.peer_username} initiated disconnect.")
+            p2p_logger.info(f"Peer {self.peer_username} initiated disconnect.")
             await self._close_connection(attempt_reconnect=False)
             
         elif message.type == MessageType.MESSAGE:
@@ -740,16 +871,16 @@ class SimpleP2PChat:
             
         elif message.type == MessageType.HEARTBEAT:
             self.last_heartbeat_received = time.time()
-            log.debug("Received heartbeat message")
+            p2p_logger.debug("Received heartbeat message")
             try:
                 # Send acknowledgment
                 await self._send_message(Message(type=MessageType.HEARTBEAT_ACK))
             except Exception as e:
-                log.debug(f"Failed to send heartbeat ACK: {e}")
+                p2p_logger.debug(f"Failed to send heartbeat ACK: {e}")
                 
         elif message.type == MessageType.HEARTBEAT_ACK:
             self.last_heartbeat_received = time.time()
-            log.debug("Received heartbeat acknowledgment")
+            p2p_logger.debug("Received heartbeat acknowledgment")
             
         elif message.type == MessageType.RECONNECTED:
             print("\r" + " " * 100)
@@ -757,7 +888,7 @@ class SimpleP2PChat:
             print(f"{CYAN}{self.local_username}: {RESET}", end='', flush=True)
             
         else:
-            log.warning(f"Received unknown message type: {message.type}")
+            p2p_logger.warning(f"Received unknown message type: {message.type}")
 
     async def _receive_messages(self):
         """
@@ -770,7 +901,7 @@ class SimpleP2PChat:
         MAX_CONSECUTIVE_ERRORS = 5
         BACKOFF_DELAY = 0.5  # seconds
         
-        log.info("Starting message receive loop")
+        p2p_logger.info("Starting message receive loop")
         
         try:
             while not self.stop_event.is_set() and self.tcp_socket:
@@ -782,21 +913,21 @@ class SimpleP2PChat:
                     if data is None:
                         # Check if connection is still active
                         if self.tcp_socket and not self.stop_event.is_set():
-                            log.info("Receive loop detected closed connection unexpectedly.")
+                            p2p_logger.info("Receive loop detected closed connection unexpectedly.")
                             print(f"\n{YELLOW}Peer has disconnected or connection lost.{RESET}")
                             await self._close_connection(attempt_reconnect=True)
                         else:
-                            log.info("Receive loop exiting (socket closed or stop event set).")
+                            p2p_logger.info("Receive loop exiting (socket closed or stop event set).")
                         break
 
                     # Process received message
                     await self._process_message(data)
                     
                 except asyncio.CancelledError:
-                    log.info("Receive task cancelled.")
+                    p2p_logger.info("Receive task cancelled.")
                     raise
                 except ConnectionResetError:
-                    log.info("Connection reset by peer.")
+                    p2p_logger.info("Connection reset by peer.")
                     print(f"\n{YELLOW}Connection reset by peer.{RESET}")
                     if not self.stop_event.is_set():
                         await self._close_connection(attempt_reconnect=True)
@@ -806,14 +937,14 @@ class SimpleP2PChat:
                     consecutive_errors += 1
                     # Check for closed socket errors
                     if e.errno in (9, 10038, 10054, 10053):  # Various socket closed errors
-                        log.warning(f"Receive loop detected socket closed/error: {e}")
+                        p2p_logger.warning(f"Receive loop detected socket closed/error: {e}")
                         if not self.stop_event.is_set():
                             await self._close_connection(attempt_reconnect=True)
                         break
                     else:
-                        log.error(f"Socket error during receive: {e}", exc_info=True)
+                        p2p_logger.error(f"Socket error during receive: {e}", exc_info=True)
                         if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                            log.warning("Max consecutive receive errors reached.")
+                            p2p_logger.warning("Max consecutive receive errors reached.")
                             if not self.stop_event.is_set():
                                 await self._close_connection(attempt_reconnect=True)
                             break
@@ -822,30 +953,30 @@ class SimpleP2PChat:
 
                 except Exception as e:
                     consecutive_errors += 1
-                    log.error(f"Unexpected error during receive: {e}", exc_info=True)
+                    p2p_logger.error(f"Unexpected error during receive: {e}", exc_info=True)
                     if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                        log.warning("Max consecutive unexpected errors reached.")
+                        p2p_logger.warning("Max consecutive unexpected errors reached.")
                         if not self.stop_event.is_set():
                             await self._close_connection(attempt_reconnect=True)
                         break
                     # Exponential backoff
                     await asyncio.sleep(min(BACKOFF_DELAY * consecutive_errors, 5.0))
 
-            log.info("Receive loop finished normally.")
+            p2p_logger.info("Receive loop finished normally.")
         except asyncio.CancelledError:
-            log.info("Receive loop cancelled.")
+            p2p_logger.info("Receive loop cancelled.")
             raise
         except Exception as e:
-            log.error(f"Receive loop exited with unhandled exception: {e}", exc_info=True)
+            p2p_logger.error(f"Receive loop exited with unhandled exception: {e}", exc_info=True)
         finally:
             # Update connection state if loop exits unexpectedly
             if self.is_connected and not self.stop_event.is_set():
-                 log.warning("Receive loop ended unexpectedly without explicit close. Closing connection.")
+                 p2p_logger.warning("Receive loop ended unexpectedly without explicit close. Closing connection.")
                  try:
                      await self._close_connection(attempt_reconnect=True)
                  except Exception as e:
-                     log.error(f"Error during final cleanup in receive loop: {e}", exc_info=True)
-            log.info("Receive loop cleanup complete")
+                     p2p_logger.error(f"Error during final cleanup in receive loop: {e}", exc_info=True)
+            p2p_logger.info("Receive loop cleanup complete")
 
     async def _send_message(self, message: Message) -> bool:
         """
@@ -858,14 +989,14 @@ class SimpleP2PChat:
             True if sent successfully, False otherwise
         """
         if not self.is_connected or not self.tcp_socket:
-            log.warning("Cannot send message: not connected")
+            p2p_logger.warning("Cannot send message: not connected")
             return False
             
         try:
             message_str = str(message)
             return await send_framed(self.tcp_socket, message_str.encode('utf-8'))
         except Exception as e:
-            log.error(f"Error sending message: {e}", exc_info=True)
+            p2p_logger.error(f"Error sending message: {e}", exc_info=True)
             return False
 
     async def _send_heartbeats(self):
@@ -891,10 +1022,10 @@ class SimpleP2PChat:
                     
                     if not success:
                         missed_heartbeats += 1
-                        log.warning(f"Failed to send heartbeat. Missed: {missed_heartbeats}/{self.MISSED_HEARTBEATS_THRESHOLD}")
+                        p2p_logger.warning(f"Failed to send heartbeat. Missed: {missed_heartbeats}/{self.MISSED_HEARTBEATS_THRESHOLD}")
                         
                         if missed_heartbeats >= self.MISSED_HEARTBEATS_THRESHOLD:
-                            log.warning("Too many missed heartbeats. Connection may be dead.")
+                            p2p_logger.warning("Too many missed heartbeats. Connection may be dead.")
                             print(f"\n{YELLOW}Connection appears to be dead. Attempting to reconnect...{RESET}")
                             if not self.stop_event.is_set():
                                 await self._close_connection(attempt_reconnect=True)
@@ -905,7 +1036,7 @@ class SimpleP2PChat:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                log.error(f"Error sending heartbeat: {e}")
+                p2p_logger.error(f"Error sending heartbeat: {e}")
                 missed_heartbeats += 1
                 
                 if missed_heartbeats >= self.MISSED_HEARTBEATS_THRESHOLD:
@@ -944,7 +1075,7 @@ class SimpleP2PChat:
                 raise ValueError(f"Invalid port number: {peer_port}")
 
             loop = asyncio.get_event_loop()
-            log.info(f"Resolving IPv6 address for {peer_ip}:{peer_port}")
+            p2p_logger.info(f"Resolving IPv6 address for {peer_ip}:{peer_port}")
             
             try:
                 addrinfo = await loop.getaddrinfo(
@@ -953,16 +1084,16 @@ class SimpleP2PChat:
                     type=socket.SOCK_STREAM
                 )
             except socket.gaierror as e:
-                log.error(f"Failed to resolve IPv6 address {peer_ip}:{peer_port} - {e}", exc_info=True)
+                p2p_logger.error(f"Failed to resolve IPv6 address {peer_ip}:{peer_port} - {e}", exc_info=True)
                 raise ValueError(f"Could not resolve IPv6 address: {str(e)}")
 
             if not addrinfo:
-                log.error(f"No IPv6 addresses found for {peer_ip}:{peer_port}")
+                p2p_logger.error(f"No IPv6 addresses found for {peer_ip}:{peer_port}")
                 raise ValueError("Could not resolve IPv6 address")
 
             # Get socket address information
             family, type_, proto, _, sockaddr = addrinfo[0]
-            log.info(f"Using IPv6 address: {sockaddr}")
+            p2p_logger.info(f"Using IPv6 address: {sockaddr}")
             
             try:
                 client_socket = socket.socket(family, type_, proto)
@@ -978,10 +1109,10 @@ class SimpleP2PChat:
                     if hasattr(socket, 'TCP_KEEPCNT'):
                         client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
                 except Exception as e:
-                    log.debug(f"Could not set some TCP keepalive options: {e}")
+                    p2p_logger.debug(f"Could not set some TCP keepalive options: {e}")
                     # Non-critical, continue anyway
 
-                log.info(f"Attempting connection to {sockaddr} (timeout: {self.CONNECTION_TIMEOUT}s)")
+                p2p_logger.info(f"Attempting connection to {sockaddr} (timeout: {self.CONNECTION_TIMEOUT}s)")
                 
                 # Cross-platform TCP connection method
                 client_socket.setblocking(True)
@@ -1011,9 +1142,9 @@ class SimpleP2PChat:
                 except Exception:
                     pass  # Not critical if this fails
                 
-                log.info(f"Connection to {sockaddr} succeeded")
+                p2p_logger.info(f"Connection to {sockaddr} succeeded")
                 connection_time = time.time() - connection_start_time
-                log.info(f"Connection established in {connection_time:.2f} seconds")
+                p2p_logger.info(f"Connection established in {connection_time:.2f} seconds")
                 
                 # Connection succeeded
                 self.tcp_socket = client_socket
@@ -1025,38 +1156,38 @@ class SimpleP2PChat:
                 self.last_known_peer = (peer_ip, peer_port)
                 self.last_heartbeat_received = time.time()  # Reset heartbeat timer
                 
-                log.info(f"Successfully connected to [{peer_ip}]:{peer_port}")
+                p2p_logger.info(f"Successfully connected to [{peer_ip}]:{peer_port}")
                 print(f"{GREEN}Successfully connected to [{peer_ip}]:{peer_port} " + 
                       f"(in {connection_time:.2f}s){RESET}")
                 return True
                 
             except asyncio.CancelledError:
-                log.info("Connection attempt was cancelled")
+                p2p_logger.info("Connection attempt was cancelled")
                 if client_socket:
                     client_socket.close()
                 raise
             except asyncio.TimeoutError:
-                log.error(f"Connection attempt timed out after {self.CONNECTION_TIMEOUT}s")
+                p2p_logger.error(f"Connection attempt timed out after {self.CONNECTION_TIMEOUT}s")
                 if client_socket:
                     client_socket.close()
                     client_socket = None
                 raise ConnectionError(f"Connection timed out after {self.CONNECTION_TIMEOUT} seconds")
             except ConnectionRefusedError:
-                log.error(f"Connection refused to [{peer_ip}]:{peer_port}")
+                p2p_logger.error(f"Connection refused to [{peer_ip}]:{peer_port}")
                 if client_socket:
                     client_socket.close()
                     client_socket = None
                 raise ConnectionError("Connection refused. Is the peer's server running?")
             except (OSError, Exception) as e:
                 error_code = getattr(e, 'errno', None)
-                log.error(f"Connection attempt failed: {e} (errno: {error_code})")
+                p2p_logger.error(f"Connection attempt failed: {e} (errno: {error_code})")
                 if client_socket:
                     client_socket.close()
                     client_socket = None
                 raise ConnectionError(f"Failed to connect: {str(e)}")
                 
         except asyncio.CancelledError:
-            log.info("Connection process cancelled")
+            p2p_logger.info("Connection process cancelled")
             if client_socket:
                 client_socket.close()
             raise
@@ -1067,7 +1198,7 @@ class SimpleP2PChat:
             # Re-raise validation errors without modification
             raise
         except Exception as e:
-            log.error(f"Unexpected error connecting to {peer_ip}:{peer_port}: {e}", exc_info=True)
+            p2p_logger.error(f"Unexpected error connecting to {peer_ip}:{peer_port}: {e}", exc_info=True)
             if client_socket:
                 client_socket.close()
             raise ConnectionError(f"Connection failed: {str(e)}")
@@ -1083,7 +1214,7 @@ class SimpleP2PChat:
             is_reconnect: True if this is a reconnected session
         """
         if not self.tcp_socket:
-            log.warning("Attempted to start chat session without a socket.")
+            p2p_logger.warning("Attempted to start chat session without a socket.")
             return
 
         self.stop_event.clear()
@@ -1118,7 +1249,7 @@ class SimpleP2PChat:
                 if not await self._send_message(message):
                     raise ConnectionError("Failed to send username")
         except Exception as e:
-            log.error(f"Failed to send initial message: {e}")
+            p2p_logger.error(f"Failed to send initial message: {e}")
             print(f"{RED}Error establishing chat session. Disconnecting.{RESET}")
             await self._close_connection()
             return
@@ -1140,7 +1271,7 @@ class SimpleP2PChat:
                     if self.is_connected:
                         await send_framed(self.tcp_socket, queued_msg.encode('utf-8'))
                 except Exception as e:
-                    log.error(f"Failed to send queued message: {e}")
+                    p2p_logger.error(f"Failed to send queued message: {e}")
                     await self.message_queue.put(queued_msg)
                     await self._close_connection(attempt_reconnect=True)
                     break
@@ -1187,12 +1318,12 @@ class SimpleP2PChat:
                         success = await self._send_message(message)
                         
                         if not success:
-                            log.warning("Failed to send message, connection may be lost")
+                            p2p_logger.warning("Failed to send message, connection may be lost")
                             # Queue message for potential reconnect
                             if self.message_queue.qsize() < 100: # Limit queue size
                                 await self.message_queue.put(str(message))
                             else:
-                                log.warning("Message queue full, discarding oldest message.")
+                                p2p_logger.warning("Message queue full, discarding oldest message.")
                                 try: 
                                     await self.message_queue.get_nowait() # Discard oldest
                                 except asyncio.QueueEmpty:
@@ -1200,12 +1331,12 @@ class SimpleP2PChat:
                                 await self.message_queue.put(str(message))
                             
                             if self.is_connected:
-                                log.info("Attempting reconnect after failed send.")
+                                p2p_logger.info("Attempting reconnect after failed send.")
                                 if not self.stop_event.is_set():
                                     await self._close_connection(attempt_reconnect=True)
                                 break
                     except Exception as e:
-                        log.error(f"Failed to send message: {e}")
+                        p2p_logger.error(f"Failed to send message: {e}")
                         msg_data = str(Message(
                             type=MessageType.MESSAGE,
                             sender=self.local_username,
@@ -1214,7 +1345,7 @@ class SimpleP2PChat:
                         if self.message_queue.qsize() < 100:
                             await self.message_queue.put(msg_data)
                         else:
-                            log.warning("Message queue full, discarding oldest message.")
+                            p2p_logger.warning("Message queue full, discarding oldest message.")
                             try: 
                                 await self.message_queue.get_nowait()
                             except asyncio.QueueEmpty:
@@ -1227,7 +1358,7 @@ class SimpleP2PChat:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                log.error(f"Error in sending loop: {e}")
+                p2p_logger.error(f"Error in sending loop: {e}")
                 break
 
         # Cleanup
@@ -1290,7 +1421,7 @@ class SimpleP2PChat:
         while True:
             try:
                 if self.is_connected:
-                    log.info("Waiting for stop event before showing main menu")
+                    p2p_logger.info("Waiting for stop event before showing main menu")
                     await self.stop_event.wait()
                     self.is_connected = False
 
@@ -1300,7 +1431,7 @@ class SimpleP2PChat:
                 try:
                     choice = (await self._async_input(f"{BLUE}Choose an option (1-4): {RESET}")).strip()
                 except Exception as e:
-                    log.error(f"Error getting user choice: {e}", exc_info=True)
+                    p2p_logger.error(f"Error getting user choice: {e}", exc_info=True)
                     print(f"{RED}Error reading input. Please try again.{RESET}")
                     continue
 
@@ -1330,10 +1461,10 @@ class SimpleP2PChat:
                         pass
                     server_socket = None
             except asyncio.CancelledError:
-                log.info("Main connection handling loop cancelled")
+                p2p_logger.info("Main connection handling loop cancelled")
                 break
             except Exception as e:
-                log.error(f"Unexpected error in handle_connections: {e}", exc_info=True)
+                p2p_logger.error(f"Unexpected error in handle_connections: {e}", exc_info=True)
                 print(f"\n{RED}Unexpected error: {e}. Continuing...{RESET}")
 
         # Cleanup on exit
@@ -1341,7 +1472,7 @@ class SimpleP2PChat:
             try:
                 server_socket.close()
             except Exception as e:
-                log.error(f"Error closing server socket during exit: {e}", exc_info=True)
+                p2p_logger.error(f"Error closing server socket during exit: {e}", exc_info=True)
           
         self.stop_event.set()
         
@@ -1352,7 +1483,7 @@ class SimpleP2PChat:
                     task.cancel()
                     await asyncio.sleep(0.1)
                 except Exception as e:
-                    log.error(f"Error cancelling {task_name}: {e}", exc_info=True)
+                    p2p_logger.error(f"Error cancelling {task_name}: {e}", exc_info=True)
                     
     def _print_banner(self):
         """Print main menu options with banner."""
@@ -1389,7 +1520,7 @@ class SimpleP2PChat:
                 print(f"{YELLOW}You may still be able to accept incoming connections on a local IPv6 network.{RESET}")
                 print(f"{YELLOW}Make sure your system has IPv6 connectivity.{RESET}")
         except Exception as e:
-            log.error(f"STUN discovery error: {e}", exc_info=True)
+            p2p_logger.error(f"STUN discovery error: {e}", exc_info=True)
             print(f"{RED}Error during STUN discovery: {e}{RESET}")
             
     async def _start_client(self):
@@ -1416,7 +1547,7 @@ class SimpleP2PChat:
                     print(f"{RED}Invalid address or port: {e}{RESET}")
                 except socket.gaierror as e:
                     print(f"{RED}Error: Could not resolve hostname or invalid IPv6 address.{RESET}")
-                    log.error(f"DNS resolution error: {e}")
+                    p2p_logger.error(f"DNS resolution error: {e}")
                 except ConnectionRefusedError:
                     print(f"{RED}Connection refused. Is the peer server running?{RESET}")
                 except asyncio.TimeoutError:
@@ -1425,18 +1556,18 @@ class SimpleP2PChat:
                     print(f"{RED}Connection error: {e}{RESET}")
                 except OSError as e:
                     print(f"{RED}Network error: {e}{RESET}")
-                    log.error(f"Network error connecting to peer: {e}", exc_info=True)
+                    p2p_logger.error(f"Network error connecting to peer: {e}", exc_info=True)
                 except Exception as e:
                     print(f"{RED}Unexpected error: {e}{RESET}")
-                    log.error(f"Unexpected error connecting to peer: {e}", exc_info=True)
+                    p2p_logger.error(f"Unexpected error connecting to peer: {e}", exc_info=True)
                     
             except ValueError:
                 print(f"{RED}Invalid port number. Please enter a number between 1-65535.{RESET}")
         except asyncio.CancelledError:
-            log.info("Client connection process cancelled")
+            p2p_logger.info("Client connection process cancelled")
             print(f"{YELLOW}Connection attempt cancelled.{RESET}")
         except Exception as e:
-            log.error(f"Error in client mode: {e}", exc_info=True)
+            p2p_logger.error(f"Error in client mode: {e}", exc_info=True)
             print(f"{RED}Unexpected error: {e}{RESET}")
             
     async def _start_server(self):
@@ -1453,7 +1584,7 @@ class SimpleP2PChat:
             try:
                 server_socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
             except Exception as e:
-                log.debug(f"Could not set IPV6_V6ONLY: {e}")
+                p2p_logger.debug(f"Could not set IPV6_V6ONLY: {e}")
             
             # Try multiple ports if binding fails
             max_port_attempts = 5
@@ -1463,12 +1594,12 @@ class SimpleP2PChat:
                     if current_port > 65535:
                         current_port = random.randint(10000, 60000)
                         
-                    log.info(f"Attempting to bind server socket to [::]:{current_port}")
+                    p2p_logger.info(f"Attempting to bind server socket to [::]:{current_port}")
                     server_socket.bind(("::", current_port))
                     listen_port = current_port
                     server_socket.listen(1)
                     
-                    log.info(f"Server socket bound to [::]:{listen_port}")
+                    p2p_logger.info(f"Server socket bound to [::]:{listen_port}")
                     print(f"\n{GREEN}Server listening on [::]:{listen_port} (IPv6-only){RESET}")
                         
                     if self.public_ip:
@@ -1480,16 +1611,16 @@ class SimpleP2PChat:
                 except OSError as e:
                     # If port is in use, try another
                     if e.errno in (98, 10048):  # Address already in use
-                        log.warning(f"Port {current_port} is already in use, trying another port.")
+                        p2p_logger.warning(f"Port {current_port} is already in use, trying another port.")
                         if port_attempt == max_port_attempts - 1:
-                            log.error(f"All port attempts failed for [::]")
+                            p2p_logger.error(f"All port attempts failed for [::]")
                             raise
                     else:
-                        log.error(f"Failed to bind to [::]:{current_port}: {e}", exc_info=True)
+                        p2p_logger.error(f"Failed to bind to [::]:{current_port}: {e}", exc_info=True)
                         raise
         
         except OSError as e:
-            log.warning(f"Failed to create IPv6 server socket: {e}")
+            p2p_logger.warning(f"Failed to create IPv6 server socket: {e}")
             print(f"{RED}Failed to create IPv6 server socket. Make sure IPv6 is available on your system.{RESET}")
             return
 
@@ -1534,9 +1665,9 @@ class SimpleP2PChat:
                     if hasattr(socket, 'TCP_KEEPCNT'):
                         client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
                 except Exception as e:
-                    log.debug(f"Could not set TCP keepalive options on client socket: {e}")
+                    p2p_logger.debug(f"Could not set TCP keepalive options on client socket: {e}")
 
-                log.info(f"Accepted connection from {client_address}")
+                p2p_logger.info(f"Accepted connection from {client_address}")
                 self.tcp_socket = client_socket
                 self.peer_ip = client_address[0]
                 self.peer_port = client_address[1]
@@ -1562,16 +1693,16 @@ class SimpleP2PChat:
                 print(f"{RED}Error: Port {listen_port} is already in use.{RESET}")
             else:
                 print(f"{RED}Server error: {e}{RESET}")
-                log.error(f"Server socket error: {e}", exc_info=True)
+                p2p_logger.error(f"Server socket error: {e}", exc_info=True)
         except Exception as e:
             print(f"{RED}Server error: {e}{RESET}")
-            log.error(f"Unexpected server error: {e}", exc_info=True)
+            p2p_logger.error(f"Unexpected server error: {e}", exc_info=True)
         finally:
             if server_socket:
                 try:
                     server_socket.close()
                 except Exception as e:
-                    log.error(f"Error closing server socket: {e}", exc_info=True)
+                    p2p_logger.error(f"Error closing server socket: {e}", exc_info=True)
                 server_socket = None
 
     async def start(self):
@@ -1600,7 +1731,7 @@ class SimpleP2PChat:
             print(f"\n{YELLOW}Program interrupted by user.{RESET}")
         except Exception as e:
             print(f"\n{RED}Unhandled error: {e}{RESET}")
-            log.error(f"Unhandled error in main loop: {e}", exc_info=True)
+            p2p_logger.error(f"Unhandled error in main loop: {e}", exc_info=True)
         finally:
             # Final cleanup
             if self.tcp_socket:
@@ -1624,7 +1755,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nExiting...")
     except Exception as e:
-        log.error(f"Fatal error: {e}", exc_info=True)
+        p2p_logger.error(f"Fatal error: {e}", exc_info=True)
         print(f"\n{RED}Fatal error: {e}{RESET}")
     finally:
         if chat_app.tcp_socket:

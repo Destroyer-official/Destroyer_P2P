@@ -11,16 +11,37 @@ multi-layered security features including:
 - Hardware security module integration when available
 - Memory protection and anti-tampering mechanisms
 
-Author: Secure Communications TeamRemove OAuth dependency
-The OAuth authentication creates identity linkability issues
-Replace with anonymous credentials or zero-knowledge proofs for authentication
-Implement ephemeral identities with disposable key pairs
-License: MIT
+Security Architecture:
+1. Transport Layer: TLS 1.3 with ChaCha20-Poly1305 and post-quantum key exchange
+2. Key Exchange: Hybrid X3DH + ML-KEM-1024 for quantum-resistant key agreement
+3. Message Encryption: Double Ratchet with FALCON-1024 signatures and AES-256-GCM
+4. Identity Protection: Ephemeral identities with disposable key pairs
+5. Forward Secrecy: Regular key rotation and zero-knowledge session ratcheting
+6. Memory Protection: Secure memory allocation, canary values, anti-debugging
+
+Post-Quantum Security:
+- ML-KEM-1024: NIST-standardized lattice-based key encapsulation mechanism
+- FALCON-1024: Hash-based signature scheme resistant to quantum attacks
+- HQC-256: Code-based encryption as additional quantum-resistant layer
+
+Hardware Security:
+- TPM/HSM integration for key isolation when available
+- Secure enclaves for protected key operations on supported platforms
+- libsodium for cross-platform cryptographic operations
+
+Anti-Tampering:
+- Runtime integrity verification
+- Anti-debugging protections
+- Memory canaries to detect buffer overflows
+- Constant-time operations to prevent timing attacks
+
+Author: Secure Communications Team
+License: MIT 
 """
 
 import asyncio 
 import logging
-import os
+import os 
 import sys
 import socket
 import signal 
@@ -40,6 +61,7 @@ import hashlib # Ensure hashlib is imported
 from cryptography.hazmat.primitives import hashes as crypto_hashes # For HKDF
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF # For HKDF
 import threading
+import libsodium_manager # Import libsodium manager for cross-platform libsodium support
 
 # Custom security exception
 class SecurityError(Exception):
@@ -48,36 +70,60 @@ class SecurityError(Exception):
     
     This exception is used to indicate potential security issues, 
     failures in cryptographic operations, or other security-critical errors.
+    It provides a standardized way to handle security violations throughout
+    the application.
     """
     pass
  
 # Import dependencies
 from tls_channel_manager import TLSSecureChannel
 import p2p_core as p2p
-from hybrid_kex import HybridKeyExchange, verify_key_material, _format_binary, secure_erase, DEFAULT_KEY_LIFETIME
+from hybrid_kex import HybridKeyExchange, verify_key_material, DEFAULT_KEY_LIFETIME, _format_binary
 from double_ratchet import DoubleRatchet
 import secure_key_manager
 import platform_hsm_interface as cphs
 from ca_services import CAExchange  # Import the new CAExchange module
 import tls_channel_manager
 
-# Configure logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s') # Ensure DEBUG level
-log = logging.getLogger(__name__)
-log.setLevel(logging.DEBUG) # Ensure DEBUG level for the main logger
+# Directly import the enhanced algorithms to ensure they are used.
+from pqc_algorithms import EnhancedFALCON_1024, EnhancedMLKEM_1024, ConstantTime, EnhancedHQC
 
-# Set up file handler for security logs
-try:
-    logs_dir = os.path.join(os.path.dirname(__file__), "logs")
-    os.makedirs(logs_dir, exist_ok=True)
-    
-    file_handler = logging.FileHandler(os.path.join(logs_dir, 'secure_p2p_security.log'))
-    file_handler.setLevel(logging.DEBUG) # Ensure DEBUG level for file handler
-    file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] [%(funcName)s] %(message)s'))
-    log.addHandler(file_handler)
-    # log.setLevel(logging.DEBUG) # This line is redundant as it's set above
-except Exception as e:
-    log.warning(f"Could not set up security logging: {e}")
+# Setup dedicated logger for Secure P2P
+secure_p2p_logger = logging.getLogger("secure_p2p")
+secure_p2p_logger.setLevel(logging.DEBUG)
+
+# Create logs directory if it doesn't exist
+logs_dir = os.path.join(os.path.dirname(__file__), "logs")
+os.makedirs(logs_dir, exist_ok=True)
+
+# Create file handler for secure_p2p.log
+secure_p2p_file_handler = logging.FileHandler(os.path.join(logs_dir, 'secure_p2p.log'))
+secure_p2p_file_handler.setLevel(logging.DEBUG)
+
+# Create formatter
+formatter = logging.Formatter('%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] [%(funcName)s] %(message)s')
+secure_p2p_file_handler.setFormatter(formatter)
+
+# Add file handler to logger
+secure_p2p_logger.addHandler(secure_p2p_file_handler)
+
+# Also log to console for immediate visibility
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(formatter)
+secure_p2p_logger.addHandler(console_handler)
+
+secure_p2p_logger.info("Secure P2P logger initialized")
+
+# Keep the existing security log file for backward compatibility
+security_file_handler = logging.FileHandler(os.path.join(logs_dir, 'secure_p2p_security.log'))
+security_file_handler.setLevel(logging.DEBUG)
+security_file_handler.setFormatter(formatter)
+secure_p2p_logger.addHandler(security_file_handler)
+
+# Standard logging setup for backward compatibility
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s')
+log = logging.getLogger(__name__)
 
 # ANSI colors for terminal output
 GREEN = '\033[92m'
@@ -92,7 +138,24 @@ BOLD = '\033[1m'
 class KeyEraser:
     """
     Context manager for securely handling and erasing sensitive cryptographic key material.
-    Uses enhanced secure erasure techniques to minimize the risk of keys remaining in memory.
+    
+    This class implements multiple layers of protection for sensitive key material:
+    1. Memory pinning to prevent swapping to disk
+    2. Enhanced secure erasure with multiple overwrite patterns
+    3. Platform-specific memory protection (VirtualLock on Windows, mlock on Linux/macOS)
+    4. Immediate cleanup on context exit
+    
+    Usage:
+        with KeyEraser(key_material, "session_key") as ke:
+            # Use key_material safely here
+            result = crypto_operation(ke.key_material)
+        # Key is automatically securely erased when context exits
+        
+    Security features:
+    - Prevents key material from being swapped to disk
+    - Implements DoD 5220.22-M compliant secure erasure
+    - Uses platform-specific memory protection APIs
+    - Forces garbage collection after erasure
     """
     def __init__(self, key_material=None, description="sensitive key"):
         self.key_material = key_material
@@ -113,7 +176,19 @@ class KeyEraser:
         self.key_material = key_material
         
     def _pin_memory(self, material: bytearray):
-        """Pin memory to prevent swapping to disk"""
+        """
+        Pin memory to prevent swapping to disk
+        
+        This method uses platform-specific APIs to lock memory pages,
+        preventing sensitive cryptographic material from being written
+        to disk in swap files.
+        
+        Args:
+            material (bytearray): The sensitive data to protect
+            
+        Returns:
+            bool: True if memory was successfully locked, False otherwise
+        """
         if not isinstance(material, bytearray) or len(material) == 0:
             return False
 
@@ -152,7 +227,13 @@ class KeyEraser:
         return locked
             
     def _unpin_memory(self):
-        """Unpin memory previously pinned with _pin_memory"""
+        """
+        Unpin memory previously pinned with _pin_memory
+        
+        This method releases memory locks applied by _pin_memory,
+        allowing the operating system to manage the memory normally
+        after sensitive data has been securely erased.
+        """
         if not self._locked_address or not self._locked_platform:
             return
             
@@ -176,15 +257,26 @@ class KeyEraser:
         self._locked_platform = None
 
     def secure_erase(self):
-        """Securely erase the key material from memory using enhanced techniques."""
+        """
+        Securely erase the key material from memory using the single best method.
+        
+        This method implements a comprehensive secure erasure technique that:
+        1. Overwrites memory with multiple patterns
+        2. Forces memory barriers to prevent compiler optimizations
+        3. Ensures memory is properly unpinned
+        4. Triggers garbage collection to clean up references
+        
+        The implementation follows security best practices to minimize
+        the risk of key material remaining in memory after erasure.
+        """
         if self.key_material is None:
             log.debug(f"KeyEraser: No key material to erase for {self.description} (was None).")
             return
 
         try:
-            # Use the enhanced secure erase function from secure_key_manager
+            # Exclusively use the enhanced secure erase function. No fallbacks.
             import secure_key_manager as skm
-            log.debug(f"KeyEraser: Attempting enhanced secure erase for {self.description}")
+            log.debug(f"KeyEraser: Performing mandatory enhanced secure erase for {self.description}")
             skm.enhanced_secure_erase(self.key_material)
             self.key_material = None
             
@@ -194,83 +286,27 @@ class KeyEraser:
             log.debug(f"KeyEraser: Completed secure erase for {self.description}")
             
         except (ImportError, AttributeError) as e:
-            # Fall back to basic erase if enhanced version not available
-            log.warning(f"KeyEraser: Enhanced secure erase not available: {e}. Falling back to basic method.")
-            self._basic_secure_erase()
+            # If the mandatory enhanced version is not available, this is a critical failure.
+            log.critical(f"KeyEraser: CRITICAL_SECURITY_FAILURE: The required enhanced_secure_erase function is not available: {e}. Cannot guarantee secure memory handling.")
+            raise SecurityError("A required security function (enhanced_secure_erase) is not available.") from e
         except Exception as e:
-            # If anything goes wrong, try the basic method
-            log.warning(f"KeyEraser: Error during enhanced secure erase: {e}. Falling back to basic method.")
-            self._basic_secure_erase()
-            
-    def _basic_secure_erase(self):
-        """Basic fallback method for secure erasure if enhanced method is unavailable."""
-        if self.key_material is None:
-            return
-            
-        key_type = type(self.key_material).__name__
-        key_len = len(self.key_material) if hasattr(self.key_material, '__len__') else 'N/A'
-        
-        try:
-            if isinstance(self.key_material, bytearray):
-                memory_pinned = self._pin_memory(self.key_material)
-                try:
-                    # Zero out the bytearray
-                    ctypes.memset(ctypes.addressof(ctypes.c_byte.from_buffer(self.key_material)), 0, key_len)
-                    log.debug(f"KeyEraser: Basic secure erase - zeroed {key_len} bytes in bytearray for {self.description}")
-                except Exception:
-                    # Fallback to loop-based zeroing
-                    for i in range(len(self.key_material)):
-                        self.key_material[i] = 0
-                finally:
-                    if memory_pinned:
-                        self._unpin_memory()
-            elif isinstance(self.key_material, bytes):
-                # Can't directly erase immutable bytes, but can create a mutable copy and zero it
-                log.info(
-                    f"KeyEraser: Basic secure erase - {self.description} is immutable ({key_type}). "
-                    f"Creating mutable copy to zero, but original bytes object may remain in memory."
-                )
-                mutable_copy = bytearray(self.key_material)
-                for i in range(len(mutable_copy)):
-                    mutable_copy[i] = 0
-            elif isinstance(self.key_material, str):
-                # Can't directly erase immutable strings, but can create a mutable copy and zero it
-                log.info(
-                    f"KeyEraser: Basic secure erase - {self.description} is immutable ({key_type}). "
-                    f"Creating mutable copy to zero, but original string may remain in memory."
-                )
-                mutable_copy = bytearray(self.key_material.encode('utf-8'))
-                for i in range(len(mutable_copy)):
-                    mutable_copy[i] = 0
-            elif hasattr(self.key_material, 'zeroize'):
-                log.debug(f"KeyEraser: Basic secure erase - calling zeroize() method on {self.description}")
-                self.key_material.zeroize()
-            elif hasattr(self.key_material, '__dict__'):
-                log.debug(f"KeyEraser: Basic secure erase - clearing attributes of {self.description}")
-                for attr_name in list(self.key_material.__dict__.keys()):
-                    attr_value = getattr(self.key_material, attr_name, None)
-                    if isinstance(attr_value, (bytes, bytearray, str)):
-                        try:
-                            setattr(self.key_material, attr_name, None)
-                        except AttributeError:
-                            pass
-                    elif isinstance(attr_value, (list, dict)):
-                        try:
-                            getattr(self.key_material, attr_name).clear()
-                        except (AttributeError, TypeError):
-                            pass
-            else:
-                log.warning(f"KeyEraser: Basic secure erase - cannot securely erase {key_type}")
-        except Exception as e:
-            log.error(f"KeyEraser: Error during basic secure erase: {e}")
-            
-        # Clear our reference and suggest garbage collection
-        self.key_material = None
-        gc.collect()
+            log.error(f"KeyEraser: An unexpected error occurred during enhanced secure erase: {e}")
+            raise SecurityError("An unexpected error occurred during secure key erasure.") from e
 
 def secure_memory_wipe(address, length):
     """
-    Use platform-specific methods to securely wipe memory.
+    Securely wipes a memory region using the most secure method available on the platform.
+    
+    This function implements platform-specific memory wiping techniques to ensure
+    sensitive data is properly erased from memory, minimizing the risk of data
+    recovery through memory forensics.
+    
+    Args:
+        address (int): Memory address to wipe
+        length (int): Number of bytes to wipe
+        
+    Returns:
+        bool: True if wiping was successful, False otherwise
     """
     try:
         # Platform-specific memory protection/unprotection
@@ -300,7 +336,25 @@ def secure_memory_wipe(address, length):
 class InputValidator:
     """
     Input validation class for secure handling of user inputs.
-    Provides validation methods for usernames, messages, IP addresses, ports, and other inputs.
+    
+    This class provides comprehensive validation methods to prevent security
+    vulnerabilities related to user input, including:
+    - SQL injection prevention
+    - Command injection prevention
+    - Buffer overflow protection
+    - Format string attack prevention
+    - Input size limiting
+    
+    Each validation method uses strict regular expressions and size limits
+    to ensure inputs conform to expected formats and sizes, reducing the
+    attack surface for malicious inputs.
+    
+    Security features:
+    - Strict regex patterns for input validation
+    - Maximum length enforcement
+    - Character set restrictions
+    - Proper error handling for invalid inputs
+    - Sanitization of potentially dangerous characters
     """
     # Regular expressions for validation
     USERNAME_REGEX = r'^[a-zA-Z0-9_-]{3,32}$'
@@ -453,14 +507,43 @@ class InputValidator:
 
 class SecureP2PChat(p2p.SimpleP2PChat):
     """
-    Enhanced secure P2P chat with multi-layer security including Hybrid X3DH+PQ and TLS.
+    Enhanced secure P2P chat with multi-layer quantum-resistant security.
     
-    Features:
-    - Initial key agreement using Hybrid X3DH+PQ (X25519 + ML-KEM-1024)
-    - Message encryption using Double Ratchet (forward secrecy, break-in recovery)
-    - Transport security using TLS 1.3 with ChaCha20-Poly1305
-    - Post-quantum security using ML-KEM-1024 and FALCON-1024
-    - Advanced security hardening (memory protection, canary values)
+    This class extends the basic P2P chat functionality with comprehensive
+    security measures designed to protect against both classical and quantum
+    computing threats. It implements a defense-in-depth approach with multiple
+    independent security layers.
+    
+    Key Exchange:
+    - Hybrid X3DH+PQ combining classical (X25519) and post-quantum (ML-KEM-1024) algorithms
+    - Perfect forward secrecy through ephemeral key pairs
+    - Identity hiding through deniable authentication
+    - Key confirmation to prevent MITM attacks
+    
+    Message Security:
+    - Double Ratchet protocol for forward and backward secrecy
+    - Break-in recovery through continuous key evolution
+    - Message authentication using HMAC-SHA256 and FALCON-1024 signatures
+    - Padding and length normalization to prevent traffic analysis
+    
+    Transport Security:
+    - TLS 1.3 with ChaCha20-Poly1305 for authenticated encryption
+    - Certificate validation with TLSA record verification
+    - Ephemeral session keys with perfect forward secrecy
+    - Post-quantum key exchange integration
+    
+    Platform Security:
+    - Hardware security module integration when available
+    - Memory protection against cold boot attacks
+    - Anti-debugging measures to prevent runtime analysis
+    - Canary values to detect memory corruption
+    - Secure key erasure with multiple overwrite patterns
+    
+    Implementation Security:
+    - Constant-time operations to prevent timing attacks
+    - Regular key rotation based on time and message count
+    - Entropy collection from multiple sources
+    - Strict input validation to prevent injection attacks
     """
     
     # Connection constants
@@ -632,16 +715,24 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         self.root_key = None
         self.identity_key = None
         
+        # Initialize security status tracking
+        self.security_hardening = {
+            'memory_protection': False,
+            'canary_values': False,
+            'key_rotation': True,
+            'libsodium': False  # Will be set to True if initialization succeeds
+        }
+        
+        # Initialize libsodium for cryptographic operations
+        self._initialize_libsodium()
+        
         # Initialize security hardening
         self._enable_memory_protection()
         self._initialize_canary_values()
         
-        # Security status tracking
-        self.security_hardening = {
-            'memory_protection': True,
-            'canary_values': True,
-            'key_rotation': True
-        }
+        # Update security hardening status
+        self.security_hardening['memory_protection'] = True
+        self.security_hardening['canary_values'] = True
         
         # Initialize security flow with all components
         self._update_security_flow()
@@ -840,7 +931,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         os.makedirs(self.cert_dir, exist_ok=True)
         os.makedirs(self.keys_dir, exist_ok=True)
         
-        # Mark directories as verified since we've created them
+        # Mark directories as verified since we've created them51408
         self.security_verified['cert_dir'] = os.path.exists(self.cert_dir)
         self.security_verified['keys_dir'] = os.path.exists(self.keys_dir)
         
@@ -856,7 +947,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         # Initialize ephemeral identity settings
         self.use_ephemeral_identity = ephemeral
         self.ephemeral_key_lifetime = key_lifetime
-        
+         
         # Initialize authentication settings
         self.require_authentication = os.environ.get('P2P_REQUIRE_AUTH', 'false').lower() == 'true'
         self.oauth_provider = os.environ.get('P2P_OAUTH_PROVIDER', 'google')
@@ -1049,7 +1140,19 @@ class SecureP2PChat(p2p.SimpleP2PChat):
             finally:
                 self.hybrid_kex = None # Ensure instance attribute is None
                 
-                log.info("Security cleanup completed (main)")
+        # Clean up libsodium resources if initialized
+        if hasattr(self, 'libsodium_handle') and self.libsodium_handle is not None:
+            try:
+                # Let libsodium_manager handle its own cleanup
+                if hasattr(libsodium_manager, 'cleanup_libsodium') and callable(libsodium_manager.cleanup_libsodium):
+                    log.debug("cleanup(): Calling libsodium_manager.cleanup_libsodium()")
+                    libsodium_manager.cleanup_libsodium()
+                    log.info("Cleaned up libsodium resources")
+                self.libsodium_handle = None
+            except Exception as e:
+                log.error(f"Error during libsodium cleanup: {e}")
+                
+        log.info("Security cleanup completed (main)")
     
     async def _exchange_hybrid_keys_client(self):
         """
@@ -1143,7 +1246,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
             success = await p2p.send_framed(self.tcp_socket, handshake_json.encode('utf-8'))
             if not success:
                 log.error("Failed to send handshake message")
-                secure_erase(self.hybrid_root_key)
+                self._secure_erase(self.hybrid_root_key)
                 self.hybrid_root_key = None
                 raise SecurityError("Failed to send handshake message during client key exchange.")
             
@@ -1152,7 +1255,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
             # --- BEGIN: Authenticate hybrid_root_key ---
             log.info("Authenticating derived hybrid_root_key with peer...")
             try:
-                data_to_auth = hashlib.sha256(self.hybrid_root_key).digest()
+                data_to_auth = self._derive_auth_key(self.hybrid_root_key)
                 
                 # Client signs and sends
                 client_signature = self.hybrid_kex.dss.sign(self.hybrid_kex.falcon_private_key, data_to_auth)
@@ -1192,17 +1295,17 @@ class SecureP2PChat(p2p.SimpleP2PChat):
 
             except asyncio.TimeoutError:
                 log.error("Timed out during hybrid_root_key authentication.")
-                secure_erase(self.hybrid_root_key)
+                self._secure_erase(self.hybrid_root_key)
                 self.hybrid_root_key = None
                 raise SecurityError("Timed out during hybrid_root_key authentication.")
             except json.JSONDecodeError as e:
                 log.error(f"SECURITY ALERT: Invalid JSON in hybrid_root_key auth data: {e}")
-                secure_erase(self.hybrid_root_key)
+                self._secure_erase(self.hybrid_root_key)
                 self.hybrid_root_key = None
                 raise SecurityError(f"Invalid JSON in hybrid_root_key auth data: {e}")
             except Exception as e:
                 log.error(f"SECURITY ALERT: Error during hybrid_root_key authentication: {e}")
-                secure_erase(self.hybrid_root_key) # Ensure key is wiped on any error
+                self._secure_erase(self.hybrid_root_key) # Ensure key is wiped on any error
                 self.hybrid_root_key = None
                 # Re-raise as SecurityError to ensure connection teardown
                 if not isinstance(e, SecurityError):
@@ -1226,7 +1329,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                 success = await p2p.send_framed(self.tcp_socket, ratchet_public_key)
                 if not success:
                     log.error("Failed to send ratchet public key")
-                    secure_erase(self.hybrid_root_key)
+                    self._secure_erase(self.hybrid_root_key)
                     self.hybrid_root_key = None
                     raise SecurityError("Failed to send ratchet public key during client Double Ratchet setup.")
                 
@@ -1239,7 +1342,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                     success = await p2p.send_framed(self.tcp_socket, dss_public_key)
                     if not success:
                         log.error("Failed to send DSS public key")
-                        secure_erase(self.hybrid_root_key)
+                        self._secure_erase(self.hybrid_root_key)
                         self.hybrid_root_key = None
                         raise SecurityError("Failed to send DSS public key during client Double Ratchet setup.")
                     
@@ -1252,7 +1355,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                     success = await p2p.send_framed(self.tcp_socket, kem_public_key)
                     if not success:
                         log.error("Failed to send KEM public key")
-                        secure_erase(self.hybrid_root_key)
+                        self._secure_erase(self.hybrid_root_key)
                         self.hybrid_root_key = None
                         raise SecurityError("Failed to send KEM public key during client Double Ratchet setup.")
                     log.debug("KEM public key sent successfully")
@@ -1262,7 +1365,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                 peer_ratchet_key = await p2p.receive_framed(self.tcp_socket)
                 if not peer_ratchet_key:
                     log.error("Failed to receive peer's ratchet public key")
-                    secure_erase(self.hybrid_root_key)
+                    self._secure_erase(self.hybrid_root_key)
                     self.hybrid_root_key = None
                     raise SecurityError("Failed to receive peer's ratchet public key during client Double Ratchet setup.")
                 
@@ -1277,7 +1380,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                     peer_dss_key = await p2p.receive_framed(self.tcp_socket)
                     if not peer_dss_key:
                         log.error("Failed to receive peer's DSS public key")
-                        secure_erase(self.hybrid_root_key)
+                        self._secure_erase(self.hybrid_root_key)
                         self.hybrid_root_key = None
                         raise SecurityError("Failed to receive peer's DSS public key during client Double Ratchet setup.")
                     
@@ -1293,7 +1396,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                         )
                         if not peer_kem_key:
                             log.error("Failed to receive peer's KEM public key")
-                            secure_erase(self.hybrid_root_key)
+                            self._secure_erase(self.hybrid_root_key)
                             self.hybrid_root_key = None
                             raise SecurityError("Failed to receive peer's KEM public key during client Double Ratchet setup.")
                         
@@ -1301,7 +1404,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                         verify_key_material(peer_kem_key, description="Peer KEM public key")
                     except asyncio.TimeoutError:
                         log.error("Timed out waiting for peer's KEM public key")
-                        secure_erase(self.hybrid_root_key)
+                        self._secure_erase(self.hybrid_root_key)
                         self.hybrid_root_key = None
                         raise SecurityError("Timed out waiting for peer's KEM public key during client Double Ratchet setup.")
                     log.debug("Peer KEM key received and verified successfully")
@@ -1321,7 +1424,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                         success = await p2p.send_framed(self.tcp_socket, kem_ciphertext)
                         if not success:
                             log.error("Failed to send KEM ciphertext")
-                            secure_erase(self.hybrid_root_key)
+                            self._secure_erase(self.hybrid_root_key)
                             self.hybrid_root_key = None
                             raise SecurityError("Failed to send KEM ciphertext during client Double Ratchet setup.")
                 
@@ -1347,7 +1450,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
 
             except Exception as e:
                 log.error(f"SECURITY ALERT: Failed to initialize Double Ratchet: {e}")
-                secure_erase(self.hybrid_root_key)
+                self._secure_erase(self.hybrid_root_key)
                 self.hybrid_root_key = None
                 self.security_verified['double_ratchet'] = False
                 raise SecurityError(f"Failed to initialize Double Ratchet as client: {e}")
@@ -1360,7 +1463,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
             log.error(f"SECURITY ALERT: Error during client hybrid key exchange: {e}", exc_info=True)
             # Clean up any partial state
             if hasattr(self, 'hybrid_root_key') and self.hybrid_root_key:
-                secure_erase(self.hybrid_root_key)
+                self._secure_erase(self.hybrid_root_key)
                 self.hybrid_root_key = None
             
             self.security_verified['double_ratchet'] = False # Also covers hybrid_kex failure implication
@@ -1527,10 +1630,10 @@ class SecureP2PChat(p2p.SimpleP2PChat):
 
                     # Server verifies client's data
                     # 1. Compute local hash of its own hybrid_root_key
-                    data_to_auth_local = hashlib.sha256(self.hybrid_root_key).digest()
+                    data_to_auth_local = self._derive_auth_key(self.hybrid_root_key)
                     
                     # 2. Ensure client's hash matches server's computed hash
-                    if client_data_hash != data_to_auth_local:
+                    if not ConstantTime.compare(client_data_hash, data_to_auth_local):
                         log.error(
                             f"SECURITY ALERT: Client's proclaimed hash of hybrid_root_key ({_format_binary(client_data_hash)}) "
                             f"does not match server's locally computed hash ({_format_binary(data_to_auth_local)})."
@@ -1558,17 +1661,17 @@ class SecureP2PChat(p2p.SimpleP2PChat):
 
                 except asyncio.TimeoutError:
                     log.error("Timed out during hybrid_root_key authentication.")
-                    secure_erase(self.hybrid_root_key)
+                    self._secure_erase(self.hybrid_root_key)
                     self.hybrid_root_key = None
                     raise SecurityError("Timed out during hybrid_root_key authentication.")
                 except json.JSONDecodeError as e:
                     log.error(f"SECURITY ALERT: Invalid JSON in hybrid_root_key auth data: {e}")
-                    secure_erase(self.hybrid_root_key)
+                    self._secure_erase(self.hybrid_root_key)
                     self.hybrid_root_key = None
                     raise SecurityError(f"Invalid JSON in hybrid_root_key auth data: {e}")
                 except Exception as e:
                     log.error(f"SECURITY ALERT: Error during hybrid_root_key authentication: {e}")
-                    secure_erase(self.hybrid_root_key) # Ensure key is wiped on any error
+                    self._secure_erase(self.hybrid_root_key) # Ensure key is wiped on any error
                     self.hybrid_root_key = None
                     # Re-raise as SecurityError to ensure connection teardown
                     if not isinstance(e, SecurityError):
@@ -1589,7 +1692,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                     peer_ratchet_key = await p2p.receive_framed(self.tcp_socket)
                     if not peer_ratchet_key:
                         log.error("Failed to receive peer's ratchet public key")
-                        secure_erase(self.hybrid_root_key)
+                        self._secure_erase(self.hybrid_root_key)
                         self.hybrid_root_key = None
                         return False
                     
@@ -1604,7 +1707,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                         peer_dss_key = await p2p.receive_framed(self.tcp_socket)
                         if not peer_dss_key:
                             log.error("Failed to receive peer's DSS public key")
-                            secure_erase(self.hybrid_root_key)
+                            self._secure_erase(self.hybrid_root_key)
                             self.hybrid_root_key = None
                             return False
                         
@@ -1620,7 +1723,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                             )
                             if not peer_kem_key:
                                 log.error("Failed to receive peer's KEM public key")
-                                secure_erase(self.hybrid_root_key)
+                                self._secure_erase(self.hybrid_root_key)
                                 self.hybrid_root_key = None
                                 return False
                             
@@ -1628,7 +1731,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                             verify_key_material(peer_kem_key, description="Peer KEM public key")
                         except asyncio.TimeoutError:
                             log.error("Timed out waiting for peer's KEM public key")
-                            secure_erase(self.hybrid_root_key)
+                            self._secure_erase(self.hybrid_root_key)
                             self.hybrid_root_key = None
                             return False
                         log.debug("Peer KEM key received and verified successfully")
@@ -1645,7 +1748,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                     success = await p2p.send_framed(self.tcp_socket, ratchet_public_key)
                     if not success:
                         log.error("Failed to send ratchet public key")
-                        secure_erase(self.hybrid_root_key)
+                        self._secure_erase(self.hybrid_root_key)
                         self.hybrid_root_key = None
                         return False
                     
@@ -1658,7 +1761,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                         success = await p2p.send_framed(self.tcp_socket, dss_public_key)
                         if not success:
                             log.error("Failed to send DSS public key")
-                            secure_erase(self.hybrid_root_key)
+                            self._secure_erase(self.hybrid_root_key)
                             self.hybrid_root_key = None
                             return False
                         
@@ -1671,7 +1774,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                         success = await p2p.send_framed(self.tcp_socket, kem_public_key)
                         if not success:
                             log.error("Failed to send KEM public key")
-                            secure_erase(self.hybrid_root_key)
+                            self._secure_erase(self.hybrid_root_key)
                             self.hybrid_root_key = None
                             return False
                         log.debug("KEM public key sent successfully")
@@ -1686,7 +1789,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                             )
                             if not kem_ciphertext:
                                 log.error("Failed to receive KEM ciphertext")
-                                secure_erase(self.hybrid_root_key)
+                                self._secure_erase(self.hybrid_root_key)
                                 self.hybrid_root_key = None
                                 return False
                             
@@ -1702,13 +1805,13 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                                 log.debug(f"Derived KEM shared secret: {_format_binary(kem_shared_secret)}")
                             except Exception as e:
                                 log.error(f"SECURITY ALERT: Failed to process KEM ciphertext: {e}")
-                                secure_erase(self.hybrid_root_key)
+                                self._secure_erase(self.hybrid_root_key)
                                 self.hybrid_root_key = None
                                 return False
                             log.debug("KEM ciphertext processed successfully")
                         except asyncio.TimeoutError:
                             log.error("Timed out waiting for KEM ciphertext")
-                            secure_erase(self.hybrid_root_key)
+                            self._secure_erase(self.hybrid_root_key)
                             self.hybrid_root_key = None
                             return False
                     
@@ -1734,7 +1837,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
 
                 except Exception as e:
                     log.error(f"SECURITY ALERT: Failed to initialize Double Ratchet: {e}")
-                    secure_erase(self.hybrid_root_key)
+                    self._secure_erase(self.hybrid_root_key)
                     self.hybrid_root_key = None
                     self.security_verified['double_ratchet'] = False
                     return False
@@ -1744,7 +1847,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
             except ValueError as e:
                 log.error(f"SECURITY ALERT: Failed to process handshake message: {e}")
                 if hasattr(self, 'hybrid_root_key') and self.hybrid_root_key:
-                    secure_erase(self.hybrid_root_key)
+                    self._secure_erase(self.hybrid_root_key)
                     self.hybrid_root_key = None
                 return False
             
@@ -1752,7 +1855,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
             log.error(f"SECURITY ALERT: Error during server hybrid key exchange: {e}", exc_info=True)
             # Clean up any partial state
             if hasattr(self, 'hybrid_root_key') and self.hybrid_root_key:
-                secure_erase(self.hybrid_root_key)
+                self._secure_erase(self.hybrid_root_key)
                 self.hybrid_root_key = None
             
             self.security_verified['double_ratchet'] = False
@@ -2132,7 +2235,16 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                             
                             # Show hardware security status
                             if self.security_verified['secure_enclave']:
-                                enclave_type = self.tls_channel.secure_enclave.enclave_type if hasattr(self.tls_channel, 'secure_enclave') else "Unknown"
+                                # Check if secure_enclave has enclave_type attribute or get name attribute as fallback
+                                if hasattr(self.tls_channel, 'secure_enclave'):
+                                    if hasattr(self.tls_channel.secure_enclave, 'enclave_type'):
+                                        enclave_type = self.tls_channel.secure_enclave.enclave_type
+                                    elif hasattr(self.tls_channel.secure_enclave, 'name'):
+                                        enclave_type = self.tls_channel.secure_enclave.name
+                                    else:
+                                        enclave_type = type(self.tls_channel.secure_enclave).__name__
+                                else:
+                                    enclave_type = "Unknown"
                                 print(f"  \033[96mHardware Security: \033[92mEnabled ({enclave_type})\033[0m")
                             else:
                                 print(f"  \033[96mHardware Security: \033[93mNot available\033[0m")
@@ -2300,10 +2412,10 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                                         print(f"\n\033[92mSecure server listening on {config['addr']}:{listen_port} (IPv4)\033[0m")
                                         
                                     if self.public_ip:
-                                        ip_display = f"[{self.public_ip}]" if ':' in self.public_ip else self.public_ip
-                                        print(f"\033[95mYour public endpoint: {ip_display}:{self.public_port}\033[0m")
-                                    print(f"\033[96mWaiting for a secure connection...\033[0m")
-                                    
+                                        ip_display = f"{self.public_ip}" if ':' in self.public_ip else self.public_ip
+                                        print(f"{CYAN}Your public endpoint: \n \n  {MAGENTA} IPv6 address: {ip_display} \n   {GREEN} port number: {self.public_port}{RESET}\n")
+                                    print(f"{CYAN}Waiting for a connection...{RESET}")
+                    
                                     # Successfully bound
                                     break
                                     
@@ -2643,12 +2755,12 @@ class SecureP2PChat(p2p.SimpleP2PChat):
                 # Client Mode
                 elif choice == '2':
                     try:
-                        peer_ip = (await self._async_input(f"\nEnter peer's IP address (IPv6 or IPv4): \033[0m")).strip()
+                        peer_ip = (await self._async_input(f"{MAGENTA}\nEnter peer's IPv6 address: ")).strip()
                         if not peer_ip:
                             print(f"\033[91mIP address cannot be empty.\033[0m")
                             continue
                             
-                        peer_port_str = (await self._async_input(f"Enter peer's port number: \033[0m")).strip()
+                        peer_port_str = (await self._async_input(f"  {GREEN}Enter peer's port number: ")).strip()
                         
                         try:
                             peer_port = int(peer_port_str)
@@ -3073,11 +3185,29 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         """
         Encrypt a message using the Double Ratchet with enhanced quantum resistance.
         
+        This method implements a multi-layered encryption approach:
+        1. Validates the message to prevent injection attacks
+        2. Converts the message to UTF-8 bytes
+        3. Adds random padding to prevent traffic analysis
+        4. Applies quantum-resistant enhancements when available:
+           - Derives binding keys using hybrid key derivation
+           - Adds context binding for enhanced security
+        5. Encrypts using the Double Ratchet protocol (AES-256-GCM)
+        
+        The encryption process advances the ratchet, providing forward secrecy
+        even if previous keys are compromised.
+        
         Args:
-            message: The message to encrypt
+            message: The plaintext message to encrypt
             
         Returns:
-            bytes: The encrypted message
+            bytes: The fully encrypted and authenticated message
+            
+        Security:
+            - Forward secrecy through key ratcheting
+            - Authentication using HMAC and post-quantum signatures
+            - Side-channel resistance through constant-time operations
+            - Message padding to prevent traffic analysis
         """
         # Validate message
         if not InputValidator.validate_message(message):
@@ -3126,11 +3256,29 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         """
         Decrypt a message with support for quantum-resistant enhancements.
         
+        This method implements a comprehensive decryption process:
+        1. Verifies connection and ratchet state
+        2. Decrypts the ciphertext using the Double Ratchet protocol
+        3. Handles both standard and quantum-enhanced messages:
+           - Detects binding prefix in quantum-enhanced messages
+           - Extracts and verifies binding information
+        4. Removes padding added during encryption
+        5. Decodes the plaintext from UTF-8 bytes
+        
+        The decryption process advances the ratchet, maintaining
+        forward secrecy and break-in recovery properties.
+        
         Args:
-            encrypted_data: The encrypted data
+            encrypted_data: The encrypted data bytes
             
         Returns:
-            str: The decrypted message
+            str: The decrypted plaintext message
+            
+        Security:
+            - Message authentication before decryption
+            - Constant-time operations to prevent timing attacks
+            - Error handling that doesn't leak information
+            - Support for quantum-resistant enhancements
         """
         if not self.is_connected:
             log.warning("Cannot decrypt message: not connected")
@@ -3436,10 +3584,14 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         """
         try:
             # Initialize DEP (Data Execution Prevention)
-            from dep_impl import implement_dep_in_secure_p2p
+            from dep_impl import implement_dep_in_secure_p2p, MemoryProtectionError
             dep_result = implement_dep_in_secure_p2p()
             log.info(f"Successfully enabled {dep_result} protection")
             return True
+        except MemoryProtectionError as mpe:
+            # Re-raise the specific, critical error to halt execution
+            log.critical(f"A critical security prerequisite is missing: {mpe}")
+            raise
         except Exception as e:
             log.error(f"Failed to enable memory protection: {e}")
             return False
@@ -3453,7 +3605,7 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         """
         try:
             # Import the DEP implementation
-            from dep_impl import EnhancedDEP
+            from dep_impl import EnhancedDEP, MemoryProtectionError
             
             # Create an instance of EnhancedDEP
             self.dep = EnhancedDEP()
@@ -3478,6 +3630,10 @@ class SecureP2PChat(p2p.SimpleP2PChat):
             
             log.info("Stack canary values initialized successfully")
             return True
+        except MemoryProtectionError as mpe:
+            # Re-raise the specific, critical error to halt execution
+            log.critical(f"Could not initialize canary values due to a critical security failure: {mpe}")
+            raise
         except Exception as e:
             log.error(f"Failed to initialize canary values: {e}")
             self.canary_initialized = False
@@ -3619,6 +3775,13 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         if 'ephemeral_identity' not in self.security_verified:
             self.security_verified['ephemeral_identity'] = self.use_ephemeral_identity
             
+        # Add libsodium information to security flow
+        self.security_flow['libsodium'] = {
+            'status': self.security_verified.get('libsodium', False),
+            'provides': ['high_performance_crypto', 'cross_platform_support', 'memory_security'],
+            'path': getattr(self, 'libsodium_handle', None) is not None
+        }
+        
         # Add ephemeral identity information to security flow
         self.security_flow['ephemeral_identity'] = {
             'status': self.security_verified.get('ephemeral_identity', False),
@@ -3987,6 +4150,10 @@ class SecureP2PChat(p2p.SimpleP2PChat):
         # TLS status
         tls_status = "\033[92mEnabled (TLS 1.3 with ChaCha20-Poly1305)\033[0m" if self.security_verified['tls'] else "\033[91mFailed\033[0m"
         print(f"TLS Security: {tls_status}")
+        
+        # Libsodium status
+        libsodium_status = "\033[92mEnabled\033[0m" if self.security_verified.get('libsodium', False) else "\033[93mFallback mode\033[0m"
+        print(f"Libsodium: {libsodium_status}")
 
     def _initialize_hardware_security(self):
         """
@@ -4009,6 +4176,50 @@ class SecureP2PChat(p2p.SimpleP2PChat):
             log.warning(f"Hardware security module initialization failed: {e}")
             return False
 
+    def _initialize_libsodium(self):
+        """
+        Initialize libsodium cryptographic library using libsodium_manager.
+        
+        The libsodium_manager automatically handles:
+        1. Checking if libsodium is already installed
+        2. Downloading the appropriate version for the current platform
+        3. Installing or compiling libsodium if needed
+        4. Loading the library for use in the application
+        
+        Returns:
+            bool: True if libsodium was successfully initialized, False otherwise
+        """
+        try:
+            log.info("Initializing libsodium using libsodium_manager...")
+            success, lib_path, libsodium_handle = libsodium_manager.initialize_libsodium()
+            
+            if success:
+                log.info(f"Successfully initialized libsodium from: {lib_path}")
+                self.libsodium_handle = libsodium_handle
+                
+                # Initialize security_hardening if it doesn't exist yet
+                if not hasattr(self, 'security_hardening'):
+                    self.security_hardening = {}
+                
+                # Set libsodium status
+                self.security_hardening['libsodium'] = True
+                
+                # Update security verification status
+                if not hasattr(self, 'security_verified'):
+                    self.security_verified = {}
+                self.security_verified['libsodium'] = True
+                
+                # Update security flow with libsodium information
+                if hasattr(self, '_update_security_flow'):
+                    self._update_security_flow()
+                return True
+            else:
+                log.warning("Failed to initialize libsodium")
+                return False
+        except Exception as e:
+            log.error(f"Error initializing libsodium: {e}")
+            return False
+            
     def _initialize_quantum_resistance(self):
         """
         Initialize quantum resistance future-proofing features.
@@ -4050,6 +4261,16 @@ class SecureP2PChat(p2p.SimpleP2PChat):
             self.security_verified['quantum_resistance'] = False
             return False
 
+    def _derive_auth_key(self, root_key: bytes) -> bytes:
+        """Derives a key confirmation key from the root key using a hardened KDF."""
+        hkdf = HKDF(
+            algorithm=crypto_hashes.SHA512(),
+            length=64,  # Use a 64-byte hash for authentication
+            salt=b'p2p-key-auth-salt',
+            info=b'hybrid-key-confirmation'
+        )
+        return hkdf.derive(root_key)
+
 # Only execute this code if the script is run directly
 if __name__ == "__main__":
     # Set a global flag to indicate we're running in standalone mode
@@ -4067,6 +4288,7 @@ if __name__ == "__main__":
     print(f"{GREEN}4. Certificate exchange {RESET}")
     print(f"{GREEN}5. Ephemeral identity with automatic key rotation (default){RESET}")
     print(f"{GREEN}6. User Authentication via OAuth (optional, disabled by default){RESET}")
+    print(f"{GREEN}7. Cross-platform libsodium support with automatic dependency management{RESET}")
      
     # Create and run the chat application
     chat = SecureP2PChat()

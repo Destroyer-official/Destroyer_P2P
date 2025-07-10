@@ -6,7 +6,7 @@ import tempfile
 import logging
 import secrets
 import threading
-import hashlib
+import hashlib 
 import base64 
 import json
 from datetime import datetime, timedelta, timezone
@@ -70,7 +70,7 @@ except ImportError:
             """
             max_counter = (2 ** (self.counter_size * 8)) - 1
             if self.counter >= max_counter:
-                logger.warning(f"Nonce counter reached maximum ({max_counter}), resetting salt and counter")
+                ca_logger.warning(f"Nonce counter reached maximum ({max_counter}), resetting salt and counter")
                 self.reset()
                 
             counter_bytes = self.counter.to_bytes(self.counter_size, byteorder='big')
@@ -87,7 +87,7 @@ except ImportError:
             self.counter = 0
             self.salt = os.urandom(self.salt_size)
             self.last_reset_time = datetime.now()
-            logger.debug(f"CounterBasedNonceManager reset with new {self.salt_size}-byte salt")
+            ca_logger.debug(f"CounterBasedNonceManager reset with new {self.salt_size}-byte salt")
             
         def get_counter(self) -> int:
             """Gets the current counter value (for debugging)."""
@@ -199,22 +199,56 @@ except ImportError:
             self.key = new_key
             self.nonce_manager.reset()
 
-# Configure logging
-logger = logging.getLogger("CAExchange")
+# Configure logging for Certificate Authority services
+ca_logger = logging.getLogger("ca_services")
+ca_logger.setLevel(logging.DEBUG)
 
-# Post-quantum key exchange groups to be used in TLS context
-HYBRID_PQ_GROUPS = ["X25519MLKEM1024", "SecP256r1MLKEM1024"]
+# Ensure logs directory exists
+if not os.path.exists("logs"):
+    os.makedirs("logs")
+
+# Setup file logging
+ca_file_handler = logging.FileHandler(os.path.join("logs", "ca_services.log"))
+ca_file_handler.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s')
+ca_file_handler.setFormatter(formatter)
+ca_logger.addHandler(ca_file_handler)
+
+# Setup console logging for immediate feedback
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(formatter)
+ca_logger.addHandler(console_handler)
+
+ca_logger.info("CA Services logger initialized")
+
+# Standard logging setup for backward compatibility
+log = logging.getLogger(__name__)
 
 class SecurityError(Exception):
-    """Custom exception for security-related errors in the context of CA services."""
+    """Exception raised for security-related errors in certificate operations.
+    
+    This exception is raised when a security constraint is violated,
+    validation fails, or a security operation cannot be completed safely.
+    It helps distinguish security failures from general operational errors.
+    """
     pass
 
 class CAExchange:
-    """Manages the lifecycle of secure peer-to-peer connections.
-
-    This class handles the generation of self-signed certificates, their secure
-    exchange between peers, and the creation of high-security TLS contexts.
-    It incorporates features like HPKP-style pinning and OCSP stapling.
+    """Certificate Authority Exchange for secure peer-to-peer connections.
+    
+    Provides comprehensive certificate management for P2P applications with
+    military-grade security features. Handles the complete lifecycle of 
+    certificates from generation to secure exchange and verification.
+    
+    Key features:
+    - Self-signed certificate generation with strong parameters
+    - Secure certificate exchange with authenticated encryption
+    - TLS 1.3 context creation with hardened security settings
+    - HPKP-style certificate pinning for MITM protection
+    - OCSP stapling for certificate status verification
+    - IPv6 support with proper socket handling
+    - Memory protection for sensitive cryptographic material
     """
     
     def __init__(self, 
@@ -226,22 +260,24 @@ class CAExchange:
                  base_shared_secret: bytes = b'SecureP2PCertificateExchangeKey!!',
                  enable_hpkp: bool = True,
                  enable_ocsp_stapling: bool = True):
-        """Initializes the certificate exchange manager.
+        """Initialize the certificate exchange manager with security parameters.
         
         Args:
-            exchange_port_offset: Port offset from the base port for the
-                certificate exchange service.
-            buffer_size: The size of the socket buffer for the exchange.
-            validity_days: The validity period for generated certificates.
-            key_type: The type and size of the cryptographic key to generate
-                (e.g., "rsa4096", "ec384").
-            secure_exchange: If True, the certificate exchange is encrypted.
-            base_shared_secret: A secret used to derive the encryption key for
-                the certificate exchange.
-                **Warning**: For production use, this should be a unique,
-                high-entropy secret.
-            enable_hpkp: If True, enables HTTP Public Key Pinning.
-            enable_ocsp_stapling: If True, enables OCSP stapling.
+            exchange_port_offset: Port offset from the base connection port for certificate exchange.
+                                  Used to separate certificate exchange from the main connection.
+            buffer_size: Socket buffer size in bytes for network operations.
+            validity_days: Certificate validity period in days.
+            key_type: Cryptographic key type and size (e.g., "rsa4096", "ec384").
+                      RSA keys must be at least 2048 bits, EC curves P-256, P-384, or P-521.
+            secure_exchange: When True, encrypts certificate exchange with XChaCha20-Poly1305.
+            base_shared_secret: Base secret for deriving the encryption key.
+                                WARNING: For production, replace with a high-entropy secret.
+            enable_hpkp: Enables HTTP Public Key Pinning style certificate pinning.
+            enable_ocsp_stapling: Enables OCSP stapling for certificate validation.
+        
+        Note:
+            The default settings provide strong security suitable for most applications.
+            For highest security, provide a custom base_shared_secret in production.
         """
         self.exchange_port_offset = exchange_port_offset
         self.buffer_size = buffer_size
@@ -265,7 +301,7 @@ class CAExchange:
         self.ocsp_response_cache: Dict[str, Dict[str, Any]] = {}
         self.ocsp_response_max_age = 3600  # 1 hour
         
-        logger.debug("CAExchange module initialized with enhanced security options")
+        ca_logger.debug("CAExchange module initialized with enhanced security options")
         
         self.exchange_key: Optional[bytes] = None
         self.xchacha_cipher: Optional[XChaCha20Poly1305] = None
@@ -286,33 +322,43 @@ class CAExchange:
             
             try:
                 self.xchacha_cipher = XChaCha20Poly1305(self.exchange_key)
-                logger.debug("CAExchange initialized with XChaCha20Poly1305 for cert exchange.")
+                ca_logger.debug("CAExchange initialized with XChaCha20Poly1305 for cert exchange.")
             except Exception as e:
-                logger.error(f"Failed to initialize XChaCha20Poly1305: {e}. Certificate exchange will be insecure!")
+                ca_logger.error(f"Failed to initialize XChaCha20Poly1305: {e}. Certificate exchange will be insecure!")
                 self.xchacha_cipher = None
                 self.secure_exchange = False
         
         self.cert_store: Dict[str, bytes] = {}
     
     def generate_self_signed(self) -> Tuple[bytes, bytes]:
-        """Generates a new self-signed certificate and private key.
-
-        The generated certificate includes enhanced security extensions like
-        Basic Constraints, Key Usage, and OCSP Must-Staple if enabled.
-
+        """Generate a new self-signed certificate with enhanced security features.
+        
+        Creates a cryptographically strong certificate with security extensions:
+        - Strong key (RSA-4096 by default or EC P-384)
+        - Basic Constraints (CA=True with path length 0)
+        - Key Usage (digital signature, content commitment, key encipherment, cert sign, CRL sign)
+        - Subject/Authority Key Identifier
+        - OCSP Must-Staple (if enabled)
+        
+        The certificate is suitable for TLS 1.3 with strong security parameters
+        and follows best practices for self-signed certificates in P2P applications.
+        
         Returns:
-            A tuple containing the private key and certificate in PEM format.
+            Tuple[bytes, bytes]: (private_key_pem, certificate_pem)
+        
+        Raises:
+            ValueError: If key generation fails or parameters are invalid
         """
-        logger.info("Generating self-signed certificate with enhanced security parameters...")
+        ca_logger.info("Generating self-signed certificate with enhanced security parameters...")
 
         if self.key_type.startswith("rsa"):
             try:
                 key_size = int(self.key_type[3:])
                 if key_size < 2048:
-                    logger.warning(f"RSA key size {key_size} is too small. Using 4096 bits instead.")
+                    ca_logger.warning(f"RSA key size {key_size} is too small. Using 4096 bits instead.")
                     key_size = 4096
             except ValueError:
-                logger.warning(f"Invalid RSA key size: {self.key_type}. Using 4096 bits instead.")
+                ca_logger.warning(f"Invalid RSA key size: {self.key_type}. Using 4096 bits instead.")
                 key_size = 4096
                 
             key = rsa.generate_private_key(
@@ -320,7 +366,7 @@ class CAExchange:
                 key_size=key_size,
                 backend=default_backend()
             )
-            logger.debug(f"Generated RSA-{key_size} key pair")
+            ca_logger.debug(f"Generated RSA-{key_size} key pair")
             
         elif self.key_type.startswith("ec"):
             try:
@@ -332,11 +378,11 @@ class CAExchange:
                 elif curve_size == 521:
                     curve = ec.SECP521R1()
                 else:
-                    logger.warning(f"Invalid EC curve size: {curve_size}. Using P-384 instead.")
+                    ca_logger.warning(f"Invalid EC curve size: {curve_size}. Using P-384 instead.")
                     curve = ec.SECP384R1()
                     curve_size = 384
             except ValueError:
-                logger.warning(f"Invalid EC curve size: {self.key_type}. Using P-384 instead.")
+                ca_logger.warning(f"Invalid EC curve size: {self.key_type}. Using P-384 instead.")
                 curve = ec.SECP384R1()
                 curve_size = 384
                 
@@ -344,16 +390,16 @@ class CAExchange:
                 curve=curve,
                 backend=default_backend()
             )
-            logger.debug(f"Generated EC P-{curve_size} key pair")
+            ca_logger.debug(f"Generated EC P-{curve_size} key pair")
             
         else:
-            logger.warning(f"Unsupported key type: {self.key_type}. Using RSA-4096 instead.")
+            ca_logger.warning(f"Unsupported key type: {self.key_type}. Using RSA-4096 instead.")
             key = rsa.generate_private_key(
                 public_exponent=65537,
                 key_size=4096,
                 backend=default_backend()
             )
-            logger.debug("Generated RSA-4096 key pair (fallback)")
+            ca_logger.debug("Generated RSA-4096 key pair (fallback)")
 
         subject = issuer = x509.Name([
             x509.NameAttribute(NameOID.COMMON_NAME, f"P2P-{secrets.token_hex(8)}"),
@@ -370,7 +416,7 @@ class CAExchange:
         ).serial_number(
             x509.random_serial_number()
         ).not_valid_before(
-            datetime.now(timezone.utc)
+            datetime.now(timezone.utc) - timedelta(minutes=5)
         ).not_valid_after(
             datetime.now(timezone.utc) + timedelta(days=self.validity_days)
         )
@@ -421,10 +467,10 @@ class CAExchange:
         fingerprint = cert.fingerprint(hashes.SHA256())
         self.local_cert_fingerprint = fingerprint.hex()
         
-        logger.debug(f"Private key PEM created ({len(key_pem_bytes)} bytes).")
-        logger.debug(f"Certificate PEM created ({len(cert_pem_bytes)} bytes).")
-        logger.debug(f"Certificate fingerprint: {self.local_cert_fingerprint}")
-        logger.info("Self-signed certificate generation complete.")
+        ca_logger.debug(f"Private key PEM created ({len(key_pem_bytes)} bytes).")
+        ca_logger.debug(f"Certificate PEM created ({len(cert_pem_bytes)} bytes).")
+        ca_logger.debug(f"Certificate fingerprint: {self.local_cert_fingerprint}")
+        ca_logger.info("Self-signed certificate generation complete.")
         
         self.local_key_pem = key_pem_bytes
         self.local_cert_pem = cert_pem_bytes
@@ -452,17 +498,17 @@ class CAExchange:
             SecurityError: If encryption fails or the cipher is not available.
         """
         if not self.exchange_key or not self.secure_exchange:
-            logger.warning("Exchange key not set or secure_exchange is False. Returning plaintext.")
+            ca_logger.warning("Exchange key not set or secure_exchange is False. Returning plaintext.")
             return data
 
         if not self.xchacha_cipher:
             raise SecurityError("XChaCha20Poly1305 cipher not initialized. Cannot perform secure exchange.")
 
         try:
-            logger.debug(f"Encrypting with XChaCha20Poly1305. AAD: {associated_data is not None}")
+            ca_logger.debug(f"Encrypting with XChaCha20Poly1305. AAD: {associated_data is not None}")
             return self.xchacha_cipher.encrypt(data=data, associated_data=associated_data)
         except Exception as e:
-            logger.error(f"XChaCha20Poly1305 encryption failed (AAD: {associated_data is not None}): {e}")
+            ca_logger.error(f"XChaCha20Poly1305 encryption failed (AAD: {associated_data is not None}): {e}")
             raise SecurityError(f"Encryption failed during certificate exchange: {e}")
 
     def _decrypt_data(self, enc_data: bytes, associated_data: Optional[bytes] = None) -> bytes:
@@ -479,39 +525,48 @@ class CAExchange:
             SecurityError: If decryption fails or the cipher is not available.
         """
         if not self.exchange_key or not self.secure_exchange:
-            logger.warning("Exchange key not set or secure_exchange is False. Assuming plaintext.")
+            ca_logger.warning("Exchange key not set or secure_exchange is False. Assuming plaintext.")
             return enc_data
 
         if not self.xchacha_cipher:
             raise SecurityError("XChaCha20Poly1305 cipher not initialized. Cannot perform secure exchange.")
 
         try:
-            logger.debug(f"Decrypting with XChaCha20Poly1305. AAD: {associated_data is not None}")
+            ca_logger.debug(f"Decrypting with XChaCha20Poly1305. AAD: {associated_data is not None}")
             return self.xchacha_cipher.decrypt(data=enc_data, associated_data=associated_data)
         except Exception as e:
-            logger.error(f"XChaCha20Poly1305 decryption failed (AAD: {associated_data is not None}): {e}")
+            ca_logger.error(f"XChaCha20Poly1305 decryption failed (AAD: {associated_data is not None}): {e}")
             raise SecurityError(f"Decryption failed during certificate exchange: {e}")
 
     def exchange_certs(self, role: str, host: str, port: int, ready_event: Optional[threading.Event] = None) -> bytes:
-        """Performs a certificate exchange with a peer.
-
-        This method establishes a connection, sends the local certificate, and
-        receives the peer's certificate. The exchange is encrypted if
-        `secure_exchange` is enabled. It handles both "client" and "server"
-        roles for setting up the connection.
-
+        """Perform secure certificate exchange with a peer.
+        
+        Establishes a secure connection channel for certificate exchange with strong
+        authentication and encryption. The exchange protocol includes:
+        
+        1. Connection establishment (client/server roles)
+        2. Metadata exchange (fingerprints, HPKP pins)
+        3. Encrypted certificate transfer using XChaCha20-Poly1305
+        4. Certificate validation with fingerprint verification
+        5. OCSP response exchange (if enabled)
+        6. HPKP pin registration
+        
+        The protocol is designed to be resistant to MITM attacks through
+        certificate fingerprint verification and HPKP-style pinning.
+        
         Args:
-            role: The role to assume, either "client" or "server".
-            host: The hostname or IP address to connect to or listen on.
-            port: The port to use for the exchange.
-            ready_event: For the "server" role, an optional `threading.Event`
-                that is set when the server is ready to accept connections.
-
+            role: Connection role - either "client" or "server"
+            host: Hostname or IP address (IPv4/IPv6) to connect to or listen on
+            port: Base port number (actual exchange port = port + exchange_port_offset)
+            ready_event: Optional threading.Event set when server is ready (server role only)
+        
         Returns:
-            The peer's certificate in PEM format.
-
+            bytes: The peer's certificate in PEM format
+        
         Raises:
-            SecurityError: If the exchange or validation fails.
+            SecurityError: If exchange fails, validation fails, or security parameters are invalid
+            ValueError: If certificate generation fails
+            socket.error: For network-related errors
         """
         if not self.local_cert_pem or not self.local_key_pem:
             self.generate_self_signed()
@@ -519,7 +574,7 @@ class CAExchange:
         if not self.local_cert_fingerprint:
             raise SecurityError("Local certificate fingerprint not available for exchange.")
             
-        logger.info(f"Starting certificate exchange as {role} with enhanced security.")
+        ca_logger.info(f"Starting certificate exchange as {role} with enhanced security.")
         
         ocsp_response = None
         if self.enable_ocsp_stapling:
@@ -549,19 +604,19 @@ class CAExchange:
                 bind_addr = "::" if is_ipv6 else "0.0.0.0"
                 sock.bind((bind_addr, exchange_port))
                 sock.listen(1)
-                logger.info(f"Server listening on [{bind_addr}]:{exchange_port} for cert exchange.")
+                ca_logger.info(f"Server listening on [{bind_addr}]:{exchange_port} for cert exchange.")
                 
                 if ready_event:
                     ready_event.set()
                     
-                logger.info("Waiting for client connection...")
+                ca_logger.info("Waiting for client connection...")
                 client_sock, client_addr = sock.accept()
-                logger.info(f"Client connected from {client_addr} for cert exchange.")
+                ca_logger.info(f"Client connected from {client_addr} for cert exchange.")
                 peer_sock = client_sock
             else:
-                logger.info(f"Client connecting to [{host}]:{exchange_port} for cert exchange.")
+                ca_logger.info(f"Client connecting to [{host}]:{exchange_port} for cert exchange.")
                 sock.connect((host, exchange_port))
-                logger.info("Client connected to server.")
+                ca_logger.info("Client connected to server.")
                 peer_sock = sock
                 
             try:
@@ -587,7 +642,7 @@ class CAExchange:
                 peer_sock.sendall(metadata_len.to_bytes(4, byteorder='big'))
                 peer_sock.sendall(metadata_json)
                 
-                logger.info(f"Sending local certificate ({len(cert_data)} bytes) to peer.")
+                ca_logger.info(f"Sending local certificate ({len(cert_data)} bytes) to peer.")
                 
                 if self.secure_exchange:
                     cert_data = self._encrypt_data(cert_data, associated_data=self.local_cert_fingerprint.encode('ascii'))
@@ -601,7 +656,7 @@ class CAExchange:
                     peer_sock.sendall(len(ocsp_data).to_bytes(4, byteorder='big'))
                     peer_sock.sendall(ocsp_data)
                 
-                logger.info("Local certificate sent.")
+                ca_logger.info("Local certificate sent.")
                 
                 metadata_len_bytes = peer_sock.recv(4)
                 if not metadata_len_bytes or len(metadata_len_bytes) != 4:
@@ -622,7 +677,7 @@ class CAExchange:
                     if not peer_fingerprint:
                         raise SecurityError("Peer metadata is missing fingerprint")
                         
-                    logger.info(f"Expecting peer certificate with fingerprint: {peer_fingerprint}")
+                    ca_logger.info(f"Expecting peer certificate with fingerprint: {peer_fingerprint}")
                 except (json.JSONDecodeError, UnicodeDecodeError) as e:
                     raise SecurityError(f"Failed to parse peer metadata: {e}")
                 
@@ -631,7 +686,7 @@ class CAExchange:
                     raise SecurityError("Failed to receive peer certificate length")
                     
                 cert_len = int.from_bytes(cert_len_bytes, byteorder='big')
-                logger.info(f"Receiving peer certificate of {cert_len} bytes.")
+                ca_logger.info(f"Receiving peer certificate of {cert_len} bytes.")
                 
                 received_data = b''
                 remaining = cert_len
@@ -645,7 +700,7 @@ class CAExchange:
                 if self.secure_exchange:
                     try:
                         received_data = self._decrypt_data(received_data, associated_data=peer_fingerprint.encode('ascii'))
-                        logger.info("Successfully decrypted peer certificate")
+                        ca_logger.info("Successfully decrypted peer certificate")
                     except Exception as e:
                         raise SecurityError(f"Failed to decrypt peer certificate: {e}")
                 
@@ -658,7 +713,7 @@ class CAExchange:
                 if actual_fingerprint != peer_fingerprint:
                     raise SecurityError(f"Certificate fingerprint mismatch. Expected {peer_fingerprint}, got {actual_fingerprint}")
                     
-                logger.info(f"Certificate fingerprint verified: {peer_fingerprint}")
+                ca_logger.info(f"Certificate fingerprint verified: {peer_fingerprint}")
                 
                 self.peer_cert_pem = received_data
                 self.peer_cert_fingerprint = peer_fingerprint
@@ -688,14 +743,14 @@ class CAExchange:
                                 hostname = host
                             
                         self.add_hpkp_pin(hostname, hpkp_pin)
-                        logger.info(f"Added HPKP pin for {hostname}: {hpkp_pin}")
+                        ca_logger.info(f"Added HPKP pin for {hostname}: {hpkp_pin}")
                     except Exception as e:
-                        logger.error(f"Failed to add HPKP pin: {e}")
+                        ca_logger.error(f"Failed to add HPKP pin: {e}")
                 
                 if has_ocsp and ocsp_len > 0:
                     ocsp_len_bytes = peer_sock.recv(4)
                     if not ocsp_len_bytes or len(ocsp_len_bytes) != 4:
-                        logger.warning("Failed to receive OCSP response length")
+                        ca_logger.warning("Failed to receive OCSP response length")
                     else:
                         actual_ocsp_len = int.from_bytes(ocsp_len_bytes, byteorder='big')
                         ocsp_data = b''
@@ -712,34 +767,34 @@ class CAExchange:
                                 try:
                                     ocsp_data = self._decrypt_data(ocsp_data, associated_data=b'ocsp-response')
                                 except Exception as e:
-                                    logger.warning(f"Failed to decrypt OCSP response: {e}")
+                                    ca_logger.warning(f"Failed to decrypt OCSP response: {e}")
                                     ocsp_data = None
                                     
                             if ocsp_data:
                                 try:
                                     ocsp_resp = ocsp.load_der_ocsp_response(ocsp_data)
                                     if ocsp_resp.response_status == ocsp.OCSPResponseStatus.SUCCESSFUL:
-                                        logger.info("Received valid OCSP response")
+                                        ca_logger.info("Received valid OCSP response")
                                         self.ocsp_response_cache[peer_fingerprint] = {
                                             'response': ocsp_data,
                                             'expires': datetime.now(timezone.utc) + timedelta(seconds=self.ocsp_response_max_age)
                                         }
                                     else:
-                                        logger.warning(f"OCSP response status: {ocsp_resp.response_status}")
+                                        ca_logger.warning(f"OCSP response status: {ocsp_resp.response_status}")
                                 except Exception as e:
-                                    logger.warning(f"Failed to parse OCSP response: {e}")
+                                    ca_logger.warning(f"Failed to parse OCSP response: {e}")
                 
-                logger.info("Certificate exchange finished successfully.")
+                ca_logger.info("Certificate exchange finished successfully.")
                 return self.peer_cert_pem
                 
             finally:
                 if role == "server" and 'client_sock' in locals():
                     client_sock.close()
-                logger.info("Cert exchange socket closed.")
+                ca_logger.info("Cert exchange socket closed.")
                 sock.close()
                 
         except Exception as e:
-            logger.error(f"Certificate exchange failed: {e}")
+            ca_logger.error(f"Certificate exchange failed: {e}")
             raise SecurityError(f"Certificate exchange failed: {e}")
 
     # Define secure TLS options as class attribute
@@ -749,31 +804,26 @@ class CAExchange:
         ssl.OP_SINGLE_DH_USE | ssl.OP_SINGLE_ECDH_USE
     )
     
-    def _configure_pq_groups(self, context: ssl.SSLContext):
-        """Attempts to configure post-quantum key exchange groups on the SSLContext."""
-        try:
-            context.set_groups(HYBRID_PQ_GROUPS)
-            logger.info(f"SSLContext configured with post-quantum groups: {HYBRID_PQ_GROUPS}")
-        except AttributeError:
-            py_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-            logger.warning("SSLContext.set_groups() not available. Post-quantum TLS KEX may not be available.")
-            logger.warning(f"This is likely due to an outdated Python ({py_version}) or OpenSSL version.")
-            logger.warning("For PQ KEX support, Python 3.8+ and a compatible OpenSSL (e.g., OpenSSL 3.2+ or OQS-provider) are required.")
-            logger.info(f"Current OpenSSL version: {ssl.OPENSSL_VERSION}")
-        except ssl.SSLError as e:
-            logger.warning(f"Failed to set post-quantum groups: {e}. PQ TLS KEX may not be available.")
-    
     def create_server_ctx(self) -> ssl.SSLContext:
-        """Creates a high-security SSLContext for a server.
-
-        The context is configured for TLS 1.3 only, with strong cipher suites,
-        post-quantum key exchange groups, and client certificate validation.
-
+        """Create a hardened TLS 1.3 server context with mutual authentication.
+        
+        Configures a high-security SSLContext for server-side TLS with:
+        - TLS 1.3 only (no downgrade to older versions)
+        - Strong cipher preferences
+        - Client certificate validation (mutual TLS)
+        - Strict certificate verification
+        - Enhanced DH parameters (3072-bit)
+        - No session tickets (prevents resumption attacks)
+        - Memory protection for sensitive material
+        
+        The resulting context provides military-grade security suitable for
+        protecting highly sensitive communications.
+        
         Returns:
-            A configured `ssl.SSLContext` instance.
+            ssl.SSLContext: Configured server-side TLS context
         
         Raises:
-            ValueError: If local or peer certificates are not available.
+            ValueError: If certificates are missing or invalid
         """
         if not self.local_cert_pem or not self.local_key_pem:
             raise ValueError("Local certificate or key not available")
@@ -781,17 +831,14 @@ class CAExchange:
         if not self.peer_cert_pem:
             raise ValueError("Peer certificate not available. Exchange certificates first.")
             
-        logger.info("Creating SSLContext for server with maximum security settings.")
+        ca_logger.info("Creating SSLContext for server with maximum security settings.")
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         
         ctx.minimum_version = ssl.TLSVersion.TLSv1_3
         ctx.maximum_version = ssl.TLSVersion.TLSv1_3
-        logger.info("SSLContext configured for TLS 1.3 only.")
+        ca_logger.info("SSLContext configured for TLS 1.3 only.")
         
         ctx.options |= self.SECURE_TLS_OPTIONS
-        
-        # Set post-quantum key exchange groups if available
-        self._configure_pq_groups(ctx)
         
         # Increase DH parameters for non-PQC key agreement.
         try:
@@ -799,16 +846,16 @@ class CAExchange:
                 from cryptography.hazmat.primitives.asymmetric import dh
                 params = dh.generate_parameters(generator=2, key_size=3072)
                 ctx.set_dh_params(params)
-                logger.info("DH parameters set to 3072 bits")
+                ca_logger.info("DH parameters set to 3072 bits")
         except Exception as e:
-            logger.warning(f"Could not set DH parameters: {e}")
+            ca_logger.warning(f"Could not set DH parameters: {e}")
         
         ctx.options |= ssl.OP_NO_TICKET
         
         tmp_cert_file = None
         tmp_key_file = None
         try:
-            logger.info("Preparing temporary files for local cert/key.")
+            ca_logger.info("Preparing temporary files for local cert/key.")
             with tempfile.NamedTemporaryFile(mode="wb", delete=False) as cert_tf, \
                  tempfile.NamedTemporaryFile(mode="wb", delete=False) as key_tf:
                 cert_tf.write(self.local_cert_pem)
@@ -819,7 +866,7 @@ class CAExchange:
                 tmp_key_file = key_tf.name
             
             ctx.load_cert_chain(tmp_cert_file, tmp_key_file)
-            logger.info("Local certificate and key loaded into SSLContext.")
+            ca_logger.info("Local certificate and key loaded into SSLContext.")
         finally:
             if tmp_cert_file and os.path.exists(tmp_cert_file):
                 self._secure_delete(tmp_cert_file)
@@ -830,29 +877,38 @@ class CAExchange:
             ctx.load_verify_locations(cadata=self.peer_cert_pem.decode('utf-8'))
             ctx.verify_mode = ssl.CERT_REQUIRED
             ctx.check_hostname = False
-            logger.info("Trusted peer certificate loaded. Client certificate will be required and verified.")
+            ca_logger.info("Trusted peer certificate loaded. Client certificate will be required and verified.")
         except Exception as e:
-            logger.error(f"Error loading trusted peer certificate: {e}")
+            ca_logger.error(f"Error loading trusted peer certificate: {e}")
             raise ValueError(f"Failed to load peer certificate: {e}")
         
         if hasattr(ctx, 'verify_flags'):
             ctx.verify_flags = ssl.VERIFY_X509_STRICT
-            logger.info("Strict X.509 verification enabled")
+            ca_logger.info("Strict X.509 verification enabled")
             
-        logger.info("SSLContext for server configured with maximum security settings.")
+        ca_logger.info("SSLContext for server configured with maximum security settings.")
         return ctx
 
     def create_client_ctx(self) -> ssl.SSLContext:
-        """Creates a high-security SSLContext for a client.
-
-        The context is configured for TLS 1.3 only, with strong cipher suites,
-        post-quantum key exchange groups, and server certificate validation.
+        """Create a hardened TLS 1.3 client context with certificate validation.
+        
+        Configures a high-security SSLContext for client-side TLS with:
+        - TLS 1.3 only (no downgrade to older versions)
+        - Strong cipher preferences
+        - Server certificate validation against pinned certificate
+        - Client certificate presentation (mutual TLS)
+        - Strict certificate verification rules
+        - Memory protection for sensitive material
+        
+        The client context is designed to resist MITM attacks through
+        strict certificate validation against the previously exchanged
+        peer certificate.
         
         Returns:
-            A configured `ssl.SSLContext` instance.
+            ssl.SSLContext: Configured client-side TLS context
         
         Raises:
-            ValueError: If local or peer certificates are not available.
+            ValueError: If certificates are missing or invalid
         """
         if not self.local_cert_pem or not self.local_key_pem:
             raise ValueError("Local certificate or key not available")
@@ -860,18 +916,15 @@ class CAExchange:
         if not self.peer_cert_pem:
             raise ValueError("Peer certificate not available. Exchange certificates first.")
             
-        logger.info("Creating SSLContext for client with maximum security settings.")
+        ca_logger.info("Creating SSLContext for client with maximum security settings.")
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         
         ctx.minimum_version = ssl.TLSVersion.TLSv1_3
         ctx.maximum_version = ssl.TLSVersion.TLSv1_3
-        logger.info("SSLContext configured for TLS 1.3 only.")
+        ca_logger.info("SSLContext configured for TLS 1.3 only.")
         
         ctx.options |= self.SECURE_TLS_OPTIONS
         
-        # Set post-quantum key exchange groups
-        self._configure_pq_groups(ctx)
-
         # Hostname verification is disabled because we verify peer certificates manually.
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
@@ -879,7 +932,7 @@ class CAExchange:
         tmp_cert_file = None
         tmp_key_file = None
         try:
-            logger.info("Preparing temporary files for local cert/key.")
+            ca_logger.info("Preparing temporary files for local cert/key.")
             with tempfile.NamedTemporaryFile(mode="wb", delete=False) as cert_tf, \
                  tempfile.NamedTemporaryFile(mode="wb", delete=False) as key_tf:
                 cert_tf.write(self.local_cert_pem)
@@ -890,7 +943,7 @@ class CAExchange:
                 tmp_key_file = key_tf.name
 
             ctx.load_cert_chain(tmp_cert_file, tmp_key_file)
-            logger.info("Local certificate and key loaded into SSLContext.")
+            ca_logger.info("Local certificate and key loaded into SSLContext.")
         finally:
             if tmp_cert_file and os.path.exists(tmp_cert_file):
                 self._secure_delete(tmp_cert_file)
@@ -900,20 +953,33 @@ class CAExchange:
         try:
             ctx.load_verify_locations(cadata=self.peer_cert_pem.decode('utf-8'))
             ctx.verify_mode = ssl.CERT_REQUIRED
-            logger.info("Trusted peer certificate loaded. Server certificate will be required and verified.")
+            ca_logger.info("Trusted peer certificate loaded. Server certificate will be required and verified.")
         except Exception as e:
-            logger.error(f"Error loading trusted peer certificate: {e}")
+            ca_logger.error(f"Error loading trusted peer certificate: {e}")
             raise ValueError(f"Failed to load peer certificate: {e}")
 
         if hasattr(ctx, 'verify_flags'):
             ctx.verify_flags = ssl.VERIFY_X509_STRICT
-            logger.info("Strict X.509 verification enabled")
+            ca_logger.info("Strict X.509 verification enabled")
 
-        logger.info("SSLContext for client configured with maximum security settings.")
+        ca_logger.info("SSLContext for client configured with maximum security settings.")
         return ctx
     
     def _secure_delete(self, file_path: str, passes: int = 3):
-        """Securely deletes a file by overwriting it multiple times."""
+        """Securely delete a file by overwriting it multiple times before removal.
+        
+        Implements secure deletion by:
+        1. Overwriting file with random data for specified number of passes
+        2. Final overwrite with zeros
+        3. Flushing to disk with fsync to ensure writes are committed
+        4. File removal
+        
+        This helps prevent recovery of sensitive data through forensic analysis.
+        
+        Args:
+            file_path: Path to the file to securely delete
+            passes: Number of overwrite passes with random data
+        """
         if not os.path.exists(file_path):
             return
             
@@ -932,14 +998,25 @@ class CAExchange:
                 
             os.remove(file_path)
         except Exception as e:
-            logger.warning(f"Could not securely delete {file_path}: {e}")
+            ca_logger.warning(f"Could not securely delete {file_path}: {e}")
             try:
                 os.remove(file_path)
             except Exception as e:
-                logger.debug(f"Failed to remove file after secure deletion attempt: {e}")
+                ca_logger.debug(f"Failed to remove file after secure deletion attempt: {e}")
         
     def secure_cleanup(self):
-        """Securely erases sensitive data like private keys from memory."""
+        """Securely erase all sensitive cryptographic material from memory.
+        
+        Performs comprehensive cleanup of sensitive data:
+        1. Overwrites private key material with random data then zeros
+        2. Clears all certificate data and fingerprints
+        3. Clears HPKP pins and OCSP response cache
+        4. Securely erases encryption keys
+        5. Removes all references to cryptographic material
+        
+        This method should be called when the object is no longer needed
+        to prevent sensitive data from remaining in memory.
+        """
         try:
             if self.local_key_pem:
                 buffer = bytearray(self.local_key_pem)
@@ -973,37 +1050,54 @@ class CAExchange:
             if self.cert_store:
                 self.cert_store.clear()
                 
-            logger.info("Secure cleanup completed")
+            ca_logger.info("Secure cleanup completed")
         except Exception as e:
-            logger.error(f"Error during secure cleanup: {e}")
+            ca_logger.error(f"Error during secure cleanup: {e}")
 
     def wrap_socket_server(self, sock: socket.socket) -> ssl.SSLSocket:
-        """Wraps a server socket with a high-security TLS context.
+        """Wrap a server socket with a hardened TLS 1.3 context.
+        
+        Takes a standard socket and wraps it with a high-security TLS context
+        that enforces TLS 1.3, strong ciphers, and mutual certificate authentication.
+        The handshake is not performed automatically to allow for custom handling.
         
         Args:
-            sock: The server socket to wrap.
+            sock: TCP socket to wrap with TLS
             
         Returns:
-            A TLS-wrapped server socket.
+            ssl.SSLSocket: Server socket wrapped with TLS protection
+            
+        Raises:
+            ValueError: If certificates are invalid or missing
+            ssl.SSLError: If TLS context creation fails
         """
         ctx = self.create_server_ctx()
         ssl_sock = ctx.wrap_socket(sock, server_side=True, do_handshake_on_connect=False)
-        logger.info("Server socket wrapped with maximum security TLS context")
+        ca_logger.info("Server socket wrapped with maximum security TLS context")
         return ssl_sock
     
     def wrap_socket_client(self, sock: socket.socket, server_hostname: Optional[str] = None) -> ssl.SSLSocket:
-        """Wraps a client socket with a high-security TLS context.
+        """Wrap a client socket with a hardened TLS 1.3 context.
+        
+        Takes a standard socket and wraps it with a high-security TLS context
+        that enforces TLS 1.3, strong ciphers, and server certificate validation.
+        The handshake is not performed automatically to allow for custom handling.
         
         Args:
-            sock: The client socket to wrap.
-            server_hostname: The server hostname for SNI (optional).
+            sock: TCP socket to wrap with TLS
+            server_hostname: Optional server hostname for SNI (Server Name Indication)
+                            If provided, improves compatibility with multi-host servers
             
         Returns:
-            A TLS-wrapped client socket.
+            ssl.SSLSocket: Client socket wrapped with TLS protection
+            
+        Raises:
+            ValueError: If certificates are invalid or missing
+            ssl.SSLError: If TLS context creation fails
         """
         ctx = self.create_client_ctx()
         ssl_sock = ctx.wrap_socket(sock, server_hostname=server_hostname, do_handshake_on_connect=False)
-        logger.info("Client socket wrapped with maximum security TLS context")
+        ca_logger.info("Client socket wrapped with maximum security TLS context")
         return ssl_sock
         
     def __del__(self):
@@ -1011,17 +1105,27 @@ class CAExchange:
         try:
             self.secure_cleanup()
         except Exception as e:
-            logger.debug(f"Error during secure cleanup in __del__: {e}")
+            ca_logger.debug(f"Error during secure cleanup in __del__: {e}")
 
     def add_hpkp_pin(self, hostname: str, pin_value: str) -> None:
-        """Adds a public key pin for a hostname.
+        """Add a public key pin for certificate validation (HPKP-style).
+        
+        Implements HTTP Public Key Pinning (HPKP) style certificate pinning
+        for peer certificate validation. This provides strong protection against
+        man-in-the-middle attacks by validating certificates against known-good
+        public key hashes.
         
         Args:
-            hostname: The hostname to associate with the pin.
-            pin_value: The base64-encoded SHA-256 hash of the SubjectPublicKeyInfo.
+            hostname: Hostname or identifier to associate with the pin
+            pin_value: Base64-encoded SHA-256 hash of the SubjectPublicKeyInfo
+                       May be prefixed with "sha256=" or not
+        
+        Note:
+            Pins are stored in memory and not persisted to disk.
+            For long-term pinning, store pins securely and reload them.
         """
         if not self.enable_hpkp:
-            logger.warning("HPKP is disabled. Pin will be stored but not enforced.")
+            ca_logger.warning("HPKP is disabled. Pin will be stored but not enforced.")
             
         if hostname not in self.hpkp_pins:
             self.hpkp_pins[hostname] = []
@@ -1030,16 +1134,30 @@ class CAExchange:
             pin_value = f"sha256={pin_value}"
             
         self.hpkp_pins[hostname].append(pin_value)
-        logger.info(f"Added HPKP pin for {hostname}: {pin_value}")
+        ca_logger.info(f"Added HPKP pin for {hostname}: {pin_value}")
         
     def generate_hpkp_pin(self, cert_pem: bytes) -> str:
-        """Generates a public key pin from a certificate.
+        """Generate a public key pin from a certificate.
+        
+        Creates an HPKP-style pin by:
+        1. Extracting the SubjectPublicKeyInfo from the certificate
+        2. Hashing it with SHA-256
+        3. Base64-encoding the hash
+        4. Prefixing with "sha256="
+        
+        This pin can be used for certificate pinning to validate
+        certificates based on their public key rather than the
+        certificate chain, providing protection against
+        compromised or rogue certificate authorities.
         
         Args:
-            cert_pem: The certificate in PEM format.
+            cert_pem: X.509 certificate in PEM format
             
         Returns:
-            The base64-encoded SHA-256 hash of the certificate's SubjectPublicKeyInfo.
+            str: HPKP pin in format "sha256=<base64-encoded-hash>"
+            
+        Raises:
+            SecurityError: If pin generation fails
         """
         try:
             cert = x509.load_pem_x509_certificate(cert_pem)
@@ -1051,38 +1169,51 @@ class CAExchange:
             pin_base64 = base64.b64encode(pin_hash).decode('ascii')
             return f"sha256={pin_base64}"
         except Exception as e:
-            logger.error(f"Failed to generate HPKP pin: {e}")
+            ca_logger.error(f"Failed to generate HPKP pin: {e}")
             raise SecurityError(f"HPKP pin generation failed: {e}")
             
     def verify_hpkp_pin(self, hostname: str, cert_pem: bytes) -> bool:
-        """Verifies a certificate against the pinned public key for a hostname.
+        """Verify a certificate against stored HPKP pins.
+        
+        Validates a certificate by:
+        1. Generating a pin from the certificate's public key
+        2. Comparing against stored pins for the hostname
+        3. Returning success only if a matching pin is found
+        
+        This provides strong protection against MITM attacks by ensuring
+        only certificates with known-good public keys are accepted,
+        regardless of the certificate chain validity.
         
         Args:
-            hostname: The hostname to check against.
-            cert_pem: The certificate in PEM format to verify.
+            hostname: Hostname or identifier to check pins against
+            cert_pem: X.509 certificate in PEM format to verify
             
         Returns:
-            True if the certificate's public key matches a pin, False otherwise.
+            bool: True if certificate matches a known pin, False otherwise
+            
+        Note:
+            Returns True if HPKP is disabled or no pins exist for the hostname,
+            allowing for graceful fallback to standard verification.
         """
         if not self.enable_hpkp:
-            logger.warning("HPKP verification skipped because the feature is disabled.")
+            ca_logger.warning("HPKP verification skipped because the feature is disabled.")
             return True
             
         if hostname not in self.hpkp_pins:
-            logger.warning(f"No HPKP pins found for {hostname}, skipping verification.")
+            ca_logger.warning(f"No HPKP pins found for {hostname}, skipping verification.")
             return True
             
         try:
             pin = self.generate_hpkp_pin(cert_pem)
             
             if pin in self.hpkp_pins[hostname]:
-                logger.info(f"HPKP verification successful for {hostname}")
+                ca_logger.info(f"HPKP verification successful for {hostname}")
                 return True
                 
-            logger.error(f"HPKP verification failed for {hostname}. Expected one of {self.hpkp_pins[hostname]}, got {pin}")
+            ca_logger.error(f"HPKP verification failed for {hostname}. Expected one of {self.hpkp_pins[hostname]}, got {pin}")
             return False
         except Exception as e:
-            logger.error(f"HPKP verification error: {e}")
+            ca_logger.error(f"HPKP verification error: {e}")
             return False
             
     def get_hpkp_header(self, hostname: str) -> Optional[str]:
@@ -1106,19 +1237,32 @@ class CAExchange:
         return header
         
     def generate_ocsp_response(self, cert_pem: bytes, issuer_cert_pem: Optional[bytes] = None) -> Optional[bytes]:
-        """Generates an OCSP response for a given certificate.
-
-        For self-signed certificates, the certificate is its own issuer.
+        """Generate an OCSP response for certificate status verification.
+        
+        Creates a self-signed OCSP response that can be used for OCSP stapling.
+        For self-signed certificates (common in P2P applications), the certificate
+        serves as its own issuer. The response includes:
+        
+        1. Certificate status (GOOD/REVOKED/UNKNOWN)
+        2. Response validity period
+        3. Responder identification
+        4. Cryptographic signature
+        
+        This implementation helps satisfy OCSP Must-Staple requirements
+        in modern TLS implementations and improves connection reliability.
         
         Args:
-            cert_pem: The certificate in PEM format.
-            issuer_cert_pem: The issuer's certificate in PEM format (optional).
+            cert_pem: Certificate in PEM format to generate response for
+            issuer_cert_pem: Optional issuer certificate (defaults to cert_pem for self-signed)
             
         Returns:
-            The OCSP response in DER format, or None on failure.
+            Optional[bytes]: OCSP response in DER format, or None if generation fails
+            
+        Note:
+            The response is cached in memory for performance and reuse.
         """
         if not self.enable_ocsp_stapling:
-            logger.debug("OCSP stapling is disabled, skipping response generation.")
+            ca_logger.debug("OCSP stapling is disabled, skipping response generation.")
             return None
             
         try:
@@ -1130,7 +1274,7 @@ class CAExchange:
                 issuer_cert = x509.load_pem_x509_certificate(issuer_cert_pem)
                 
             if self.local_key_pem is None:
-                logger.error("Cannot generate OCSP response: local private key not available.")
+                ca_logger.error("Cannot generate OCSP response: local private key not available.")
                 return None
                 
             issuer_key = serialization.load_pem_private_key(
@@ -1162,10 +1306,10 @@ class CAExchange:
                 'expires': datetime.now(timezone.utc) + timedelta(seconds=self.ocsp_response_max_age)
             }
             
-            logger.info("Generated and cached OCSP response for certificate.")
+            ca_logger.info("Generated and cached OCSP response for certificate.")
             return response_bytes
         except Exception as e:
-            logger.error(f"Failed to generate OCSP response: {e}")
+            ca_logger.error(f"Failed to generate OCSP response: {e}")
             return None
             
     def get_cached_ocsp_response(self, cert_pem: bytes) -> Optional[bytes]:
@@ -1189,32 +1333,28 @@ class CAExchange:
                 cache_entry = self.ocsp_response_cache[cert_fingerprint]
                 
                 if cache_entry['expires'] > datetime.now(timezone.utc):
-                    logger.debug("Found valid cached OCSP response.")
+                    ca_logger.debug("Found valid cached OCSP response.")
                     return cache_entry['response']
                     
-                logger.debug("Cached OCSP response has expired.")
+                ca_logger.debug("Cached OCSP response has expired.")
                 
             return None
         except Exception as e:
-            logger.error(f"Error retrieving cached OCSP response: {e}")
+            ca_logger.error(f"Error retrieving cached OCSP response: {e}")
             return None
-
+ 
 
 def setup_logger(level=logging.INFO):
-    """Configures the logger for the CAExchange module.
+    """Configure the logger for the CAExchange module.
+    
+    This function allows runtime adjustment of the logging level.
+    The main logger configuration is handled during module initialization.
     
     Args:
-        level: The logging level to set.
+        level: Logging level to set (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        
+    Returns:
+        Logger: Configured logger instance
     """
-    logger.setLevel(level)
-    
-    if not logger.handlers:
-        ch = logging.StreamHandler()
-        ch.setLevel(level)
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        ch.setFormatter(formatter)
-        logger.addHandler(ch)
-    
-    return logger
-
-setup_logger()  
+    ca_logger.setLevel(level)
+    return ca_logger

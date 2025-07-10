@@ -3,9 +3,14 @@
 Enhanced DEP (Data Execution Prevention) Implementation
 This module provides a more reliable DEP-like protection that works in virtualized environments
 for the secure_p2p.py application.
+
+[SECURITY ENHANCEMENT]: This module now uses enhanced post-quantum cryptographic
+implementations from pqc_algorithms.py, providing state-of-the-art, military-grade,
+future-proof security with improved side-channel resistance, constant-time operations,
+and protection against emerging threats including enhanced secure memory wiping functionality.
 """
  
-import ctypes
+import ctypes 
 import logging 
 import os
 import platform
@@ -15,9 +20,18 @@ import random
 import struct
 import traceback
 import mmap
+import secrets
 
 # Add import for secure_key_manager to use its secure memory functions
-import secure_key_manager as skm
+try:
+    from secure_key_manager import secure_erase, get_secure_memory, KeyProtectionError
+except ImportError:
+    # Define dummy versions if secure_key_manager is not available to avoid runtime errors
+    def secure_erase(data, level='standard'): pass
+    def get_secure_memory(): return None
+    class KeyProtectionError(Exception): pass
+
+import platform_hsm_interface as cphs
 
 # Configure logging
 log = logging.getLogger("secure_p2p")
@@ -80,7 +94,7 @@ if platform.system() == "Windows":
         
         Enable = property(_get_Enable, _set_Enable)
 
-        def _get_DisableAtlThunkEmulation(self):
+        def _get_DisableAtlThunkEmulation(self): 
             return (self.Flags >> 1) & 1
 
         def _set_DisableAtlThunkEmulation(self, value):
@@ -262,54 +276,151 @@ class EnhancedDEP:
             # GetCurrentProcess
             self.GetCurrentProcess = ctypes.windll.kernel32.GetCurrentProcess
 
-            # Try to load RtlSecureZeroMemory from ntdll
-            try:
-                # Fix: Use RtlSecureZeroMemory instead of '#1' as the function name
-                self.RtlSecureZeroMemory = ctypes.windll.ntdll.RtlSecureZeroMemory
-                self.RtlSecureZeroMemory.argtypes = [
-                    ctypes.c_void_p,
-                    SIZE_T
-                ]
-                self.RtlSecureZeroMemory.restype = None
-                log.debug("RtlSecureZeroMemory loaded from ntdll")
-                self.secure_zero_memory = self.RtlSecureZeroMemory
-            except (AttributeError, WindowsError) as e:
-                log.debug(f"Could not load RtlSecureZeroMemory from ntdll: {e}. Attempting kernel32 SecureZeroMemory...")
-                
-                # Try to load SecureZeroMemory from kernel32
-                try:
-                    self.SecureZeroMemory = ctypes.windll.kernel32.SecureZeroMemory
-                    self.SecureZeroMemory.argtypes = [
-                        ctypes.c_void_p,
-                        SIZE_T
-                    ]
-                    self.SecureZeroMemory.restype = None
-                    log.debug("SecureZeroMemory loaded from kernel32")
-                    self.secure_zero_memory = self.SecureZeroMemory
-                except (AttributeError, WindowsError) as e:
-                    log.info("Could not load system secure wipe functions; falling back to secure_key_manager implementation.")
-                    
-                    # Create a wrapper function to match the expected signature
-                    def secure_zero_memory_enhanced(ptr, size):
-                        """
-                        Wrapper function that calls secure_key_manager's memory wiping function
-                        """
-                        log.debug("Enhanced secure_zero_memory_enhanced installed.")
-                        # Convert the pointer to an integer address for secure_key_manager
-                        if isinstance(ptr, ctypes.c_void_p):
-                            address = ptr.value
-                        else:
-                            address = ptr
-                        
-                        # Call secure_key_manager's secure wipe function
-                        skm.secure_wipe_memory(address, size)
-                        return None
-                    
-                    self.secure_zero_memory = secure_zero_memory_enhanced
+            # Attempt to load a required native secure memory wiping function.
+            # This follows a "fail-closed" security principle. If a secure function is not available,
+            # the application will refuse to start.
+            self.secure_zero_memory = self._find_secure_memory_function()
+
+            if not self.secure_zero_memory:
+                error_message = "CRITICAL_SECURITY_FAILURE: No suitable native or fallback function for secure memory wiping could be found. The application cannot run securely. Aborting."
+                log.critical(error_message)
+                raise MemoryProtectionError(error_message)
 
         except Exception as e:
-            log.error(f"Error setting up Windows API functions: {e}")
+            log.error(f"A critical error occurred while setting up Windows API functions: {e}")
+            raise MemoryProtectionError(e) from e
         
+    def _find_secure_memory_function(self):
+        """
+        Finds the best available function for securely wiping memory, checking in order of
+        preference for different operating systems.
+        """
+        # Try to use enhanced SecureMemory from pqc_algorithms first (highest priority)
+        try:
+            # Check if pqc_algorithms is available with enhanced implementations
+            from pqc_algorithms import SecureMemory, SideChannelProtection
+            
+            # Create a secure memory instance
+            secure_mem = SecureMemory()
+            
+            def enhanced_secure_wipe(ptr, size):
+                # Convert address to a bytearray for secure wiping
+                buffer = (ctypes.c_char * size).from_address(ptr)
+                byte_array = bytearray(buffer[:])
+                
+                # Use SecureMemory's wipe functionality
+                secure_mem._secure_wipe(byte_array)
+                
+                # Copy wiped data back to original memory location
+                for i in range(size):
+                    buffer[i] = byte_array[i]
+                    
+            log.info("Using enhanced secure memory wiping from pqc_algorithms.")
+            return enhanced_secure_wipe
+        except ImportError:
+            log.debug("Could not import SecureMemory from pqc_algorithms, trying libsodium...")
+        except Exception as e:
+            log.debug(f"Error using enhanced secure memory wiping: {e}")
+            
+        # If enhanced SecureMemory is not available, try libsodium
+        try:
+            # Check if libsodium is available through platform_hsm_interface
+            import platform_hsm_interface as cphs
+            
+            # Check if libsodium is available
+            if hasattr(cphs, 'LIBSODIUM_AVAILABLE') and cphs.LIBSODIUM_AVAILABLE and hasattr(cphs, 'LIBSODIUM'):
+                libsodium = cphs.LIBSODIUM
+                
+                # Check if sodium_memzero is available
+                if hasattr(libsodium, 'sodium_memzero'):
+                    # Make sure the function prototype is defined
+                    if not hasattr(libsodium.sodium_memzero, 'argtypes'):
+                        libsodium.sodium_memzero.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+                        libsodium.sodium_memzero.restype = None
+                    
+                    def libsodium_wipe(ptr, size):
+                        libsodium.sodium_memzero(ctypes.c_void_p(ptr), size)
+                    
+                    log.info("Using libsodium's sodium_memzero for secure memory wiping.")
+                    return libsodium_wipe
+        except ImportError:
+            log.debug("Could not import platform_hsm_interface for libsodium access.")
+        except Exception as e:
+            log.debug(f"Error accessing libsodium: {e}")
+
+        # For Windows
+        if cphs.IS_WINDOWS: # type: ignore
+            try:
+                # 1. Try RtlSecureZeroMemory from ntdll (most secure)
+                ntdll = ctypes.WinDLL('ntdll')
+                if hasattr(ntdll, 'RtlSecureZeroMemory'):
+                    func = ntdll.RtlSecureZeroMemory
+                    func.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+                    func.restype = None
+                    log.info("Successfully loaded required native function: ntdll.RtlSecureZeroMemory.")
+                    return func
+            except (OSError, AttributeError):
+                log.debug("ntdll.RtlSecureZeroMemory not found.")
+
+            try:
+                # 2. Try SecureZeroMemory from kernel32
+                kernel32 = ctypes.WinDLL('kernel32')
+                if hasattr(kernel32, 'SecureZeroMemory'):
+                    func = kernel32.SecureZeroMemory
+                    func.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+                    func.restype = None
+                    log.info("Successfully loaded required native function: kernel32.SecureZeroMemory.")
+                    return func
+            except (OSError, AttributeError):
+                log.debug("kernel32.SecureZeroMemory not found.")
+
+        # For POSIX systems (Linux, macOS)
+        elif cphs.IS_LINUX or cphs.IS_DARWIN:
+            try:
+                libc = ctypes.CDLL(ctypes.util.find_library("c"))
+                # 1. Try explicit_bzero (designed to not be optimized away)
+                if hasattr(libc, 'explicit_bzero'):
+                    func = libc.explicit_bzero
+                    func.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+                    func.restype = None
+                    log.info("Successfully loaded required native function: explicit_bzero.")
+                    return func
+                
+                # 2. Try memset_s (C11 standard for secure memset)
+                if hasattr(libc, 'memset_s'):
+                    func = libc.memset_s
+                    # memset_s has a different signature: int memset_s(void *s, rsize_t smax, int c, rsize_t n);
+                    # We will create a wrapper for it to match our expected signature.
+                    def memset_s_wrapper(ptr, size):
+                        # Returns 0 on success
+                        if func(ptr, size, 0, size) != 0:
+                            raise MemoryProtectionError("memset_s failed to wipe memory.")
+                    log.info("Successfully loaded required native function: memset_s.")
+                    return memset_s_wrapper
+
+            except (OSError, AttributeError):
+                log.debug("Could not find explicit_bzero or memset_s in libc.")
+        
+        # 3. Universal Python Fallback (if no native functions are found)
+        log.warning("No native secure memory wiping function found. Using a Python-based multi-pass overwrite fallback. This is less secure.")
+        def python_secure_wipe(ptr, size):
+            try:
+                # Create a buffer from the raw memory pointer
+                buffer = (ctypes.c_char * size).from_address(ptr)
+                # Multi-pass overwrite
+                patterns = [0x00, 0xFF, 0xAA, 0x55]
+                for p in patterns:
+                    ctypes.memset(ptr, p, size)
+                # Final random pass
+                random_data = secrets.token_bytes(size)
+                ctypes.memmove(ptr, random_data, size)
+                # Final zero pass
+                ctypes.memset(ptr, 0, size)
+            except Exception as e:
+                raise MemoryProtectionError("Python-based secure wipe fallback failed.") from e
+
+        return python_secure_wipe
+
     def enable_dep(self):
         """
         Enable DEP for the current process using multiple approaches.

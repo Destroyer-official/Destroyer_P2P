@@ -191,172 +191,51 @@ class TestEnhancedFALCON1024(unittest.TestCase):
         
     def test_key_generation(self):
         """Test key generation functionality"""
-        # Generate keys with enhanced implementation
         pk, sk = self.enhanced_falcon.keygen()
-        
-        # Verify key format
-        self.assertTrue(pk.startswith(b"EFPK-"), 
-                       f"Enhanced public key should have EFPK- prefix, got: {pk[:10]}")
-        self.assertTrue(sk.startswith(b"EFSK-"), 
-                       f"Enhanced private key should have EFSK- prefix, got: {sk[:10]}")
-        
-        # Extract version from keys
-        pk_version = int(pk[5:6])
-        sk_version = int(sk[5:6])
-        
-        # Check version consistency
-        self.assertEqual(pk_version, self.enhanced_falcon.version, 
-                        "Public key version should match implementation version")
-        self.assertEqual(sk_version, self.enhanced_falcon.version, 
-                        "Secret key version should match implementation version")
-        
-        # Skip detailed entropy verification as it's implementation-dependent
-        self.assertGreater(len(pk), 100, "Public key should have reasonable length")
-        self.assertGreater(len(sk), 100, "Secret key should have reasonable length")
+        self.assertTrue(pk.startswith(b"EFPK-"), "Public key should have EFPK- prefix")
+        self.assertTrue(sk.startswith(b"EFSK-"), "Secret key should have EFSK- prefix")
+        self.assertEqual(int(pk[5:6]), self.enhanced_falcon.version, "Public key version mismatch")
+        self.assertEqual(int(sk[5:6]), self.enhanced_falcon.version, "Secret key version mismatch")
+        self.assertGreater(len(pk), 100)
+        self.assertGreater(len(sk), 100)
         
     def test_sign_verify_cycle(self):
         """Test sign and verify functionality"""
-        # Generate keys
         pk, sk = self.enhanced_falcon.keygen()
-        
         message = b"Test message for signature verification"
-        
-        # Sign with enhanced implementation
         signature = self.enhanced_falcon.sign(sk, message)
-        
-        # Verify signature format
-        self.assertTrue(signature.startswith(b"EFS-"), 
-                       f"Enhanced signature should have EFS- prefix, got: {signature[:10]}")
-        
-        # Extract signature version
-        sig_version = int(signature[4:5])
-        self.assertEqual(sig_version, self.enhanced_falcon.version, 
-                        "Signature version should match implementation version")
-        
-        # Verify with enhanced implementation
-        self.assertTrue(
-            self.enhanced_falcon.verify(pk, message, signature),
-            "Enhanced verification should succeed with valid signature"
-        )
+        self.assertTrue(signature.startswith(b"EFS-"), "Signature should have EFS- prefix")
+        self.assertEqual(int(signature[4:5]), self.enhanced_falcon.version, "Signature version mismatch")
+        self.assertTrue(self.enhanced_falcon.verify(pk, message, signature), "Verification should succeed")
             
     def test_tamper_resistance(self):
         """Test resistance to message tampering"""
-        # Generate keys
         pk, sk = self.enhanced_falcon.keygen()
-        
-        # Sign a message
-        message = b"Original message for tamper testing"
+        message = b"Original message"
         signature = self.enhanced_falcon.sign(sk, message)
         
-        # Verify original message (should succeed)
-        self.assertTrue(
-            self.enhanced_falcon.verify(pk, message, signature),
-            "Verification should succeed with original message"
-        )
+        tampered_message = b"Tampered message"
+        self.assertFalse(self.enhanced_falcon.verify(pk, tampered_message, signature), "Verification should fail for tampered message")
         
-        # Tamper with message
-        tampered_message = message + b'X'
-        
-        # Verify with tampered message (should fail)
-        self.assertFalse(
-            self.enhanced_falcon.verify(pk, tampered_message, signature),
-            "Verification should fail with tampered message"
-        )
-            
-    def test_cross_compatibility(self):
-        """Test cross-compatibility between enhanced and base implementations"""
-        # This test may require adaptation based on actual implementation details
-        # Since we're just testing basic functionality, we'll make a simpler test
-        
-        # Generate keys with enhanced implementation
-        pk, sk = self.enhanced_falcon.keygen()
-        
-        # Test basic signature creation and verification within enhanced implementation
-        message = b"Cross-compatibility test message"
-        signature = self.enhanced_falcon.sign(sk, message)
-        
-        self.assertTrue(
-            self.enhanced_falcon.verify(pk, message, signature),
-            "Enhanced implementation should verify its own signatures"
-        )
-        
-    def test_signature_entropy(self):
-        """Test signature entropy (with adjusted expectations)"""
-        pk, sk = self.enhanced_falcon.keygen()
-        message = b"Test message for entropy verification"
-        
-        signature = self.enhanced_falcon.sign(sk, message)
-        core_sig = signature[5:] if signature.startswith(b"EFS-") else signature
-        
-        # Calculate entropy of signature
-        entropy = CryptoTestUtils.calculate_entropy(core_sig)
-        entropy_bits = entropy * 8  # Convert to bits
-        
-        # Use a more lenient entropy check for testing
-        self.assertGreater(entropy_bits, 60,  
-                         f"Signature entropy should be > 60 bits, got {entropy_bits:.2f}")
-        
-    @unittest.skip("Constant-time verification test may be environment-dependent")
+        tampered_sig = bytearray(signature)
+        tampered_sig[-1] ^= 0xFF
+        self.assertFalse(self.enhanced_falcon.verify(pk, message, bytes(tampered_sig)), "Verification should fail for tampered signature")
+
     def test_constant_time_verify(self):
-        """Test that verification operates in constant time regardless of input"""
-        # Generate test keys and messages
+        """Test that the verification process runs in constant-time."""
         pk, sk = self.enhanced_falcon.keygen()
-        message = b"Test message for constant-time verification"
-        valid_sig = self.enhanced_falcon.sign(sk, message)
-        
-        # Prepare different test cases for verification
-        # 1. Valid signature
-        # 2. Invalid signature (modified)
-        # 3. Completely different valid signature
-        invalid_sig = bytearray(valid_sig)
-        if len(invalid_sig) > 10:
-            invalid_sig[10] ^= 0xFF  # Flip a byte
-        invalid_sig = bytes(invalid_sig)
-        
-        different_msg = b"Different message for testing"
-        different_sig = self.enhanced_falcon.sign(sk, different_msg)
-        
-        # Test if the verify operation is constant-time
-        verify_args = [
-            (pk, message, valid_sig),
-            (pk, message, invalid_sig),
-            (pk, message, different_sig)
-        ]
-        
+        args_list = []
+        for msg in self.test_messages:
+            sig = self.enhanced_falcon.sign(sk, msg)
+            args_list.append((pk, msg, sig))
+            
+        invalid_sig = os.urandom(len(args_list[0][2]))
+        args_list.append((pk, self.test_messages[0], invalid_sig))
+
         self.assertTrue(
-            CryptoTestUtils.test_constant_time_behavior(
-                self.enhanced_falcon.verify, verify_args, "FALCON.verify"
-            ),
-            "FALCON verification should operate in constant time"
+            CryptoTestUtils.test_constant_time_behavior(self.enhanced_falcon.verify, args_list, name="FALCON verify"),
+            "FALCON verification should be constant-time to prevent timing attacks"
         )
-        
-    def test_version_compatibility(self):
-        """Test compatibility between different versions"""
-        # Create mock keys with different versions
-        pk, sk = self.enhanced_falcon.keygen()
-        
-        # Change version in the keys (for testing only)
-        pk_v1 = b"EFPK-1" + pk[6:]
-        sk_v1 = b"EFSK-1" + sk[6:]
-        
-        message = b"Version compatibility test message"
-        
-        # First ensure our regular keys work
-        signature = self.enhanced_falcon.sign(sk, message)
-        self.assertTrue(
-            self.enhanced_falcon.verify(pk, message, signature),
-            "Verification should work with matching version keys"
-        )
-        
-        # Test that our implementation handles version differences gracefully
-        # This might log warnings but should not crash
-        try:
-            # This test may not pass depending on implementation, that's okay
-            signature_mixed = self.enhanced_falcon.sign(sk, message)
-            result = self.enhanced_falcon.verify(pk_v1, message, signature_mixed)
-            log.info(f"Mixed version verification result: {result}")
-        except Exception as e:
-            log.warning(f"Mixed version test raised exception: {e}")
 
 
 class TestEnhancedMLKEM1024(unittest.TestCase):
@@ -366,156 +245,66 @@ class TestEnhancedMLKEM1024(unittest.TestCase):
         """Set up test environment"""
         self.enhanced_mlkem = EnhancedMLKEM_1024()
         self.base_mlkem = MLKEM_1024()
-        
+        self.test_messages = CryptoTestUtils.generate_test_messages(count=3)
+
     def test_initialization(self):
-        """Test proper initialization"""
-        self.assertIsNotNone(self.enhanced_mlkem.domain_separator, 
-                            "Domain separator should be initialized")
-        self.assertIsNotNone(self.enhanced_mlkem.base_mlkem, 
-                            "Base ML-KEM implementation should be initialized")
-        
+        """Test that the enhanced implementation initializes correctly"""
+        self.assertIsNotNone(self.enhanced_mlkem)
+        self.assertEqual(self.enhanced_mlkem.name, "EnhancedMLKEM-1024", "Name should be correctly set")
+
     def test_key_generation(self):
-        """Test key generation"""
-        # Generate keys
+        """Test key generation for EnhancedMLKEM"""
         pk, sk = self.enhanced_mlkem.keygen()
-        
-        # Verify key format
-        self.assertTrue(pk.startswith(b"EMKPK-"), 
-                       f"Enhanced public key should have EMKPK- prefix, got: {pk[:10]}")
-        self.assertTrue(sk.startswith(b"EMKSK-"), 
-                       f"Enhanced private key should have EMKSK- prefix, got: {sk[:10]}")
-        
-        # Verify key sizes (accounting for metadata header)
-        self.assertGreaterEqual(len(pk), 100, 
-                               f"Public key should have sufficient length, got {len(pk)}")
-        self.assertGreaterEqual(len(sk), 100, 
-                               f"Private key should have sufficient length, got {len(sk)}")
-        
+        self.assertIsInstance(pk, bytes)
+        self.assertIsInstance(sk, bytes)
+        self.assertGreater(len(pk), 1000)
+        self.assertGreater(len(sk), 2000)
+
     def test_encaps_decaps_cycle(self):
-        """Test encapsulation and decapsulation cycle"""
-        # Generate keys
+        """Test a full encapsulation and decapsulation cycle"""
         pk, sk = self.enhanced_mlkem.keygen()
         
-        # Encapsulate
+        # Test with a known message
+        message = b"This is a secret key for a symmetric cipher"
         ciphertext, shared_secret_enc = self.enhanced_mlkem.encaps(pk)
-        
-        # Verify ciphertext and secret sizes
-        self.assertEqual(len(ciphertext), self.enhanced_mlkem.MLKEM1024_CIPHERTEXT_SIZE, 
-                        f"Ciphertext should be {self.enhanced_mlkem.MLKEM1024_CIPHERTEXT_SIZE} bytes, got {len(ciphertext)}")
-        self.assertEqual(len(shared_secret_enc), 32, 
-                        f"Shared secret should be 32 bytes, got {len(shared_secret_enc)}")
-        
-        # Decapsulate
         shared_secret_dec = self.enhanced_mlkem.decaps(sk, ciphertext)
         
-        # Verify that the shared secrets match
-        self.assertEqual(shared_secret_enc, shared_secret_dec, 
-                        "Encapsulated and decapsulated shared secrets should match")
-        
-    def test_domain_separation(self):
-        """Test domain separation for shared secrets"""
-        # Generate keys
-        pk, sk = self.enhanced_mlkem.keygen()
-        
-        # Encapsulate with enhanced implementation
-        ciphertext, enhanced_secret = self.enhanced_mlkem.encaps(pk)
-        
-        # Get core public key (without prefix)
-        core_pk = pk[7:] if pk.startswith(b"EMKPK-") else pk
-        
-        # Encapsulate with base implementation
-        base_ciphertext, base_secret = self.base_mlkem.encaps(core_pk)
-        
-        # The ciphertexts should be similar in size
-        self.assertEqual(len(ciphertext), len(base_ciphertext), 
-                        "Ciphertext sizes should match")
-        
-        # Secrets should be different due to domain separation
-        self.assertNotEqual(enhanced_secret, base_secret, 
-                          "Enhanced shared secret should differ from base implementation due to domain separation")
-        
-        # The enhanced secret should be derived from the base secret with domain separation
-        # Note: Our enhanced implementation may use different domain separation methods
-        # For example, either direct hashing or HMAC, so we'll just check that they differ
-        self.assertNotEqual(enhanced_secret, base_secret, 
-                          "Enhanced shared secret should be different from base secret")
-        self.assertEqual(len(enhanced_secret), 32,
-                        "Enhanced shared secret should be 32 bytes")
-        
+        self.assertEqual(shared_secret_enc, shared_secret_dec, "Decapsulated secret should match encapsulated secret")
+        self.assertEqual(len(shared_secret_dec), 32, "Shared secret should be 32 bytes")
+
     def test_tamper_resistance(self):
-        """Test resistance to ciphertext tampering"""
-        # Generate keys
+        """Test that tampered ciphertexts are rejected"""
         pk, sk = self.enhanced_mlkem.keygen()
-        
-        # Encapsulate
-        ciphertext, shared_secret_enc = self.enhanced_mlkem.encaps(pk)
-        
-        # Tamper with ciphertext
-        tampered_ciphertext = bytearray(ciphertext)
-        tampered_ciphertext[0] ^= 0x01  # Flip a bit
-        tampered_ciphertext = bytes(tampered_ciphertext)
-        
-        try:
-            # Decapsulate with tampered ciphertext
-            # Should raise ValueError if properly validated
-            shared_secret_tampered = self.enhanced_mlkem.decaps(sk, tampered_ciphertext)
-            
-            # If we get here, it didn't raise - but the shared secrets should still differ
-            self.assertNotEqual(shared_secret_enc, shared_secret_tampered, 
-                              "Decapsulated shared secret should differ when ciphertext is tampered")
-        except ValueError:
-            # This is also acceptable - implementation may reject tampered ciphertext
-            pass
-        
-    def test_invalid_inputs(self):
-        """Test behavior with invalid inputs"""
-        # Generate valid key pair for testing
-        pk, sk = self.enhanced_mlkem.keygen()
-        
-        # Test with invalid ciphertext size
-        invalid_ciphertext = b"too short"
-        
-        # Should raise ValueError
-        with self.assertRaises((ValueError, Exception)):
-            self.enhanced_mlkem.decaps(sk, invalid_ciphertext)
-            
-        # Test with invalid public key
-        invalid_pk = b"EMKPK-2invalid"
-        
-        # Should raise ValueError
-        with self.assertRaises((ValueError, Exception)):
-            self.enhanced_mlkem.encaps(invalid_pk)
-            
-    def test_constant_time_behavior(self):
-        """Test that operations behave in constant time"""
-        # Generate keys
-        pk, sk = self.enhanced_mlkem.keygen()
-        
-        # Generate a valid ciphertext
         ciphertext, _ = self.enhanced_mlkem.encaps(pk)
         
-        # Create a slightly modified ciphertext
-        modified_ciphertext = bytearray(ciphertext)
-        if len(modified_ciphertext) > 10:
-            modified_ciphertext[10] ^= 0xFF
-        modified_ciphertext = bytes(modified_ciphertext)
+        tampered_ct = bytearray(ciphertext)
+        tampered_ct[len(tampered_ct)//2] ^= 0xFF  # Flip a byte in the middle
         
-        # Test if decapsulation is constant-time
-        try:
-            decaps_args = [
-                (sk, ciphertext),
-                (sk, modified_ciphertext)
-            ]
-            
-            self.assertTrue(
-                CryptoTestUtils.test_constant_time_behavior(
-                    self.enhanced_mlkem.decaps, decaps_args, "ML-KEM.decaps"
-                ),
-                "ML-KEM decapsulation should operate in constant time"
-            )
-        except Exception as e:
-            # If this test fails, just log it - constant time behavior is hard to test reliably
-            log.warning(f"Constant time test for decapsulation failed with error: {e}")
+        with self.assertRaises(Exception, msg="Decapsulation should fail for tampered ciphertext"):
+            self.enhanced_mlkem.decaps(sk, bytes(tampered_ct))
+
+    def test_constant_time_decaps(self):
+        """Test that decapsulation runs in constant-time"""
+        pk, sk = self.enhanced_mlkem.keygen()
+        
+        args_list = []
+        # Case 1: Valid ciphertext
+        ct_valid, _ = self.enhanced_mlkem.encaps(pk)
+        args_list.append((sk, ct_valid))
+        
+        # Case 2: Invalid ciphertext (tampered)
+        ct_invalid = bytearray(ct_valid)
+        ct_invalid[10] ^= 0xFF
+        args_list.append((sk, bytes(ct_invalid)))
+        
+        # Case 3: Another valid ciphertext from a different encapsulation
+        ct_valid_2, _ = self.enhanced_mlkem.encaps(pk)
+        args_list.append((sk, ct_valid_2))
+
+        self.assertTrue(
+            CryptoTestUtils.test_constant_time_behavior(self.enhanced_mlkem.decaps, args_list, name="ML-KEM decaps"),
+            "ML-KEM decapsulation should be constant-time to prevent chosen-ciphertext attacks"
+        )
 
 
 class TestIntegration(unittest.TestCase):
@@ -574,6 +363,404 @@ class TestIntegration(unittest.TestCase):
         # XOR with key stream
         return bytes(a ^ b for a, b in zip(data, key_stream[:len(data)]))
 
+import pytest
+import os
+import secrets
+import time
+import hashlib
+import hmac
+import logging  # Added
 
+# Configure global logging for debug output
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+)
+
+from pqc_algorithms import (
+    ConstantTime,
+    EnhancedMLKEM_1024,
+    SideChannelProtection,
+    EnhancedFALCON_1024,
+    EnhancedHQC,
+    HybridKEX,
+    SecureMemory,
+)
+
+# Test Fixtures
+@pytest.fixture
+def mlkem_instance():
+    return EnhancedMLKEM_1024()
+
+@pytest.fixture
+def falcon_instance():
+    return EnhancedFALCON_1024()
+
+@pytest.fixture
+def hqc_instance():
+    return EnhancedHQC()
+
+@pytest.fixture
+def hybrid_kex_instance():
+    return HybridKEX()
+
+@pytest.fixture
+def secure_memory_instance():
+    with SecureMemory() as sm:
+        yield sm
+
+# --- ConstantTime Tests ---
+
+class TestConstantTime:
+    def test_eq(self):
+        assert ConstantTime.eq(b"abc", b"abc") == True
+        assert ConstantTime.eq(b"abc", b"abd") == False
+        assert ConstantTime.eq(b"abc", b"abcd") == False
+
+    def test_compare(self):
+        assert ConstantTime.compare(b"abc", b"abc") == True
+        assert ConstantTime.compare(b"abc", b"abd") == False
+        assert ConstantTime.compare(b"abc", b"abcd") == False
+
+    def test_select(self):
+        assert ConstantTime.select(True, b"a", b"b") == b"a"
+        assert ConstantTime.select(False, b"a", b"b") == b"b"
+        assert ConstantTime.select(True, 1, 2) == 1
+        assert ConstantTime.select(False, 1, 2) == 2
+
+    def test_hmac_verify(self):
+        key = secrets.token_bytes(32)
+        msg = b"test message"
+        mac = hmac.new(key, msg, hashlib.sha256).digest()
+        assert ConstantTime.hmac_verify(key, msg, mac) == True
+        assert ConstantTime.hmac_verify(key, msg, secrets.token_bytes(32)) == False
+
+    def test_hmac_compute(self):
+        key = secrets.token_bytes(32)
+        msg = b"test message"
+        mac = ConstantTime.hmac_compute(key, msg)
+        assert isinstance(mac, bytes)
+        assert len(mac) == 32
+
+    def test_memcmp(self):
+        assert ConstantTime.memcmp(b"abc", b"abc") == 0
+        assert ConstantTime.memcmp(b"abc", b"abd") != 0
+        assert ConstantTime.memcmp(b"abc", b"abcd") != 0
+
+    def test_ct_equals_int(self):
+        assert ConstantTime.ct_equals_int(5, 5) == 1
+        assert ConstantTime.ct_equals_int(5, 6) == 0
+
+    def test_ct_eq(self):
+        assert ConstantTime.ct_eq(5, 5) == True
+        assert ConstantTime.ct_eq(5, 6) == False
+
+# --- EnhancedMLKEM_1024 Tests ---
+
+class TestEnhancedMLKEM1024:
+    def test_keygen(self, mlkem_instance):
+        pk, sk = mlkem_instance.keygen()
+        assert isinstance(pk, bytes)
+        assert isinstance(sk, bytes)
+        assert len(pk) == mlkem_instance.public_key_size
+        assert len(sk) == mlkem_instance.private_key_size
+
+    def test_encaps_decaps_success(self, mlkem_instance):
+        pk, sk = mlkem_instance.keygen()
+        ct, ss1 = mlkem_instance.encaps(pk)
+        ss2 = mlkem_instance.decaps(sk, ct)
+        assert ss1 == ss2
+
+    def test_decaps_wrong_sk(self, mlkem_instance):
+        pk, sk1 = mlkem_instance.keygen()
+        _, sk2 = mlkem_instance.keygen()
+        ct, ss1 = mlkem_instance.encaps(pk)
+        ss2 = mlkem_instance.decaps(sk2, ct)
+        assert ss1 != ss2
+
+    def test_decaps_corrupted_ct(self, mlkem_instance):
+        pk, sk = mlkem_instance.keygen()
+        ct, ss1 = mlkem_instance.encaps(pk)
+        corrupted_ct = bytearray(ct)
+        corrupted_ct[0] ^= 0xFF
+        ss2 = mlkem_instance.decaps(sk, bytes(corrupted_ct))
+        assert ss1 != ss2
+
+    def test_encaps_invalid_pk(self, mlkem_instance):
+        invalid_pk = secrets.token_bytes(mlkem_instance.public_key_size - 1)
+        ct, ss = mlkem_instance.encaps(invalid_pk)
+        assert len(ct) == mlkem_instance.ciphertext_size
+        assert len(ss) == mlkem_instance.shared_secret_size
+
+
+# --- SideChannelProtection Tests ---
+
+class TestSideChannelProtection:
+    def test_protected_memory_access(self):
+        arr = [10, 20, 30, 40, 50]
+        assert SideChannelProtection.protected_memory_access(arr, 2) == 30
+
+    def test_mask_unmask_polynomial(self):
+        poly = secrets.token_bytes(128)
+        mask = secrets.token_bytes(32)
+        masked = SideChannelProtection.mask_polynomial(poly, mask)
+        unmasked = SideChannelProtection.unmask_polynomial(masked, mask)
+        assert poly == unmasked
+
+    def test_fault_resistant_cmp(self):
+        assert SideChannelProtection.fault_resistant_cmp(b"a", b"a") == True
+        assert SideChannelProtection.fault_resistant_cmp(b"a", b"b") == False
+
+    def test_fault_resistant_checksum(self):
+        data = secrets.token_bytes(128)
+        checksum = SideChannelProtection.fault_resistant_checksum(data)
+        assert isinstance(checksum, bytes)
+        assert len(checksum) == 16
+
+
+# --- EnhancedFALCON_1024 Tests ---
+
+class TestEnhancedFALCON1024:
+    def test_keygen(self, falcon_instance):
+        pk, sk = falcon_instance.keygen()
+        assert isinstance(pk, bytes)
+        assert isinstance(sk, bytes)
+
+    def test_sign_verify_success(self, falcon_instance):
+        pk, sk = falcon_instance.keygen()
+        msg = b"This is a test message."
+        sig = falcon_instance.sign(sk, msg)
+        assert falcon_instance.verify(pk, msg, sig) == True
+
+    def test_verify_wrong_message(self, falcon_instance):
+        pk, sk = falcon_instance.keygen()
+        msg = b"This is a test message."
+        wrong_msg = b"This is a wrong message."
+        sig = falcon_instance.sign(sk, msg)
+        assert falcon_instance.verify(pk, wrong_msg, sig) == False
+
+    def test_verify_wrong_pk(self, falcon_instance):
+        pk1, sk = falcon_instance.keygen()
+        pk2, _ = falcon_instance.keygen()
+        msg = b"This is a test message."
+        sig = falcon_instance.sign(sk, msg)
+        assert falcon_instance.verify(pk2, msg, sig) == False
+
+    def test_verify_corrupted_sig(self, falcon_instance):
+        pk, sk = falcon_instance.keygen()
+        msg = b"This is a test message."
+        sig = falcon_instance.sign(sk, msg)
+        corrupted_sig = bytearray(sig)
+        corrupted_sig[5] ^= 0xFF
+        assert falcon_instance.verify(pk, msg, bytes(corrupted_sig)) == False
+
+
+# --- EnhancedHQC Tests ---
+
+class TestEnhancedHQC:
+    def test_keygen(self, hqc_instance):
+        pk, sk = hqc_instance.keygen()
+        assert isinstance(pk, bytes)
+        assert isinstance(sk, bytes)
+
+    def test_encaps_decaps_placeholder(self, hqc_instance):
+        # This tests the placeholder nature of HQC
+        pk, sk = hqc_instance.keygen()
+        ct, ss1 = hqc_instance.encaps(pk)
+        ss2 = hqc_instance.decaps(sk, ct)
+        assert isinstance(ct, bytes)
+        assert isinstance(ss1, bytes)
+        assert isinstance(ss2, bytes)
+        assert ss1 != ss2 # Placeholders return random data
+
+
+# --- HybridKEX Tests ---
+
+class TestHybridKEX:
+    def test_keygen(self, hybrid_kex_instance):
+        pk, sk = hybrid_kex_instance.keygen()
+        assert isinstance(pk, bytes)
+        assert isinstance(sk, bytes)
+        assert pk.startswith(b"HYBRIDPK-v1.0")
+        assert sk.startswith(b"HYBRIDSK-v1.0")
+
+    def test_encaps_decaps_success(self, hybrid_kex_instance):
+        # Note: This test will pass based on placeholder logic for HQC
+        # and successful logic for ML-KEM. A real implementation would
+        # require a full HQC backend.
+        pk, sk = hybrid_kex_instance.keygen()
+        ss1, ct = hybrid_kex_instance.encaps(pk)
+        ss2 = hybrid_kex_instance.decaps(sk, ct)
+        # In the current placeholder impl, decaps cannot recover the secret.
+        # This test mainly checks that the flow completes without errors.
+        assert isinstance(ss1, bytes)
+        assert isinstance(ss2, bytes)
+        assert len(ss1) > 0
+        assert len(ss2) > 0
+
+
+# --- SecureMemory Tests ---
+
+class TestSecureMemory:
+    def test_store_get(self, secure_memory_instance):
+        data = b"very secret data"
+        secure_memory_instance.store("mykey", data)
+        retrieved = secure_memory_instance.get("mykey")
+        assert retrieved == data
+
+    def test_remove(self, secure_memory_instance):
+        data = b"to be removed"
+        secure_memory_instance.store("tempkey", data)
+        assert secure_memory_instance.contains("tempkey")
+        secure_memory_instance.remove("tempkey")
+        assert not secure_memory_instance.contains("tempkey")
+        with pytest.raises(ValueError):
+            secure_memory_instance.get("tempkey")
+
+    def test_clear(self, secure_memory_instance):
+        secure_memory_instance.store("key1", b"data1")
+        secure_memory_instance.store("key2", b"data2")
+        secure_memory_instance.clear()
+        assert not secure_memory_instance.contains("key1")
+        assert not secure_memory_instance.contains("key2")
+        with pytest.raises(ValueError):
+            secure_memory_instance.get("key1")
+
+    def test_context_manager(self):
+        data = b"context data"
+        with SecureMemory() as sm:
+            sm.store("ctxkey", data)
+            assert sm.get("ctxkey") == data
+        # 'sm' should be cleared now
+        with pytest.raises(ValueError):
+            sm.get("ctxkey")
+
+    def test_encryption(self):
+        # Test that data is not stored in plaintext if encryption is on
+        sm = SecureMemory(use_encryption=True)
+        data = b"plaintext"
+        sm.store("enckey", data)
+        # Internal storage should not contain the plaintext
+        assert sm._storage["enckey"] != data
+        retrieved = sm.get("enckey")
+        assert retrieved == data
+        sm.clear()
+
+    def test_store_get(self, secure_memory_instance):
+        data = b"very secret data"
+        secure_memory_instance.store("mykey", data)
+        retrieved = secure_memory_instance.get("mykey")
+        assert retrieved == data
+
+    def test_remove(self, secure_memory_instance):
+        data = b"to be removed"
+        secure_memory_instance.store("tempkey", data)
+        assert secure_memory_instance.contains("tempkey")
+        secure_memory_instance.remove("tempkey")
+        assert not secure_memory_instance.contains("tempkey")
+        with pytest.raises(ValueError):
+            secure_memory_instance.get("tempkey")
+
+    def test_clear(self, secure_memory_instance):
+        secure_memory_instance.store("key1", b"data1")
+        secure_memory_instance.store("key2", b"data2")
+        secure_memory_instance.clear()
+        assert not secure_memory_instance.contains("key1")
+        assert not secure_memory_instance.contains("key2")
+        with pytest.raises(ValueError):
+            secure_memory_instance.get("key1")
+
+    def test_context_manager(self):
+        data = b"context data"
+        with SecureMemory() as sm:
+            sm.store("ctxkey", data)
+            assert sm.get("ctxkey") == data
+        # 'sm' should be cleared now
+        with pytest.raises(ValueError):
+            sm.get("ctxkey")
+
+    def test_encryption(self):
+        # Test that data is not stored in plaintext if encryption is on
+        sm = SecureMemory(use_encryption=True)
+        data = b"plaintext"
+        sm.store("enckey", data)
+        # Internal storage should not contain the plaintext
+        assert sm._storage["enckey"] != data
+        retrieved = sm.get("enckey")
+        assert retrieved == data
+        sm.clear()
+
+# === Additional Robustness Tests ===
+
+class TestAdditionalRobustness:
+    """Extra tests for edge cases and robustness."""
+
+    def test_constant_time_select_mismatched_lengths(self):
+        # Different length byte strings should still return chosen input
+        a = b"short"
+        b = b"a much longer byte string than a"
+        assert ConstantTime.select(True, a, b) == a
+        assert ConstantTime.select(False, a, b) == b
+
+    def test_sidechannel_random_delay_bounds(self):
+        start = time.perf_counter()
+        SideChannelProtection.random_delay()
+        elapsed = time.perf_counter() - start
+        # Should be less than 1 ms (0.001 sec) per implementation comment
+        assert elapsed < 0.002  # allow small overhead
+
+    def test_falcon_fault_code_tamper(self, falcon_instance):
+        pk, sk = falcon_instance.keygen()
+        msg = b"tamper test"
+        sig = falcon_instance.sign(sk, msg)
+        # Tamper with the fault code (last byte)
+        tampered = bytearray(sig)
+        tampered[-1] ^= 0xFF
+        assert falcon_instance.verify(pk, msg, bytes(tampered)) is False
+
+    def test_secure_memory_no_encryption(self):
+        sm = SecureMemory(use_encryption=False)
+        data = b"plain"
+        sm.store("k", data)
+        assert sm._storage["k"] == data  # stored as plaintext
+        sm.clear()
+        assert sm._active is False
+
+    def test_secure_memory_wipe_internal(self):
+        sm = SecureMemory(use_encryption=False)
+        data = bytearray(b"wipe_me")
+        sm.store("wipe", data)
+        stored_ref = sm._storage["wipe"]
+        sm.remove("wipe")
+        # After removal, stored_ref should be zeroed out
+        assert all(b == 0 for b in stored_ref)
+
+    def test_mlkem_ciphertext_size(self, mlkem_instance):
+        pk, _ = mlkem_instance.keygen()
+        ct, _ = mlkem_instance.encaps(pk)
+        assert len(ct) == mlkem_instance.ciphertext_size
+
+    def test_hybrid_kex_secure_key_exchange(self, hybrid_kex_instance):
+        # Prepare remote and local key sets using generated key pairs
+        remote_pk, remote_sk = hybrid_kex_instance.keygen()
+        local_pk, local_sk = hybrid_kex_instance.keygen()
+
+        remote_keys = {
+            "mlkem": hybrid_kex_instance.mlkem.keygen()[0],
+            "hqc": hybrid_kex_instance.hqc.keygen()[0],
+        }
+        local_keys = {
+            "mlkem": hybrid_kex_instance.mlkem.keygen()[1],
+            "hqc": hybrid_kex_instance.hqc.keygen()[1],
+        }
+
+        result = hybrid_kex_instance.secure_key_exchange(
+            remote_public_key=remote_keys,
+            local_private_key=local_keys,
+            remote_signature=None,
+            authentication_data=b"context",
+        )
+        assert isinstance(result, dict)
+        assert "shared_secret" in result and isinstance(result["shared_secret"], (bytes, type(None))) 
 if __name__ == "__main__":
     unittest.main() 

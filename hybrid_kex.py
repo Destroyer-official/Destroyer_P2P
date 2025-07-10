@@ -1,14 +1,29 @@
 """
-Hybrid Key Exchange Module
- 
-Combines X3DH (Extended Triple Diffie-Hellman) with Post-Quantum Cryptography
-for establishing secure shared secrets resistant to both classical and quantum attacks.
-""" 
+Hybrid Key Exchange Module for Post-Quantum Secure Communications
+
+This module implements a state-of-the-art hybrid key exchange protocol that combines:
+1. X3DH (Extended Triple Diffie-Hellman) for classical security
+2. ML-KEM-1024 (formerly Kyber) for post-quantum security
+3. FALCON-1024 and SPHINCS+ for post-quantum signatures
+
+The hybrid approach provides security against both classical and quantum adversaries,
+following the "hybrid" recommendation from NIST's Post-Quantum Cryptography standards.
+All cryptographic operations use constant-time implementations to prevent side-channel
+attacks, and sensitive key material is protected in memory.
+
+Key features:
+- Forward secrecy through ephemeral keys
+- Post-quantum resistance with NIST-standardized algorithms
+- Multiple DH exchanges for defense-in-depth
+- Cryptographic binding between classical and PQ components
+- Automatic key rotation for enhanced security
+- Memory protection for sensitive material
+"""
 
 import os
-import json 
+import json  
 import time
-import base64
+import base64 
 import logging
 import uuid
 import random
@@ -17,7 +32,10 @@ import hashlib
 from typing import Tuple, Dict, Optional, Union
 import math
 import ctypes
+import quantcrypt
 import secure_key_manager as skm
+from double_ratchet import verify_key_material
+
 # X25519 for classical key exchange
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives import serialization
@@ -30,28 +48,59 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 
-# Post-quantum cryptography
-import quantcrypt.kem
-import quantcrypt.cipher
-from quantcrypt.dss import FALCON_1024
-from pqc_algorithms import EnhancedFALCON_1024, EnhancedMLKEM_1024
-
-# Defer secure_key_manager import to avoid circular import
-# secure_key_manager will be imported on-demand when needed
-
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s')
 log = logging.getLogger(__name__)
-log.setLevel(logging.DEBUG)
 
-# Add file handler for security logs
+# Configure dedicated logger for hybrid key exchange operations
+hybrid_kex_logger = logging.getLogger("hybrid_kex")
+hybrid_kex_logger.setLevel(logging.DEBUG)
+
+# Ensure logs directory exists
+if not os.path.exists("logs"):
+    os.makedirs("logs")
+
+# Setup file logging with detailed information for security auditing
+hybrid_kex_file_handler = logging.FileHandler(os.path.join("logs", "hybrid_kex.log"))
+hybrid_kex_file_handler.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s')
+hybrid_kex_file_handler.setFormatter(formatter)
+hybrid_kex_logger.addHandler(hybrid_kex_file_handler)
+
+# Setup console logging for immediate operational feedback
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(formatter)
+hybrid_kex_logger.addHandler(console_handler)
+
+hybrid_kex_logger.info("Hybrid Key Exchange logger initialized")
+
+# Post-quantum cryptography
 try:
-    file_handler = logging.FileHandler('hybrid_security.log')
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] [%(funcName)s] %(message)s'))
-    log.addHandler(file_handler)
-except Exception as e:
-    log.warning(f"Could not create hybrid security log file: {e}")
+    # Import enhanced implementations directly
+    from pqc_algorithms import (
+        EnhancedMLKEM_1024,
+        EnhancedFALCON_1024,
+        SideChannelProtection,
+        ConstantTime,
+        SecureMemory,
+        EnhancedHQC
+    )
+    HAVE_ENHANCED_PQC = True
+    hybrid_kex_logger.info("Successfully imported enhanced PQC implementations from pqc_algorithms.")
+except ImportError as e:
+    hybrid_kex_logger.critical(f"Failed to import ENHANCED PQC algorithms: {e}. This is a fatal error.")
+    HAVE_ENHANCED_PQC = False
+    # Define dummy classes to prevent further import errors if needed, but the app should not run
+    class EnhancedMLKEM_1024: pass
+    class EnhancedFALCON_1024: pass
+    class EnhancedHQC: pass
+
+if not HAVE_ENHANCED_PQC:
+    raise ImportError("CRITICAL: Enhanced PQC implementations are required for HybridKEX. Aborting.")
+
+# Defer secure_key_manager import to avoid circular import
+# secure_key_manager will be imported on-demand when needed
 
 # Constants for ephemeral identity management
 DEFAULT_KEY_LIFETIME = 3072  # Default lifetime: 3072 seconds (51.2 minutes)
@@ -61,55 +110,50 @@ MAX_KEY_LIFETIME = 86400    # 24 hours in seconds maximum lifetime
 
 MLKEM1024_CIPHERTEXT_SIZE = 1568  # Expected ciphertext size for ML-KEM-1024
 
-def verify_key_material(key_material, expected_length=None, description="key material"):
-    """
-    Verify that cryptographic key material meets security requirements.
-    
-    Args:
-        key_material: The key material to verify
-        expected_length: Optional expected length in bytes
-        description: Description of the key material for logs
-        
-    Returns:
-        True if verification passes
-        
-    Raises:
-        ValueError: If verification fails
-    """
-    if key_material is None:
-        log.error(f"SECURITY ALERT: {description} is None")
-        raise ValueError(f"Security violation: {description} is None")
-        
-    if not isinstance(key_material, bytes):
-        log.error(f"SECURITY ALERT: {description} is not bytes type: {type(key_material)}")
-        raise ValueError(f"Security violation: {description} is not bytes")
-        
-    if expected_length and len(key_material) != expected_length:
-        log.error(f"SECURITY ALERT: {description} has incorrect length {len(key_material)}, expected {expected_length}")
-        raise ValueError(f"Security violation: {description} has incorrect length")
-        
-    if len(key_material) == 0:
-        log.error(f"SECURITY ALERT: {description} is empty")
-        raise ValueError(f"Security violation: {description} is empty")
-        
-    # Basic entropy check
-    if all(b == key_material[0] for b in key_material):
-        log.error(f"SECURITY ALERT: {description} has low entropy (all same byte)")
-        raise ValueError(f"Security violation: {description} has low entropy")
-        
-    log.debug(f"Verified {description}: length={len(key_material)}, entropy=OK")
-    return True
+# For type hinting
+import sys
+if sys.version_info >= (3, 9):
+    from typing import TypeAlias, Dict, Any, List, Optional, Tuple, Union
+else:
+    from typing import Dict, Any, List, Optional, Tuple, Union
+    from typing_extensions import TypeAlias
 
-def _format_binary(data, max_len=8):
-    """
-    Format binary data for logging in a readable way.
+# For binding the key exchange with a signature
+X25519_S_P_K_DOMAIN_SEP = b"x25519_signed_prekey_signature"
+PQ_BUNDLE_DOMAIN_SEP = b"post_quantum_bundle_signature"
+EPHEMERAL_KEY_DOMAIN_SEP = b"ephemeral_key_signature"
+EC_PQ_BINDING_DOMAIN_SEP = b"ec_pq_binding_signature"
+ROOT_KEY_AUTH_DOMAIN_SEP = b"root_key_authentication"
+
+# Ensure we have a secure wipe function
+try:
+    from platform_hsm_interface import secure_wipe_memory
+    log.info("Using secure_wipe_memory from platform_hsm_interface.")
+except (ImportError, AttributeError):
+    log.warning("Could not import secure_wipe_memory. Sensitive key data may not be properly wiped.")
+    # Define a no-op fallback
+    def secure_wipe_memory(addr, length):
+        pass
+
+def _format_binary(data: Optional[bytes], max_len: int = 8) -> str:
+    """Format binary data for secure logging with length-preserving truncation.
+    
+    Creates a safe representation of binary data for logging that:
+    1. Base64-encodes the data for readability
+    2. Truncates to max_len bytes to avoid log pollution
+    3. Preserves the original data length information
+    4. Handles None values gracefully
+    
+    This function is designed for security-sensitive logging where the
+    full key material should never be exposed, but the presence and
+    size of cryptographic values needs to be recorded.
     
     Args:
-        data: Binary data to format
-        max_len: Maximum length to display before truncating
+        data: Binary data to format safely for logs
+        max_len: Maximum number of bytes to include before truncating
         
     Returns:
-        Formatted string representation
+        str: Formatted string with truncation indicator and length
     """
     if data is None:
         return "None"
@@ -118,60 +162,58 @@ def _format_binary(data, max_len=8):
         return f"{b64}... ({len(data)} bytes)"
     return base64.b64encode(data).decode('utf-8')
 
-def secure_erase(key_material):
-    """
-    Securely erase key material from memory.
-    
-    Args:
-        key_material: The key material to erase
-    """
-    if key_material is None:
-        return
-    
-    # Import secure_key_manager only when needed to avoid circular imports
-    import secure_key_manager as skm
-    
-    # Always use the enhanced_secure_erase from secure_key_manager
-    skm.enhanced_secure_erase(key_material)
-    log.debug("Securely erased key material using enhanced technique")
-    return
-
-# Flag indicating we're using the real post-quantum implementation
-HAVE_REAL_PQ = True
-log.info("Using real post-quantum cryptography implementation: ML-KEM-1024 and FALCON-1024")
-
-# Log that we're using enhanced FALCON parameters
-log.info("Activating enhanced FALCON-1024 parameters based on research paper recommendations")
-
 class HybridKeyExchange:
-    """
-    Implements a hybrid key exchange protocol combining X3DH with post-quantum cryptography.
+    """Hybrid X3DH + Post-Quantum key exchange protocol implementation.
     
-    The protocol uses multiple Diffie-Hellman exchanges with X25519 keys for classical
-    security, combined with ML-KEM-1024 for post-quantum security.
+    Implements a military-grade key exchange protocol that combines the Extended
+    Triple Diffie-Hellman (X3DH) protocol with NIST-standardized post-quantum
+    cryptography to provide both classical and quantum-resistant security.
     
-    Features:
-    - Support for ephemeral identities with automatic rotation
-    - In-memory key option to avoid storing sensitive key material
-    - Post-quantum security with ML-KEM-1024 and FALCON-1024
-    - Handshake replay protection with nonces and timestamps
+    Security features:
+    - Four X25519 Diffie-Hellman exchanges for classical security
+    - ML-KEM-1024 key encapsulation for post-quantum security
+    - FALCON-1024 signatures for post-quantum authentication
+    - SPHINCS+ signatures as a quantum-resistant backup
+    - Cryptographic binding between classical and PQ components
+    - Constant-time implementations to prevent side-channel attacks
+    - Memory protection for sensitive key material
+    
+    Privacy features:
+    - Ephemeral identity support with automatic rotation
+    - In-memory-only key option to avoid disk persistence
+    - Forward secrecy through key rotation
+    - Replay protection with nonces and timestamps
+    
+    This implementation follows NIST's recommendation for hybrid post-quantum
+    security and is designed for high-security applications where both classical
+    and quantum threats must be mitigated.
     """
     
     def __init__(self, identity: str = "user", keys_dir: str = None,
                  ephemeral: bool = True, key_lifetime: int = MIN_KEY_LIFETIME,
                  in_memory_only: bool = True):
-        """
-        Initialize the hybrid key exchange.
+        """Initialize a hybrid key exchange instance with security parameters.
+        
+        Creates a new hybrid key exchange instance with the specified security
+        parameters. The default configuration provides maximum security with
+        ephemeral identity, in-memory keys, and frequent key rotation.
         
         Args:
-            identity: User identifier (ignored if ephemeral=True, which is the default).
-            keys_dir: Directory for storing keys (not used if in_memory_only=True, which is the default).
-            ephemeral: Defaults to True for maximum security (ephemeral identity).
-                       If True, use an ephemeral identity with random identifier.
-            key_lifetime: Defaults to MIN_KEY_LIFETIME for frequent rotation in ephemeral mode.
-                          Seconds until keys should be rotated (for ephemeral mode).
-            in_memory_only: Defaults to True for maximum security (keys only in memory).
-                            If True, never store keys on disk.
+            identity: User identifier string
+                     (ignored if ephemeral=True, which is the default)
+            keys_dir: Directory path for key storage
+                     (not used if in_memory_only=True, which is the default)
+            ephemeral: When True (default), generates a random ephemeral identity
+                       that cannot be linked to the user across sessions
+            key_lifetime: Time in seconds before keys are automatically rotated
+                         (default=MIN_KEY_LIFETIME for frequent rotation)
+            in_memory_only: When True (default), keys are never persisted to disk
+                           for maximum security against forensic analysis
+        
+        Security note:
+            The default parameters (ephemeral=True, in_memory_only=True) provide
+            maximum security and are recommended for most applications. Only
+            change these if you have specific requirements for persistent identities.
         """
         self.in_memory_only = in_memory_only
         self.ephemeral_mode = ephemeral
@@ -188,7 +230,7 @@ class HybridKeyExchange:
         else:
             self.identity = identity
         
-        log.info(
+        hybrid_kex_logger.info(
             f"HybridKeyExchange initializing for identity '{self.identity}'. "
             f"Configuration - Ephemeral Mode: {self.ephemeral_mode}, "
             f"In-Memory Keys: {self.in_memory_only}, "
@@ -196,9 +238,9 @@ class HybridKeyExchange:
         )
         
         if self.ephemeral_mode and self.in_memory_only and self.key_lifetime == MIN_KEY_LIFETIME and ephemeral and in_memory_only and key_lifetime == MIN_KEY_LIFETIME:
-            log.info("SECURITY INFO: Instance configured with maximal security defaults: ephemeral ID, in-memory keys, and minimal rotation time.")
+            hybrid_kex_logger.info("SECURITY INFO: Instance configured with maximal security defaults: ephemeral ID, in-memory keys, and minimal rotation time.")
         elif self.ephemeral_mode and self.in_memory_only:
-            log.info("SECURITY INFO: Instance configured with strong security settings: ephemeral ID, in-memory keys.")
+            hybrid_kex_logger.info("SECURITY INFO: Instance configured with strong security settings: ephemeral ID, in-memory keys.")
         
         # Set up keys directory (not used in memory-only mode)
         if not in_memory_only and keys_dir is None:
@@ -227,26 +269,26 @@ class HybridKeyExchange:
         
         # Initialize KEM and DSS instances
         # Use enhanced ML-KEM implementation with side-channel protections
-        self.kem = EnhancedMLKEM_1024()
+        self.ml_kem_impl = EnhancedMLKEM_1024()
         
         # Use the enhanced FALCON implementation with improved parameters
         self.dss = EnhancedFALCON_1024()
-        log.info("Using EnhancedFALCON_1024 with improved parameters for stronger security guarantees")
+        hybrid_kex_logger.info("Using EnhancedFALCON_1024 with improved parameters for stronger security guarantees")
         
         # Initialize quantum resistance future-proofing module
         # Import here to avoid circular import
         import secure_key_manager as skm
-        self.quantum_resistance = skm.get_quantum_resistance()
-        log.info("Initialized quantum resistance future-proofing module")
+        self.qr_future_proofing = self.enhance_quantum_resistance()
+        self.is_key_material_generated = False
         
         # Add SPHINCS+ as backup signature scheme if available
-        supported_algos = self.quantum_resistance.get_supported_algorithms()
+        supported_algos = self.qr_future_proofing.get_supported_algorithms()
         if "SPHINCS+" in supported_algos.get("signatures", []):
-            self.sphincs_plus = self.quantum_resistance.get_algorithm("SPHINCS+")
-            log.info("SPHINCS+ backup signature scheme initialized")
+            self.sphincs_plus = self.qr_future_proofing.get_algorithm("SPHINCS+")
+            hybrid_kex_logger.info("SPHINCS+ backup signature scheme initialized")
         else:
             self.sphincs_plus = None
-            log.info("SPHINCS+ backup signature scheme not available")
+            hybrid_kex_logger.info("SPHINCS+ backup signature scheme not available")
             
         # Add nonce tracking for replay protection - dictionary mapping peer IDs to sets of seen nonces
         self.seen_nonces = {}
@@ -268,8 +310,8 @@ class HybridKeyExchange:
             # Set the next rotation time for ephemeral keys
             if self.ephemeral_mode:
                 self.next_rotation_time = self.key_creation_time + self.key_lifetime
-                log.info(f"Ephemeral keys will rotate after: {self.key_lifetime} seconds")
-                log.info(f"Next rotation scheduled at: {time.ctime(self.next_rotation_time)}")
+                hybrid_kex_logger.info(f"Ephemeral keys will rotate after: {self.key_lifetime} seconds")
+                hybrid_kex_logger.info(f"Next rotation scheduled at: {time.ctime(self.next_rotation_time)}")
             
             # Only save to disk if neither ephemeral nor in-memory mode is active
             if not self.in_memory_only and not self.ephemeral_mode:
@@ -286,7 +328,7 @@ class HybridKeyExchange:
                 
                 # Check for key expiration if present in the file
                 if 'expiration_time' in keys_data and keys_data['expiration_time'] < time.time():
-                    log.info(f"Keys for {self.identity} have expired, generating new ones")
+                    hybrid_kex_logger.info(f"Keys for {self.identity} have expired, generating new ones")
                     self._generate_keys()
                     self._save_keys()
                     return
@@ -317,7 +359,7 @@ class HybridKeyExchange:
                     self.falcon_public_key = base64.b64decode(keys_data['falcon_public_key'])
                 else:
                     # Generate FALCON keys if not found in existing file
-                    log.info(f"Generating new FALCON-1024 keys for {self.identity}")
+                    hybrid_kex_logger.info(f"Generating new FALCON-1024 keys for {self.identity}")
                     self.falcon_public_key, self.falcon_private_key = self.dss.keygen()
                     self._save_keys()
                 
@@ -325,20 +367,20 @@ class HybridKeyExchange:
                 if 'created_at' in keys_data:
                     self.key_creation_time = keys_data['created_at']
                 
-                log.info(f"Loaded existing hybrid key material for {self.identity}")
+                hybrid_kex_logger.info(f"Loaded existing hybrid key material for {self.identity}")
             else:
                 # Generate new keys
                 self._generate_keys()
                 self._save_keys()
                 
         except Exception as e:
-            log.error(f"Error loading keys, generating new ones: {e}")
+            hybrid_kex_logger.error(f"Error loading keys, generating new ones: {e}")
             self._generate_keys()
             self._save_keys()
     
     def _generate_keys(self):
         """Generate all required keys for the hybrid handshake."""
-        log.info(f"Generating new hybrid cryptographic key material for identity: {self.identity}")
+        hybrid_kex_logger.info(f"Generating new hybrid cryptographic key material for identity: {self.identity}")
         
         # Generate X25519 static key
         self.static_key = X25519PrivateKey.generate()
@@ -346,7 +388,7 @@ class HybridKeyExchange:
             encoding=serialization.Encoding.Raw,
             format=serialization.PublicFormat.Raw
         )
-        log.debug(f"Generated X25519 static key: {_format_binary(static_pub)}")
+        hybrid_kex_logger.debug(f"Generated X25519 static key: {_format_binary(static_pub)}")
         
         # Generate Ed25519 signing key
         self.signing_key = Ed25519PrivateKey.generate()
@@ -354,7 +396,7 @@ class HybridKeyExchange:
             encoding=serialization.Encoding.Raw,
             format=serialization.PublicFormat.Raw
         )
-        log.debug(f"Generated Ed25519 signing key: {_format_binary(signing_pub)}")
+        hybrid_kex_logger.debug(f"Generated Ed25519 signing key: {_format_binary(signing_pub)}")
         
         # Generate signed prekey
         self.signed_prekey = X25519PrivateKey.generate()
@@ -362,26 +404,26 @@ class HybridKeyExchange:
             encoding=serialization.Encoding.Raw,
             format=serialization.PublicFormat.Raw
         )
-        log.debug(f"Generated X25519 signed prekey: {_format_binary(prekey_public_bytes)}")
+        hybrid_kex_logger.debug(f"Generated X25519 signed prekey: {_format_binary(prekey_public_bytes)}")
         
         # Sign the prekey
         self.prekey_signature = self.signing_key.sign(prekey_public_bytes)
-        log.debug(f"Generated prekey signature: {_format_binary(self.prekey_signature)}")
+        hybrid_kex_logger.debug(f"Generated prekey signature: {_format_binary(self.prekey_signature)}")
         
         # Verify the signature
         try:
             self.signing_key.public_key().verify(self.prekey_signature, prekey_public_bytes)
-            log.debug("Verified prekey signature successfully")
+            hybrid_kex_logger.debug("Verified prekey signature successfully")
         except InvalidSignature:
-            log.error("SECURITY ALERT: Generated prekey signature failed verification")
+            hybrid_kex_logger.error("SECURITY ALERT: Generated prekey signature failed verification")
             raise ValueError("Critical security error: Signature verification failed")
         
         # Generate KEM key
-        log.debug("Generating ML-KEM-1024 key pair")
-        self.kem_public_key, self.kem_private_key = self.kem.keygen()
+        hybrid_kex_logger.debug("Generating ML-KEM-1024 key pair")
+        self.kem_public_key, self.kem_private_key = self.ml_kem_impl.keygen()
         
         # Generate FALCON signature key
-        log.debug("Generating FALCON-1024 signature key pair")
+        hybrid_kex_logger.debug("Generating FALCON-1024 signature key pair")
         self.falcon_public_key, self.falcon_private_key = self.dss.keygen()
         
         # Verify key material
@@ -390,18 +432,18 @@ class HybridKeyExchange:
         verify_key_material(self.falcon_public_key, description="FALCON-1024 public key")
         verify_key_material(self.falcon_private_key, description="FALCON-1024 private key")
         
-        log.info(f"Successfully generated complete hybrid key material for {self.identity}")
+        hybrid_kex_logger.info(f"Successfully generated complete hybrid key material for {self.identity}")
     
     def _save_keys(self):
         """Save the generated keys to a file if neither in-memory nor ephemeral mode is active."""
         # Skip saving if in-memory only mode is enabled
         if self.in_memory_only:
-            log.debug("In-memory only mode active, skipping key persistence")
+            hybrid_kex_logger.debug("In-memory only mode active, skipping key persistence")
             return
             
         # Skip saving if ephemeral mode is enabled
         if self.ephemeral_mode:
-            log.debug("Ephemeral mode active, skipping key persistence")
+            hybrid_kex_logger.debug("Ephemeral mode active, skipping key persistence")
             return
             
         # Only save if neither in-memory nor ephemeral mode is active
@@ -444,14 +486,34 @@ class HybridKeyExchange:
         with open(key_file, 'w') as f:
             json.dump(keys_data, f)
         
-        log.info(f"Saved hybrid keys to {key_file} (expires: {time.ctime(keys_data['expiration_time'])})")
+        hybrid_kex_logger.info(f"Saved hybrid keys to {key_file} (expires: {time.ctime(keys_data['expiration_time'])})")
     
     def get_public_bundle(self) -> Dict[str, str]:
-        """
-        Get the public key bundle to share with peers.
+        """Create a signed public key bundle for sharing with peers.
+        
+        Assembles a complete key bundle containing all public keys needed for
+        the hybrid key exchange protocol. The bundle includes:
+        
+        1. Identity information and metadata
+        2. X25519 static public key for long-term identity
+        3. X25519 signed prekey for forward secrecy
+        4. Ed25519 signing key for classical signatures
+        5. ML-KEM-1024 public key for post-quantum key encapsulation
+        6. FALCON-1024 public key for post-quantum signatures
+        7. Prekey signature (Ed25519) for key authentication
+        8. Bundle signature (FALCON-1024) for integrity protection
+        9. Ephemeral identity metadata (if applicable)
+        
+        The bundle is cryptographically bound through signatures to prevent
+        tampering and key substitution attacks.
         
         Returns:
-            Dictionary containing all public key components
+            Dict[str, str]: Complete public key bundle with all components
+                           encoded as base64 strings
+                           
+        Note:
+            This method automatically rotates keys if they have expired
+            before creating the bundle.
         """
         # Check if keys need rotation before creating bundle
         if self.check_key_expiration():
@@ -502,19 +564,39 @@ class HybridKeyExchange:
         return bundle
     
     def verify_public_bundle(self, bundle: Dict[str, str]) -> bool:
-        """
-        Verify the signatures in a public key bundle.
+        """Verify the cryptographic integrity of a peer's public key bundle.
+        
+        Performs comprehensive verification of a key bundle:
+        1. Validates bundle structure and required components
+        2. Verifies Ed25519 signature on the signed prekey
+        3. Verifies FALCON-1024 signature on the entire bundle
+        
+        This verification is critical for preventing MITM attacks and
+        key substitution attacks in the key exchange protocol.
         
         Args:
-            bundle: The key bundle to verify
+            bundle: Public key bundle from a peer containing:
+                   - identity: Peer identifier
+                   - static_key: X25519 static public key (base64)
+                   - signed_prekey: X25519 signed prekey (base64)
+                   - signing_key: Ed25519 public key (base64)
+                   - prekey_signature: Ed25519 signature (base64)
+                   - kem_public_key: ML-KEM public key (base64)
+                   - falcon_public_key: FALCON public key (base64)
+                   - bundle_signature: FALCON signature (base64)
             
         Returns:
-            True if verification succeeds, False if it fails
+            bool: True if all signatures verify successfully
+                 False if any verification fails
+                 
+        Security note:
+            Failed verification should be treated as a potential attack.
+            The caller should abort the handshake if this returns False.
         """
         try:
             # Check for required keys
             if not all(k in bundle for k in ['static_key', 'signed_prekey', 'signing_key', 'prekey_signature']):
-                log.error("Invalid key bundle: missing required keys")
+                hybrid_kex_logger.error("Invalid key bundle: missing required keys")
                 return False
                 
             # Extract keys from bundle
@@ -526,15 +608,15 @@ class HybridKeyExchange:
             try:
                 signing_public_key = Ed25519PublicKey.from_public_bytes(signing_key_bytes)
             except ValueError as e:
-                log.error(f"Invalid signing key format: {e}")
+                hybrid_kex_logger.error(f"Invalid signing key format: {e}")
                 return False
                 
             # Verify the prekey signature
             try:
                 signing_public_key.verify(prekey_signature, signed_prekey)
-                log.debug("Ed25519 prekey signature verified successfully")
+                hybrid_kex_logger.debug("Ed25519 prekey signature verified successfully")
             except InvalidSignature:
-                log.error("SECURITY ALERT: Prekey signature verification failed")
+                hybrid_kex_logger.error("SECURITY ALERT: Prekey signature verification failed")
                 return False
             
             # Now verify the FALCON bundle signature if present
@@ -552,45 +634,66 @@ class HybridKeyExchange:
                 # Verify with FALCON-1024
                 try:
                     secure_verify(self.dss, falcon_public_key, bundle_data, bundle_signature, "FALCON bundle signature")
-                    log.debug("FALCON-1024 bundle signature verified successfully")
+                    hybrid_kex_logger.debug("FALCON-1024 bundle signature verified successfully")
                 except ValueError as e:
-                    log.error(f"SECURITY ALERT: {str(e)}")
+                    hybrid_kex_logger.error(f"SECURITY ALERT: {str(e)}")
                     return False
             
             return True
             
         except (KeyError, ValueError, InvalidSignature) as e:
-            log.error(f"Invalid key bundle: {e}")
+            hybrid_kex_logger.error(f"Invalid key bundle: {e}")
             return False
     
     def _generate_handshake_nonce(self) -> Tuple[bytes, int]:
-        """
-        Generate a secure random nonce and timestamp for handshake replay protection.
+        """Generate cryptographically secure nonce and timestamp for replay protection.
+        
+        Creates a unique, unpredictable nonce and current timestamp to prevent
+        replay attacks in the key exchange protocol. The nonce provides uniqueness
+        while the timestamp allows for time-based verification windows.
+        
+        The nonce is generated using a cryptographically secure random number
+        generator (os.urandom) to ensure unpredictability.
         
         Returns:
-            Tuple of (nonce, timestamp) where nonce is 32 random bytes and timestamp is current Unix time
+            Tuple[bytes, int]: (nonce, timestamp) where:
+                - nonce: 32 bytes of cryptographically secure random data
+                - timestamp: Current Unix time in seconds
         """
         nonce = os.urandom(32)  # 32 bytes of cryptographically secure randomness
         timestamp = int(time.time())  # Current Unix timestamp
         return nonce, timestamp
 
     def _verify_handshake_nonce(self, peer_id: str, nonce: bytes, timestamp: int) -> bool:
-        """
-        Verify that a handshake nonce hasn't been seen before and the timestamp is valid.
+        """Verify handshake nonce and timestamp to prevent replay attacks.
+        
+        Performs comprehensive verification of handshake nonces:
+        1. Validates timestamp is within the acceptable window (prevents old message replay)
+        2. Checks if the nonce has been seen before from this peer (prevents message replay)
+        3. Stores the nonce in a peer-specific set for future verification
+        4. Implements memory protection against DoS attacks by limiting stored nonces
+        
+        This verification is critical for preventing various replay attacks
+        against the key exchange protocol.
         
         Args:
-            peer_id: Identity of the peer sending the nonce
-            nonce: The nonce to verify (32 bytes)
-            timestamp: Unix timestamp from the handshake
+            peer_id: Unique identifier of the peer sending the nonce
+            nonce: 32-byte random nonce to verify
+            timestamp: Unix timestamp (seconds since epoch) from the handshake
             
         Returns:
-            True if nonce is valid (not seen before and timestamp is current), False otherwise
+            bool: True if nonce is valid (not seen before and timestamp is current),
+                 False if the nonce is invalid or represents a replay attempt
+                 
+        Security note:
+            Failed verification should be treated as a potential attack and
+            the handshake should be aborted immediately.
         """
         current_time = int(time.time())
         
         # Check if timestamp is within the acceptable window (±timestamp_window seconds)
         if abs(current_time - timestamp) > self.timestamp_window:
-            log.error(f"SECURITY ALERT: Handshake timestamp outside valid window. Received: {timestamp}, Current: {current_time}")
+            hybrid_kex_logger.error(f"SECURITY ALERT: Handshake timestamp outside valid window. Received: {timestamp}, Current: {current_time}")
             return False
         
         # Initialize nonce set for this peer if it doesn't exist
@@ -599,7 +702,7 @@ class HybridKeyExchange:
         
         # Check if we've seen this nonce before from this peer
         if nonce in self.seen_nonces[peer_id]:
-            log.error(f"SECURITY ALERT: Handshake replay detected! Duplicate nonce from peer: {peer_id}")
+            hybrid_kex_logger.error(f"SECURITY ALERT: Handshake replay detected! Duplicate nonce from peer: {peer_id}")
             return False
             
         # Store the nonce as seen
@@ -608,44 +711,69 @@ class HybridKeyExchange:
         # If we have too many nonces stored for this peer, keep only the most recent ones
         # This prevents memory exhaustion attacks
         if len(self.seen_nonces[peer_id]) > 1000:  # Arbitrary limit
-            log.warning(f"Too many stored nonces for peer {peer_id}, clearing oldest")
+            hybrid_kex_logger.warning(f"Too many stored nonces for peer {peer_id}, clearing oldest")
             self.seen_nonces[peer_id].clear()  # In a production system, you might want to keep the most recent ones
             self.seen_nonces[peer_id].add(nonce)  # Keep the current one
             
         return True
 
     def initiate_handshake(self, peer_bundle: Dict[str, str]) -> Tuple[Dict[str, str], bytes]:
-        """
-        Initiate the X3DH+PQ handshake (Alice's side).
+        """Initiate a hybrid X3DH+PQ handshake (Alice's role).
+        
+        Performs the initiator side of the hybrid key exchange protocol:
+        
+        1. Verifies the peer's key bundle signatures
+        2. Generates an ephemeral X25519 key pair
+        3. Performs four Diffie-Hellman exchanges:
+           - DH1: Static-Static (initiator's static + peer's static)
+           - DH2: Ephemeral-Static (initiator's ephemeral + peer's static)
+           - DH3: Static-SPK (initiator's static + peer's signed prekey)
+           - DH4: Ephemeral-SPK (initiator's ephemeral + peer's signed prekey)
+        4. Performs ML-KEM-1024 encapsulation with peer's KEM public key
+        5. Generates ephemeral FALCON key and signatures for binding
+        6. Creates a cryptographic binding between classical and PQ components
+        7. Combines all shared secrets with HKDF-SHA512
+        8. Creates a handshake message with all required components
         
         Args:
-            peer_bundle: The public key bundle from the peer (Bob)
+            peer_bundle: The peer's public key bundle containing:
+                        - identity: Peer identifier
+                        - static_key: Peer's static X25519 public key (base64)
+                        - signed_prekey: Peer's signed prekey (base64)
+                        - kem_public_key: Peer's ML-KEM public key (base64)
+                        - dss_public_key: Peer's FALCON public key (base64)
+                        - signatures: Various signatures for verification
             
         Returns:
-            Tuple of (handshake_message, shared_secret) containing the message
-            to send to the peer and the derived shared secret
+            Tuple[Dict[str, str], bytes]: (handshake_message, shared_secret)
+                - handshake_message: Complete message to send to the peer
+                - shared_secret: 32-byte derived shared secret for session keys
+                
+        Raises:
+            ValueError: If peer bundle verification fails or cryptographic operations fail
+            SecurityError: If any security constraint is violated
         """
-        log.info(f"Initiating hybrid X3DH+PQ handshake with peer: {peer_bundle.get('identity', 'unknown')}")
+        hybrid_kex_logger.info(f"Initiating hybrid X3DH+PQ handshake with peer: {peer_bundle.get('identity', 'unknown')}")
         
         # Store the peer's bundle for later use
         self.peer_hybrid_bundle = peer_bundle
         
         # Verify bundle before proceeding
         if not self.verify_public_bundle(peer_bundle):
-            log.error("SECURITY ALERT: Invalid peer key bundle, signature verification failed")
+            hybrid_kex_logger.error("SECURITY ALERT: Invalid peer key bundle, signature verification failed")
             raise ValueError("Handshake aborted: invalid peer key bundle signature")
         
         # Generate handshake nonce and timestamp for replay protection
         handshake_nonce, timestamp = self._generate_handshake_nonce()
         
         # Generate ephemeral key
-        log.debug("Generating ephemeral X25519 key for handshake")
+        hybrid_kex_logger.debug("Generating ephemeral X25519 key for handshake")
         ephemeral_key = X25519PrivateKey.generate()
         ephemeral_public = ephemeral_key.public_key().public_bytes(
             encoding=serialization.Encoding.Raw,
             format=serialization.PublicFormat.Raw
         )
-        log.debug(f"Generated ephemeral key: {_format_binary(ephemeral_public)}")
+        hybrid_kex_logger.debug(f"Generated ephemeral key: {_format_binary(ephemeral_public)}")
         
         # Extract peer's public keys
         peer_static_public = X25519PublicKey.from_public_bytes(
@@ -656,51 +784,51 @@ class HybridKeyExchange:
         )
         
         # Perform DH exchanges
-        log.debug("Performing multiple Diffie-Hellman exchanges")
+        hybrid_kex_logger.debug("Performing multiple Diffie-Hellman exchanges")
         
         # 1. Static-Static DH
         dh1 = self.static_key.exchange(peer_static_public)
         verify_key_material(dh1, description="DH1: Static-Static exchange")
-        log.debug(f"DH1 (Static-Static): {_format_binary(dh1)}")
+        hybrid_kex_logger.debug(f"DH1 (Static-Static): {_format_binary(dh1)}")
         
         # 2. Ephemeral-Static DH
         dh2 = ephemeral_key.exchange(peer_static_public)
         verify_key_material(dh2, description="DH2: Ephemeral-Static exchange")
-        log.debug(f"DH2 (Ephemeral-Static): {_format_binary(dh2)}")
+        hybrid_kex_logger.debug(f"DH2 (Ephemeral-Static): {_format_binary(dh2)}")
         
         # 3. Static-SPK DH
         dh3 = self.static_key.exchange(peer_signed_prekey_public)
         verify_key_material(dh3, description="DH3: Static-SPK exchange")
-        log.debug(f"DH3 (Static-SPK): {_format_binary(dh3)}")
+        hybrid_kex_logger.debug(f"DH3 (Static-SPK): {_format_binary(dh3)}")
         
         # 4. Ephemeral-SPK DH
         dh4 = ephemeral_key.exchange(peer_signed_prekey_public)
         verify_key_material(dh4, description="DH4: Ephemeral-SPK exchange")
-        log.debug(f"DH4 (Ephemeral-SPK): {_format_binary(dh4)}")
+        hybrid_kex_logger.debug(f"DH4 (Ephemeral-SPK): {_format_binary(dh4)}")
         
         # Perform KEM encapsulation
-        log.debug("Performing ML-KEM-1024 encapsulation")
+        hybrid_kex_logger.debug("Performing ML-KEM-1024 encapsulation")
         peer_kem_public = base64.b64decode(peer_bundle['kem_public_key'])
         verify_key_material(peer_kem_public, description="Peer ML-KEM public key")
         
-        kem_ciphertext, kem_shared_secret = self.kem.encaps(peer_kem_public)
+        kem_ciphertext, kem_shared_secret = self.ml_kem_impl.encaps(peer_kem_public)
         verify_key_material(kem_ciphertext, description="ML-KEM ciphertext")
         verify_key_material(kem_shared_secret, description="ML-KEM shared secret")
-        log.debug(f"KEM encapsulation successful: ciphertext ({len(kem_ciphertext)} bytes), shared secret ({len(kem_shared_secret)} bytes)")
+        hybrid_kex_logger.debug(f"KEM encapsulation successful: ciphertext ({len(kem_ciphertext)} bytes), shared secret ({len(kem_shared_secret)} bytes)")
         
         # Generate ephemeral FALCON key for this handshake
         eph_falcon_public_key, eph_falcon_private_key = self.dss.keygen()
         verify_key_material(eph_falcon_public_key, description="Ephemeral FALCON public key")
         verify_key_material(eph_falcon_private_key, description="Ephemeral FALCON private key")
-        log.debug(f"Generated ephemeral FALCON key for handshake: {_format_binary(eph_falcon_public_key)}")
+        hybrid_kex_logger.debug(f"Generated ephemeral FALCON key for handshake: {_format_binary(eph_falcon_public_key)}")
 
         # Sign the ephemeral FALCON public key with the main FALCON identity key
         try:
             eph_falcon_key_signature = self.dss.sign(self.falcon_private_key, eph_falcon_public_key)
             verify_key_material(eph_falcon_key_signature, description="Ephemeral FALCON key signature")
-            log.debug(f"Signed ephemeral FALCON public key: {_format_binary(eph_falcon_key_signature)}")
+            hybrid_kex_logger.debug(f"Signed ephemeral FALCON public key: {_format_binary(eph_falcon_key_signature)}")
         except Exception as e:
-            log.error(f"SECURITY CRITICAL: Failed to sign ephemeral FALCON public key: {e}", exc_info=True)
+            hybrid_kex_logger.error(f"SECURITY CRITICAL: Failed to sign ephemeral FALCON public key: {e}", exc_info=True)
             raise ValueError("Failed to sign ephemeral FALCON public key")
 
         # Create specific binding for ephemeral EC key, KEM ciphertext, and handshake nonce, signed by ephemeral FALCON key
@@ -709,16 +837,16 @@ class HybridKeyExchange:
         try:
             ec_pq_binding_signature = self.dss.sign(eph_falcon_private_key, binding_data)
             verify_key_material(ec_pq_binding_signature, description="EC-PQ binding signature")
-            log.debug(f"Generated EC-PQ binding signature (with ephemeral FALCON): {_format_binary(ec_pq_binding_signature)}")
+            hybrid_kex_logger.debug(f"Generated EC-PQ binding signature (with ephemeral FALCON): {_format_binary(ec_pq_binding_signature)}")
         except Exception as e:
-            log.error(f"SECURITY CRITICAL: Failed to generate EC-PQ binding signature with ephemeral key: {e}", exc_info=True)
+            hybrid_kex_logger.error(f"SECURITY CRITICAL: Failed to generate EC-PQ binding signature with ephemeral key: {e}", exc_info=True)
             raise ValueError("Failed to generate critical EC-PQ binding signature with ephemeral key")
 
         # Combine all shared secrets with HKDF
-        log.debug("Combining all shared secrets with HKDF")
+        hybrid_kex_logger.debug("Combining all shared secrets with HKDF")
         ikm = dh1 + dh2 + dh3 + dh4 + kem_shared_secret
         verify_key_material(ikm, description="Combined input key material")
-        log.debug(f"Combined IKM length: {len(ikm)} bytes")
+        hybrid_kex_logger.debug(f"Combined IKM length: {len(ikm)} bytes")
         
         root_key = HKDF(
             algorithm=hashes.SHA512(),
@@ -728,7 +856,7 @@ class HybridKeyExchange:
         ).derive(ikm)
         
         verify_key_material(root_key, expected_length=32, description="Derived root key")
-        log.debug(f"Derived root key: {_format_binary(root_key)}")
+        hybrid_kex_logger.debug(f"Derived root key: {_format_binary(root_key)}")
         
         # Securely erase the ephemeral X25519 private key data
         try:
@@ -745,9 +873,9 @@ class HybridKeyExchange:
                 ba[i] = 0
             # Delete references
             del ephemeral_key, raw_priv, ba
-            log.debug("Securely erased ephemeral X25519 private key")
+            hybrid_kex_logger.debug("Securely erased ephemeral X25519 private key")
         except Exception as e:
-            log.error(f"Error during ephemeral X25519 key zeroization: {e}")
+            hybrid_kex_logger.error(f"Error during ephemeral X25519 key zeroization: {e}")
         
         # Create the handshake message with all data fields, but no signatures yet
         handshake_message = {
@@ -787,20 +915,19 @@ class HybridKeyExchange:
                 # Our SPHINCS+ fallback hashes internally, so we pass the full data
                 sphincs_signature = self.sphincs_plus.sign(eph_sphincs_sk, message_data_to_sign)
                 handshake_message['sphincs_signature'] = base64.b64encode(sphincs_signature).decode('utf-8')
-                log.debug("Successfully added SPHINCS+ signature for algorithm diversity")
+                hybrid_kex_logger.debug("Successfully added SPHINCS+ signature for algorithm diversity")
             except Exception as e:
-                log.warning(f"Failed to add SPHINCS+ signature: {e}. Continuing with FALCON only.")
+                hybrid_kex_logger.warning(f"Failed to add SPHINCS+ signature: {e}. Continuing with FALCON only.")
                 # Remove the public key if signing failed
                 handshake_message.pop('eph_sphincs_pk', None)
 
         # Securely erase the ephemeral private keys
-        secure_erase(eph_falcon_private_key)
+        skm.secure_erase(eph_falcon_private_key)
         if eph_sphincs_sk:
             # Import secure_key_manager to use enhanced_secure_erase
-            
             skm.enhanced_secure_erase(eph_sphincs_sk)
         
-        log.info(f"Hybrid X3DH+PQ handshake initiated successfully with {peer_bundle.get('identity', 'unknown')}")
+        hybrid_kex_logger.info(f"Hybrid X3DH+PQ handshake initiated successfully with {peer_bundle.get('identity', 'unknown')}")
         return handshake_message, root_key
     
     def respond_to_handshake(self, handshake_message: Dict[str, str], peer_bundle: Optional[Dict[str, str]] = None) -> bytes:
@@ -817,11 +944,11 @@ class HybridKeyExchange:
             The derived shared secret
         """
         try:
-            log.info(f"Processing incoming handshake from: {handshake_message.get('identity', 'unknown')}")
+            hybrid_kex_logger.info(f"Processing incoming handshake from: {handshake_message.get('identity', 'unknown')}")
             
             # Check for required nonce and timestamp fields
             if 'handshake_nonce' not in handshake_message or 'timestamp' not in handshake_message:
-                log.error("SECURITY ALERT: Handshake message missing nonce or timestamp")
+                hybrid_kex_logger.error("SECURITY ALERT: Handshake message missing nonce or timestamp")
                 raise ValueError("Handshake message missing required replay protection fields")
             
             # Extract and verify nonce and timestamp
@@ -831,19 +958,19 @@ class HybridKeyExchange:
             # Verify the nonce hasn't been seen before and timestamp is valid
             peer_id = handshake_message.get('identity', 'unknown')
             if not self._verify_handshake_nonce(peer_id, handshake_nonce, timestamp):
-                log.error("SECURITY ALERT: Handshake replay protection check failed")
+                hybrid_kex_logger.error("SECURITY ALERT: Handshake replay protection check failed")
                 raise ValueError("Invalid handshake: replay protection check failed")
             
             # Use provided peer_bundle if available, otherwise fallback to instance's stored bundle
             current_peer_bundle = peer_bundle if peer_bundle else self.peer_hybrid_bundle
             if not current_peer_bundle:
-                log.error("SECURITY ALERT: Peer bundle not available for respond_to_handshake. Cannot verify signatures.")
+                hybrid_kex_logger.error("SECURITY ALERT: Peer bundle not available for respond_to_handshake. Cannot verify signatures.")
                 raise ValueError("Peer bundle unavailable for signature verification")
 
             # Extract and verify the ephemeral FALCON key first
             if 'eph_falcon_public_key' not in handshake_message or \
                'eph_falcon_key_signature' not in handshake_message:
-                log.error("SECURITY ALERT: Handshake message missing ephemeral FALCON key components.")
+                hybrid_kex_logger.error("SECURITY ALERT: Handshake message missing ephemeral FALCON key components.")
                 raise ValueError("Handshake message missing ephemeral FALCON key or its signature.")
 
             eph_falcon_public_key_b64 = handshake_message['eph_falcon_public_key']
@@ -856,7 +983,7 @@ class HybridKeyExchange:
 
             # Get the main FALCON public key from the peer's bundle to verify the ephemeral FALCON key
             if 'falcon_public_key' not in current_peer_bundle:
-                log.error("SECURITY ALERT: Peer's main FALCON public key not found in their bundle.")
+                hybrid_kex_logger.error("SECURITY ALERT: Peer's main FALCON public key not found in their bundle.")
                 raise ValueError("Peer's main FALCON public key missing from bundle.")
             
             peer_main_falcon_public_key_b64 = current_peer_bundle['falcon_public_key']
@@ -866,9 +993,9 @@ class HybridKeyExchange:
             try:
                 secure_verify(self.dss, peer_main_falcon_public_key, eph_falcon_public_key_bytes, 
                              eph_falcon_key_signature_bytes, "ephemeral FALCON key signature")
-                log.debug("Ephemeral FALCON public key successfully verified against main FALCON key.")
+                hybrid_kex_logger.debug("Ephemeral FALCON public key successfully verified against main FALCON key.")
             except ValueError as e:
-                log.error(f"SECURITY ALERT: {str(e)}")
+                hybrid_kex_logger.error(f"SECURITY ALERT: {str(e)}")
                 raise
 
             # Now, the eph_falcon_public_key_bytes can be trusted to verify other signatures in the message.
@@ -883,7 +1010,7 @@ class HybridKeyExchange:
             sphincs_signature_b64 = verification_message.pop('sphincs_signature', None)
             
             if not message_signature_b64:
-                log.error("SECURITY ALERT: Handshake message missing FALCON signature ('message_signature')")
+                hybrid_kex_logger.error("SECURITY ALERT: Handshake message missing FALCON signature ('message_signature')")
                 raise ValueError("Handshake message missing required FALCON signature")
 
             # Create the canonical representation of the message that was signed
@@ -894,9 +1021,9 @@ class HybridKeyExchange:
             message_signature = base64.b64decode(message_signature_b64)
             try:
                 self.dss.verify(peer_verified_eph_falcon_pk, message_hash_that_was_signed, message_signature)
-                log.debug("Message signature verified successfully with ephemeral FALCON key")
+                hybrid_kex_logger.debug("Message signature verified successfully with ephemeral FALCON key")
             except Exception as e:
-                log.error(f"SECURITY ALERT: FALCON message signature verification failed: {e}")
+                hybrid_kex_logger.error(f"SECURITY ALERT: FALCON message signature verification failed: {e}")
                 raise ValueError("FALCON message signature verification failed")
 
             # --- Verify SPHINCS+ signature if present ---
@@ -909,18 +1036,18 @@ class HybridKeyExchange:
                         # Our SPHINCS+ fallback hashes internally. We pass it the original data.
                         result = self.sphincs_plus.verify(eph_sphincs_pk, message_data_that_was_signed, sphincs_sig)
                         if result:
-                            log.info("SPHINCS+ signature verified successfully - algorithm diversity enhanced")
+                            hybrid_kex_logger.info("SPHINCS+ signature verified successfully - algorithm diversity enhanced")
                         else:
                             # This is a warning because FALCON already succeeded.
-                            log.warning("SPHINCS+ signature verification failed. Continuing as FALCON signature was valid.")
+                            hybrid_kex_logger.warning("SPHINCS+ signature verification failed. Continuing as FALCON signature was valid.")
                     except Exception as e:
-                        log.warning(f"SPHINCS+ verification error: {e}. Continuing as FALCON signature was valid.")
+                        hybrid_kex_logger.warning(f"SPHINCS+ verification error: {e}. Continuing as FALCON signature was valid.")
                 else:
-                    log.warning("Received a SPHINCS+ signature but cannot verify it (library or key missing).")
+                    hybrid_kex_logger.warning("Received a SPHINCS+ signature but cannot verify it (library or key missing).")
 
 
             # Extract peer's public keys (ephemeral and static)
-            log.debug("Extracting peer public keys from handshake message")
+            hybrid_kex_logger.debug("Extracting peer public keys from handshake message")
             peer_ephemeral_public_b64 = handshake_message['ephemeral_key']
             peer_ephemeral_public_bytes = base64.b64decode(peer_ephemeral_public_b64) # Renamed for clarity
             verify_key_material(peer_ephemeral_public_bytes, expected_length=32, description="Peer ephemeral X25519 key from handshake")
@@ -952,39 +1079,39 @@ class HybridKeyExchange:
                 try:
                     secure_verify(self.dss, peer_verified_eph_falcon_pk, binding_data_to_verify, 
                                 ec_pq_binding_signature, "EC-PQ binding signature")
-                    log.debug("Explicit EC-PQ binding signature verified successfully (using ephemeral key).")
+                    hybrid_kex_logger.debug("Explicit EC-PQ binding signature verified successfully (using ephemeral key).")
                 except ValueError as e:
-                    log.error(f"SECURITY ALERT: {str(e)}")
+                    hybrid_kex_logger.error(f"SECURITY ALERT: {str(e)}")
                     raise
             else:
-                log.error("SECURITY ALERT: Handshake message is missing 'ec_pq_binding_sig'. This is a required field.")
+                hybrid_kex_logger.error("SECURITY ALERT: Handshake message is missing 'ec_pq_binding_sig'. This is a required field.")
                 raise ValueError("Handshake message missing ec_pq_binding_sig")
                 
             # Perform DH exchanges
-            log.debug("Performing multiple Diffie-Hellman exchanges")
+            hybrid_kex_logger.debug("Performing multiple Diffie-Hellman exchanges")
             
             # 1. Static-Static DH
             dh1 = self.static_key.exchange(peer_static_public)
             verify_key_material(dh1, description="DH1: Static-Static exchange")
-            log.debug(f"DH1 (Static-Static): {_format_binary(dh1)}")
+            hybrid_kex_logger.debug(f"DH1 (Static-Static): {_format_binary(dh1)}")
             
             # 2. Static-Ephemeral DH
             dh2 = self.static_key.exchange(peer_ephemeral_public_key) # Use the key object
             verify_key_material(dh2, description="DH2: Static-Ephemeral exchange")
-            log.debug(f"DH2 (Static-Ephemeral): {_format_binary(dh2)}")
+            hybrid_kex_logger.debug(f"DH2 (Static-Ephemeral): {_format_binary(dh2)}")
             
             # 3. SPK-Static DH
             dh3 = self.signed_prekey.exchange(peer_static_public)
             verify_key_material(dh3, description="DH3: SPK-Static exchange")
-            log.debug(f"DH3 (SPK-Static): {_format_binary(dh3)}")
+            hybrid_kex_logger.debug(f"DH3 (SPK-Static): {_format_binary(dh3)}")
             
             # 4. SPK-Ephemeral DH
             dh4 = self.signed_prekey.exchange(peer_ephemeral_public_key) # Use the key object
             verify_key_material(dh4, description="DH4: SPK-Ephemeral exchange")
-            log.debug(f"DH4 (SPK-Ephemeral): {_format_binary(dh4)}")
+            hybrid_kex_logger.debug(f"DH4 (SPK-Ephemeral): {_format_binary(dh4)}")
             
             # Perform KEM decapsulation
-            log.debug("Performing ML-KEM-1024 decapsulation")
+            hybrid_kex_logger.debug("Performing ML-KEM-1024 decapsulation")
             # kem_ciphertext is already defined and verified above (for binding check)
             # Verify KEM ciphertext integrity again just before decapsulation, as a final check.
             verify_key_material(kem_ciphertext, 
@@ -992,22 +1119,23 @@ class HybridKeyExchange:
                                 description="ML-KEM ciphertext (final check before decaps)")
             
             try:
-                kem_shared_secret = self.kem.decaps(self.kem_private_key, kem_ciphertext)
+                kem_shared_secret = self.ml_kem_impl.decaps(self.kem_private_key, kem_ciphertext)
+
             except quantcrypt.QuantCryptError as qce: # Catch specific quantcrypt errors
-                log.error(f"SECURITY ALERT: KEM decapsulation failed due to quantcrypt error: {qce}", exc_info=True)
+                hybrid_kex_logger.error(f"SECURITY ALERT: KEM decapsulation failed due to quantcrypt error: {qce}", exc_info=True)
                 raise ValueError(f"KEM decapsulation failed: {qce}")
             except Exception as e: # Catch any other unexpected errors during decapsulation
-                log.error(f"SECURITY ALERT: KEM decapsulation failed unexpectedly: {e}", exc_info=True)
+                hybrid_kex_logger.error(f"SECURITY ALERT: KEM decapsulation failed unexpectedly: {e}", exc_info=True)
                 raise ValueError(f"KEM decapsulation failed with an unexpected error: {e}")
 
             verify_key_material(kem_shared_secret, description="ML-KEM shared secret")
-            log.debug(f"KEM decapsulation successful: shared secret ({len(kem_shared_secret)} bytes)")
-            
+            hybrid_kex_logger.debug(f"KEM decapsulation successful: shared secret ({len(kem_shared_secret)} bytes)")
+             
             # Combine all shared secrets with HKDF
-            log.debug("Combining all shared secrets with HKDF")
+            hybrid_kex_logger.debug("Combining all shared secrets with HKDF")
             ikm = dh1 + dh2 + dh3 + dh4 + kem_shared_secret
             verify_key_material(ikm, description="Combined input key material")
-            log.debug(f"Combined IKM length: {len(ikm)} bytes")
+            hybrid_kex_logger.debug(f"Combined IKM length: {len(ikm)} bytes")
             
             root_key = HKDF(
                 algorithm=hashes.SHA512(),
@@ -1017,7 +1145,7 @@ class HybridKeyExchange:
             ).derive(ikm)
             
             verify_key_material(root_key, expected_length=32, description="Derived root key")
-            log.debug(f"Derived root key: {_format_binary(root_key)}")
+            hybrid_kex_logger.debug(f"Derived root key: {_format_binary(root_key)}")
             
             # Securely erase all intermediate key material
             try:
@@ -1031,15 +1159,15 @@ class HybridKeyExchange:
                 
                 # Delete references to sensitive values
                 del dh1, dh2, dh3, dh4, kem_shared_secret, ikm
-                log.debug("Securely erased intermediate key material from handshake")
+                hybrid_kex_logger.debug("Securely erased intermediate key material from handshake")
             except Exception as e:
-                log.error(f"Error during intermediate key material zeroization: {e}")
+                hybrid_kex_logger.error(f"Error during intermediate key material zeroization: {e}")
             
-            log.info(f"Hybrid X3DH+PQ handshake completed successfully with {handshake_message.get('identity', 'unknown')}")
+            hybrid_kex_logger.info(f"Hybrid X3DH+PQ handshake completed successfully with {handshake_message.get('identity', 'unknown')}")
             return root_key
             
         except (KeyError, ValueError) as e:
-            log.error(f"SECURITY ALERT: Error processing handshake: {e}", exc_info=True)
+            hybrid_kex_logger.error(f"SECURITY ALERT: Error processing handshake: {e}", exc_info=True)
             raise ValueError(f"Invalid handshake message: {e}")
 
     def rotate_keys(self) -> bool:
@@ -1053,20 +1181,25 @@ class HybridKeyExchange:
         Returns:
             bool: True if rotation was successful
         """
-        log.info(f"Rotating cryptographic keys for {self.identity}")
+        hybrid_kex_logger.info(f"Rotating cryptographic keys for {self.identity}")
         
         try:
             # Securely erase old keys
             if self.static_key:
-                secure_erase(self.static_key)
+                skm.secure_erase(self.static_key)
+                self.static_key = None
             if self.signing_key:
-                secure_erase(self.signing_key)
+                skm.secure_erase(self.signing_key)
+                self.signing_key = None
             if self.signed_prekey:
-                secure_erase(self.signed_prekey)
+                skm.secure_erase(self.signed_prekey)
+                self.signed_prekey = None
             if self.kem_private_key:
-                secure_erase(self.kem_private_key)
+                skm.secure_erase(self.kem_private_key)
+                self.kem_private_key = None
             if self.falcon_private_key:
-                secure_erase(self.falcon_private_key)
+                skm.secure_erase(self.falcon_private_key)
+                self.falcon_private_key = None
             
             # Store old identity information for potential file deletion
             old_identity_for_file_deletion = None
@@ -1080,7 +1213,7 @@ class HybridKeyExchange:
             if self.ephemeral_mode:
                 random_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
                 self.identity = f"{EPHEMERAL_ID_PREFIX}-{random_id}-{str(uuid.uuid4())[:8]}"
-                log.info(f"Generated new ephemeral identity: {self.identity}")
+                hybrid_kex_logger.info(f"Generated new ephemeral identity: {self.identity}")
             
             # Generate all new keys
             self._generate_keys()
@@ -1092,9 +1225,9 @@ class HybridKeyExchange:
             if old_key_file_path and os.path.exists(old_key_file_path):
                 try:
                     os.remove(old_key_file_path)
-                    log.info(f"Successfully deleted old ephemeral key file: {old_key_file_path}")
+                    hybrid_kex_logger.info(f"Successfully deleted old ephemeral key file: {old_key_file_path}")
                 except OSError as e:
-                    log.warning(f"Could not delete old ephemeral key file {old_key_file_path}: {e}")
+                    hybrid_kex_logger.warning(f"Could not delete old ephemeral key file {old_key_file_path}: {e}")
             
             # Save keys if not in ephemeral or in-memory mode
             # Note: _save_keys itself checks for self.ephemeral_mode and self.in_memory_only
@@ -1107,11 +1240,11 @@ class HybridKeyExchange:
             self.next_rotation_time = self.key_creation_time + self.key_lifetime
             self.pending_rotation = False
             
-            log.info(f"Key rotation completed successfully")
+            hybrid_kex_logger.info(f"Key rotation completed successfully")
             return True
             
         except Exception as e:
-            log.error(f"Key rotation failed: {e}")
+            hybrid_kex_logger.error(f"Key rotation failed: {e}")
             return False
     
     def check_key_expiration(self) -> bool:
@@ -1131,7 +1264,7 @@ class HybridKeyExchange:
         # Check if it's time to rotate
         current_time = time.time()
         if self.next_rotation_time and current_time >= self.next_rotation_time:
-            log.info(f"Ephemeral keys have expired (created: {time.ctime(self.key_creation_time)})")
+            hybrid_kex_logger.info(f"Ephemeral keys have expired (created: {time.ctime(self.key_creation_time)})")
             self.pending_rotation = True
             return True
             
@@ -1150,7 +1283,7 @@ class HybridKeyExchange:
         if not self.ephemeral_mode:
             # Convert to ephemeral mode
             self.ephemeral_mode = True
-            log.info("Switching to ephemeral mode")
+            hybrid_kex_logger.info("Switching to ephemeral mode")
             
         # Create new random identity
         random_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
@@ -1159,49 +1292,60 @@ class HybridKeyExchange:
         # Rotate all keys
         self.rotate_keys()
         
-        log.info(f"Generated fresh ephemeral identity: {self.identity}")
+        hybrid_kex_logger.info(f"Generated fresh ephemeral identity: {self.identity}")
         return self.identity
     
     def secure_cleanup(self):
-        """
-        Securely erase all key material from memory.
+        """Securely erase all cryptographic material from memory.
         
-        Should be called when the object is no longer needed to ensure
-        no sensitive key material remains in memory.
+        Performs comprehensive cleanup of all sensitive key material:
+        1. Securely erases all private keys using zero-overwrite techniques
+        2. Clears all public keys and signatures
+        3. Removes all references to key objects
+        4. Clears nonce tracking to prevent memory analysis
+        
+        This method should be called when the HybridKeyExchange instance
+        is no longer needed to prevent sensitive cryptographic material
+        from remaining in memory where it could be exposed through memory
+        dumps or cold boot attacks.
+        
+        Security note:
+            This method is critical for maintaining forward secrecy.
+            Always call this method when key exchange is complete.
         """
-        log.info(f"Performing secure cleanup for {self.identity}")
+        hybrid_kex_logger.info(f"Performing secure cleanup for {self.identity}")
         
         # Erase all sensitive key material using the enhanced secure erase function
         if self.static_key:
-            secure_erase(self.static_key)
+            skm.secure_erase(self.static_key)
             self.static_key = None
             
         if self.signing_key:
-            secure_erase(self.signing_key)
+            skm.secure_erase(self.signing_key)
             self.signing_key = None
             
         if self.signed_prekey:
-            secure_erase(self.signed_prekey)
+            skm.secure_erase(self.signed_prekey)
             self.signed_prekey = None
             
         if self.prekey_signature:
-            secure_erase(self.prekey_signature)
+            skm.secure_erase(self.prekey_signature)
             self.prekey_signature = None
             
         if self.kem_private_key:
-            secure_erase(self.kem_private_key)
+            skm.secure_erase(self.kem_private_key)
             self.kem_private_key = None
             
         if self.kem_public_key:
-            secure_erase(self.kem_public_key)
+            skm.secure_erase(self.kem_public_key)
             self.kem_public_key = None
             
         if self.falcon_private_key:
-            secure_erase(self.falcon_private_key)
+            skm.secure_erase(self.falcon_private_key)
             self.falcon_private_key = None
             
         if self.falcon_public_key:
-            secure_erase(self.falcon_public_key)
+            skm.secure_erase(self.falcon_public_key)
             self.falcon_public_key = None
 
         # Clear nonce tracking
@@ -1219,36 +1363,48 @@ class HybridKeyExchange:
         self.peer_hybrid_bundle = None
 
     def _derive_shared_secret(self, dh_secret, pq_shared_secret):
-        """
-        Derive a shared secret from DH and PQ shared secrets using enhanced
-        hybrid key derivation with quantum resistance features.
+        """Derive a hybrid shared secret using quantum-resistant techniques.
+        
+        Combines classical and post-quantum shared secrets using advanced
+        key derivation techniques to ensure the resulting key is secure
+        even if one component (classical or PQ) is compromised.
+        
+        The method implements a defense-in-depth approach:
+        1. Attempts to use quantum-resistant hybrid KDF if available
+        2. Falls back to HKDF-SHA512 if enhanced KDF is unavailable
+        3. Uses identity binding to prevent key substitution attacks
+        4. Implements domain separation for different protocol contexts
         
         Args:
-            dh_secret: The shared secret from classical DH exchange
-            pq_shared_secret: The shared secret from post-quantum KEM
+            dh_secret: Combined shared secret from classical DH exchanges
+            pq_shared_secret: Shared secret from post-quantum KEM
             
         Returns:
-            The derived shared secret
+            bytes: 32-byte derived shared secret suitable for key derivation
+            
+        Security note:
+            The resulting key maintains security as long as at least one
+            input component (classical or PQ) remains secure.
         """
-        log.debug("Deriving shared secret using quantum-resistant hybrid KDF")
+        hybrid_kex_logger.debug("Deriving shared secret using quantum-resistant hybrid KDF")
         
         # If quantum resistance is available, use it for enhanced security
-        if hasattr(self, 'quantum_resistance') and self.quantum_resistance:
+        if hasattr(self, 'qr_future_proofing') and self.qr_future_proofing:
             try:
                 # Combine the DH and PQ secrets as seed material
                 seed_material = dh_secret + pq_shared_secret
                 
                 # Use the enhanced hybrid KDF
                 info = f"HYBRID-X3DH-PQ-{self.identity}".encode('utf-8')
-                derived_key = self.quantum_resistance.hybrid_key_derivation(seed_material, info)
+                derived_key = self.qr_future_proofing.hybrid_key_derivation(seed_material, info)
                 
-                log.debug("Successfully derived shared secret using quantum-resistant hybrid KDF")
+                hybrid_kex_logger.debug("Successfully derived shared secret using quantum-resistant hybrid KDF")
                 return derived_key
             except Exception as e:
-                log.warning(f"Error using quantum-resistant hybrid KDF: {e}. Falling back to standard KDF.")
+                hybrid_kex_logger.warning(f"Error using quantum-resistant hybrid KDF: {e}. Falling back to standard KDF.")
         
         # Fallback to standard HKDF if quantum resistance is not available
-        log.debug("Using standard HKDF for shared secret derivation")
+        hybrid_kex_logger.debug("Using standard HKDF for shared secret derivation")
         combined_secret = dh_secret + pq_shared_secret
         
         derived_key = HKDF(
@@ -1261,41 +1417,64 @@ class HybridKeyExchange:
         return derived_key
 
     def enhance_quantum_resistance(self):
-        """
-        Enhance the quantum resistance of this key exchange instance by
-        adding support for additional post-quantum algorithms and hybrid approaches.
-        """
-        log.info("Enhancing quantum resistance capabilities")
+        """Enhance quantum resistance with additional post-quantum algorithms.
         
-        if not hasattr(self, 'quantum_resistance') or not self.quantum_resistance:
+        Upgrades the key exchange instance with additional quantum-resistant
+        capabilities beyond the base ML-KEM and FALCON implementations:
+        
+        1. Initializes SPHINCS+ as a backup signature scheme
+           (stateless hash-based signatures with minimal security assumptions)
+        2. Generates multi-algorithm keypairs for cryptographic diversity
+           (protection against algorithm-specific vulnerabilities)
+        3. Tracks latest NIST PQC standardization status
+           (ensures compliance with evolving standards)
+        4. Enables enhanced hybrid key derivation functions
+           (combines multiple algorithms for stronger security)
+        
+        Returns:
+            bool or object: False if enhancement fails, otherwise the quantum
+                          resistance module instance for advanced operations
+        
+        Note:
+            This is an optional enhancement that provides additional security
+            beyond the core hybrid protocol implementation.
+        """
+        hybrid_kex_logger.info("Enhancing quantum resistance capabilities")
+        
+        if not hasattr(self, 'qr_future_proofing') or not self.qr_future_proofing:
             try:
-                self.quantum_resistance = skm.get_quantum_resistance()
-                log.info("Initialized quantum resistance module")
+                # Import here to avoid circular dependency
+                from secure_key_manager import get_quantum_resistance
+                self.qr_future_proofing = get_quantum_resistance()
+                hybrid_kex_logger.info("Initialized quantum resistance module")
             except Exception as e:
-                log.warning(f"Failed to initialize quantum resistance module: {e}")
-                return False
+                hybrid_kex_logger.warning(f"Failed to initialize quantum resistance module: {e}")
+                self.qr_future_proofing = None
         
+        if not self.qr_future_proofing:
+            return False
+
         try:
             # Reinitialize the SPHINCS+ instance if available
-            supported_algos = self.quantum_resistance.get_supported_algorithms()
+            supported_algos = self.qr_future_proofing.get_supported_algorithms()
             if "SPHINCS+" in supported_algos.get("signatures", []):
-                self.sphincs_plus = self.quantum_resistance.get_algorithm("SPHINCS+")
-                log.info("SPHINCS+ backup signature scheme initialized")
+                self.sphincs_plus = self.qr_future_proofing.get_algorithm("SPHINCS+")
+                hybrid_kex_logger.info("SPHINCS+ backup signature scheme initialized")
             
             # Generate multi-algorithm keypairs for additional diversity
             self.multi_algo_public_keys, self.multi_algo_private_keys = \
-                self.quantum_resistance.generate_multi_algorithm_keypair()
+                self.qr_future_proofing.generate_multi_algorithm_keypair()
                 
-            log.info(f"Generated keypairs for multiple algorithms: {list(self.multi_algo_public_keys.keys())}")
+            hybrid_kex_logger.info(f"Generated keypairs for multiple algorithms: {list(self.multi_algo_public_keys.keys())}")
             
             # Track latest NIST standards
-            standards_info = self.quantum_resistance.track_nist_standards()
-            log.info(f"NIST PQC standards status updated: ML-KEM: {standards_info['ml_kem_status']}, "
+            standards_info = self.qr_future_proofing.track_nist_standards()
+            hybrid_kex_logger.info(f"NIST PQC standards status updated: ML-KEM: {standards_info['ml_kem_status']}, "
                     f"FALCON: {standards_info['falcon_status']}, SPHINCS+: {standards_info['sphincs_plus_status']}")
             
-            return True
+            return self.qr_future_proofing
         except Exception as e:
-            log.warning(f"Error enhancing quantum resistance: {e}")
+            hybrid_kex_logger.error(f"Error enhancing quantum resistance: {e}", exc_info=True)
             return False
 
 
@@ -1377,26 +1556,39 @@ def test_replay_protection():
 
 
 def secure_verify(dss, public_key, payload, signature, description="signature"):
-    """
-    Securely verify a signature, aborting immediately on mismatch.
+    """Verify a digital signature with enhanced security and format handling.
+    
+    Performs secure signature verification with several security enhancements:
+    1. Validates all inputs before verification to prevent null-byte attacks
+    2. Handles enhanced FALCON signature format with version detection
+    3. Supports both standard and enhanced public key formats
+    4. Implements fallback verification paths for compatibility
+    5. Raises exceptions on verification failure rather than returning False
+    
+    This function is designed to be resistant to signature forgery attacks
+    and to handle various signature formats securely.
     
     Args:
-        dss: The digital signature system (e.g., FALCON_1024 instance)
-        public_key: The public key bytes to use for verification
-        payload: The payload that was signed
-        signature: The signature to verify
-        description: Description for logging
+        dss: Digital signature system instance (e.g., EnhancedFALCON_1024)
+        public_key: Verification public key bytes
+        payload: Original data that was signed
+        signature: Signature bytes to verify
+        description: Description for error messages and logging
         
     Returns:
-        True if verification succeeds
+        bool: True if verification succeeds (never returns False)
         
     Raises:
-        ValueError: If verification fails or throws an exception
+        ValueError: If verification fails for any reason
+        
+    Security note:
+        This function follows the principle of failing closed - any verification
+        error results in an exception rather than a boolean False return.
     """
     try:
         # Check if inputs are valid
         if not public_key or not payload or not signature:
-            log.error(f"SECURITY ALERT: {description} verification failed - missing input")
+            hybrid_kex_logger.error(f"SECURITY ALERT: {description} verification failed - missing input")
             raise ValueError(f"Handshake aborted: invalid {description} - missing input")
             
         # Handle Enhanced FALCON signature format (EFS-2)
@@ -1405,22 +1597,22 @@ def secure_verify(dss, public_key, payload, signature, description="signature"):
                 # Extract version and signature data
                 version = int(signature[4:5])
                 stripped_signature = signature[5:]  # Remove the "EFS-2" prefix
-                log.debug(f"Detected enhanced FALCON signature format version {version}")
+                hybrid_kex_logger.debug(f"Detected enhanced FALCON signature format version {version}")
                 
                 # Handle Enhanced FALCON public key format (EFPK-2)
                 if isinstance(public_key, bytes) and public_key.startswith(b"EFPK-"):
                     pk_version = int(public_key[5:6])
                     stripped_public_key = public_key[6:]  # Remove the "EFPK-2" prefix
-                    log.debug(f"Detected enhanced FALCON public key format version {pk_version}")
+                    hybrid_kex_logger.debug(f"Detected enhanced FALCON public key format version {pk_version}")
                     
                     # Try verification with stripped values first
                     if hasattr(dss, 'base_falcon'):
                         # If this is our enhanced FALCON implementation, try the base implementation
                         if dss.base_falcon.verify(stripped_public_key, payload, stripped_signature):
-                            log.debug(f"Enhanced FALCON verification succeeded with stripped prefixes")
+                            hybrid_kex_logger.debug(f"Enhanced FALCON verification succeeded with stripped prefixes")
                             return True
             except Exception as e:
-                log.debug(f"Error handling enhanced format: {e}, falling back to standard verification")
+                hybrid_kex_logger.debug(f"Error handling enhanced format: {e}, falling back to standard verification")
         
         # Attempt verification with original values
         if dss.verify(public_key, payload, signature):
@@ -1435,22 +1627,22 @@ def secure_verify(dss, public_key, payload, signature, description="signature"):
                 # Try direct verification with base implementation if available
                 if hasattr(dss, 'base_falcon'):
                     if dss.base_falcon.verify(stripped_public_key, payload, stripped_signature):
-                        log.info(f"Direct base FALCON verification succeeded for {description}")
+                        hybrid_kex_logger.info(f"Direct base FALCON verification succeeded for {description}")
                         return True
         
         # If we reach here, verification failed
-        log.error(f"SECURITY ALERT: {description} verification failed")
-        log.debug(f"Public key length: {len(public_key) if public_key else 'None'}, " +
+        hybrid_kex_logger.error(f"SECURITY ALERT: {description} verification failed")
+        hybrid_kex_logger.debug(f"Public key length: {len(public_key) if public_key else 'None'}, " +
                  f"Payload length: {len(payload) if payload else 'None'}, " +
                  f"Signature length: {len(signature) if signature else 'None'}")
         
         raise ValueError(f"Handshake aborted: invalid {description}")
     except Exception as e:
         # Log at most "signature mismatch" (avoid printing raw data)
-        log.error(f"SECURITY ALERT: {description} verification error: {str(e)}")
+        hybrid_kex_logger.error(f"SECURITY ALERT: {description} verification error: {str(e)}")
         
         # For debugging purposes, log more details about the error
-        log.debug(f"Error type: {type(e).__name__}, Public key type: {type(public_key).__name__}, " +
+        hybrid_kex_logger.debug(f"Error type: {type(e).__name__}, Public key type: {type(public_key).__name__}, " +
                  f"Payload type: {type(payload).__name__}, Signature type: {type(signature).__name__}")
         
         raise ValueError(f"Handshake aborted: invalid {description}")

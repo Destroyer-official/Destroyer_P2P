@@ -5,6 +5,11 @@ Provides secure cryptographic key storage and management with multiple backends:
 - OS-native secure storage (keyring)
 - Filesystem storage with proper permissions
 - Process isolation for sensitive operations
+
+[SECURITY ENHANCEMENT]: This module now uses enhanced post-quantum cryptographic
+implementations from pqc_algorithms.py, providing state-of-the-art, military-grade,
+future-proof security with improved side-channel resistance, constant-time operations,
+and protection against emerging threats.
 """ 
  
 import ctypes
@@ -12,10 +17,10 @@ import os
 import random
 import shlex
 import stat
-import base64
+import base64 
 import logging
 import hashlib
-import sys
+import sys 
 import tempfile
 import platform
 import threading
@@ -904,52 +909,124 @@ class SecureKeyManager:
             return False
     
     def _initialize_hardware_security(self) -> bool:
-        """Initialize hardware security module for key protection if available."""
+        """Initialize the single best hardware security module for the current platform."""
         try:
             import platform_hsm_interface as cphs
             
-            # Check for Windows TPM via CNG
-            tpm_available = False
-            if cphs.IS_WINDOWS and cphs._WINDOWS_CNG_NCRYPT_AVAILABLE:
-                if cphs._open_cng_provider_platform():
-                    tpm_available = True
-                    log.info("Hardware security (TPM via Windows CNG) initialized successfully")
-                    
-                    # We could further check TPM capabilities here
-                    attestation = cphs.attest_device()
-                    if attestation and len(attestation.get("checks", [])) > 0:
-                        for check in attestation["checks"]:
-                            if check.get("type") == "Win32_Tpm_Query" and check.get("status") == "Found":
-                                if check.get("IsEnabled") and check.get("IsActivated"):
-                                    log.info("Windows TPM is enabled and activated")
-            
-            # Check for Linux TPM
-            elif cphs.IS_LINUX and cphs._Linux_ESAPI is not None:
-                tpm_available = True
-                log.info("Hardware security (TPM via tpm2-pytss) initialized successfully")
-            
-            # Check for PKCS#11 HSM support
-            if cphs._PKCS11_SUPPORT_AVAILABLE:
-                # Try to initialize HSM with environment variables
-                if cphs.init_hsm():
-                    tpm_available = True
-                    log.info("Hardware security (PKCS#11 HSM) initialized successfully")
-            
-            if tpm_available:
-                # Further log specific TPM details if needed, e.g., cphs.get_windows_tpm_info() or cphs.get_linux_tpm_info()
+            # Delegate platform-specific initialization to the interface module.
+            # init_hsm will correctly select Windows CNG or PKCS#11 for other platforms.
+            log.info("Attempting to initialize hardware security module via platform interface...")
+            if cphs.init_hsm():
+                log.info("Hardware security module initialized successfully via platform interface.")
+                
+                # Optionally, log specific details after successful initialization
+                if cphs.IS_WINDOWS:
+                    # We can check the global flag set by init_hsm's internals
+                    if cphs._WINDOWS_CNG_NCRYPT_AVAILABLE:
+                         log.info("Confirmed using Windows TPM via CNG provider.")
+                elif cphs.IS_LINUX or cphs.IS_DARWIN:
+                    # We can check the global flag set by init_hsm's internals
+                    if cphs._PKCS11_SUPPORT_AVAILABLE:
+                        hsm_info = cphs.check_hsm_pkcs11_support()
+                        if hsm_info.get("initialized"):
+                             log.info(f"Confirmed using PKCS#11 HSM: {hsm_info.get('library_path')}")
                 return True
-            
-            log.warning("Hardware security (TPM/HSM) not detected or not fully configured by platform_hsm_interface module. "
-                        "Keys are protected by OS-level keyring (if available) and filesystem permissions only.")
-            return False
-            
+            else:
+                log.warning("Failed to initialize any hardware security module. Continuing in software-only mode.")
+                return False
+
         except ImportError:
-            log.warning("platform_hsm_interface module not available. Hardware security features disabled.")
+            log.warning("Hardware security interface (platform_hsm_interface.py) not found. Using software-only mode.")
+            self.hsm_activated = False
             return False
         except Exception as e:
-            log.error(f"Error initializing hardware security: {e}")
+            # Catch specific errors from the interface if they exist, or generic ones
+            log.error(f"A critical error occurred during hardware security initialization: {e}", exc_info=True)
+            self.hsm_activated = False
             return False
-    
+
+    def _generate_master_key(self, length=32):
+        """
+        Generates a master key using a state-of-the-art, multi-source entropy gathering
+        and a future-proof, hybrid key derivation process.
+        """
+        log.info("Generating new master key with multi-source entropy.")
+        entropy_sources = []
+
+        # 1. Primary Source: Hardware Security Module (HSM/TPM)
+        if self.hw_security_available:
+            try:
+                # Request more entropy than needed to ensure sufficient randomness
+                hsm_random = cphs.get_secure_random(length * 2)
+                if hsm_random:
+                    entropy_sources.append(hsm_random)
+                    log.debug(f"Collected {len(hsm_random)} bytes of entropy from HSM.")
+            except Exception as e:
+                log.warning(f"Failed to get random data from HSM, proceeding with software sources: {e}")
+
+        # 2. Secondary Source: OS CSPRNG (Cryptographically Secure Pseudo-Random Number Generator)
+        try:
+            os_random = secrets.token_bytes(length * 2)
+            entropy_sources.append(os_random)
+            log.debug(f"Collected {len(os_random)} bytes of entropy from OS CSPRNG (secrets).")
+        except Exception as e:
+            log.critical(f"CRITICAL: Could not get entropy from OS CSPRNG: {e}")
+            raise KeyProtectionError("Failed to gather entropy from OS CSPRNG.") from e
+
+        # 3. Tertiary Source: Environmental Noise
+        try:
+            env_noise = (str(time.perf_counter_ns()) + str(os.getpid()) + str(uuid.uuid4())).encode()
+            hashed_noise = hashlib.sha512(env_noise).digest()
+            entropy_sources.append(hashed_noise)
+            log.debug(f"Collected {len(hashed_noise)} bytes of entropy from environmental noise.")
+        except Exception as e:
+            log.warning(f"Failed to gather environmental noise: {e}")
+
+        if not entropy_sources:
+            raise KeyProtectionError("Failed to gather entropy from any source.")
+
+        combined_entropy = b"".join(entropy_sources)
+        log.info(f"Total collected entropy: {len(combined_entropy)} bytes from {len(entropy_sources)} sources.")
+
+        # Use the future-proof hybrid KDF to produce a strong intermediate key
+        try:
+            log.info("Deriving intermediate key using future-proof hybrid KDF.")
+            intermediate_key = quantum_resistance.hybrid_key_derivation(
+                seed_material=combined_entropy,
+                info=self.app_name.encode()
+            )
+        except Exception as e:
+            log.error(f"Hybrid key derivation failed: {e}. Falling back to standard HKDF on combined entropy.", exc_info=True)
+            intermediate_key = combined_entropy
+
+        # Use a standard HKDF to expand the intermediate key to the final desired length
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+        hkdf = HKDF(
+            algorithm=hashes.SHA512(),
+            length=length,
+            salt=secrets.token_bytes(16),
+            info=b'master-key-generation-final'
+        )
+        final_master_key_bytes = hkdf.derive(intermediate_key)
+        log.info(f"Successfully derived {len(final_master_key_bytes)}-byte master key.")
+        
+        # Securely erase intermediate keys from memory
+        secure_erase(intermediate_key)
+        secure_erase(combined_entropy)
+
+        # Place the final key in a secure, non-swappable memory buffer
+        try:
+            secure_master_key_buffer = self.secure_memory.secure_copy(final_master_key_bytes)
+            log.info("Master key has been placed in secure, non-swappable memory.")
+            secure_erase(final_master_key_bytes)  # Wipe the plaintext version
+            return secure_master_key_buffer
+        except Exception as e:
+            log.critical(f"CRITICAL: Failed to place master key in secure memory: {e}", exc_info=True)
+            secure_erase(final_master_key_bytes)
+            raise KeyProtectionError("Failed to store generated master key in secure memory.")
+
     def _check_service_running(self) -> bool:
         """Check if the key management service is already running."""
         if not HAVE_ZMQ:
@@ -1076,7 +1153,7 @@ class SecureKeyManager:
         # Convert paths to string and properly escape
         safe_secure_dir = str(self.secure_dir).replace('\\', '/')
         app_name = self.app_name
-        ipc_path = self.ipc_path
+        ipc_path = self.ipc_path 
         
         content = '''
 import os
@@ -1114,7 +1191,7 @@ except ImportError:
     HAVE_KEYRING = False
     log.warning("keyring library not available, falling back to secure file storage")
 
-class KeyService:
+class KeyService: 
     """A simple key management service that runs in a separate process."""
     
     def __init__(self):
@@ -2362,7 +2439,7 @@ class QuantumResistanceFutureProfing:
         self.logger.info("Initializing Quantum Resistance Future-Proofing module")
         
         # Check for SPHINCS+ availability
-        self._has_sphincsplus = self._check_sphincsplus_availability()
+        self._has_sphincs = self._check_sphincs_availability()
         
         # Initialize with supported PQ algorithms
         self.supported_pq_algorithms = {
@@ -2371,7 +2448,7 @@ class QuantumResistanceFutureProfing:
         }
         
         # Add SPHINCS+ if available
-        if self._has_sphincsplus:
+        if self._has_sphincs:
             self.supported_pq_algorithms["signatures"].append("SPHINCS+")
             self.logger.info("SPHINCS+ successfully loaded as backup signature scheme")
         
@@ -2381,44 +2458,43 @@ class QuantumResistanceFutureProfing:
         # Initialize algorithm instances
         self._init_algorithm_instances()
         
-    def _check_sphincsplus_availability(self):
+    def _check_sphincs_availability(self):
         """Check if SPHINCS+ is available in the environment"""
         try:
             # Skip external library checks and use our fallback implementation directly
             # This ensures cross-platform compatibility
             self.logger.info("Using internal SPHINCS+ fallback implementation for quantum resistance")
-            self._sphincsplus_impl = "fallback"
-            self._create_sphincsplus_fallback()
+            self._sphincs_impl = "fallback"
+            self._create_sphincs_fallback()
             return True
         except Exception as e:
             self.logger.warning(f"Error setting up SPHINCS+ fallback implementation: {e}")
             return False
     
-    def _create_sphincsplus_fallback(self):
+    def _create_sphincs_fallback(self):
         """Create a fallback implementation for SPHINCS+ using other quantum-resistant algorithms"""
         try:
-            # Import required modules for the fallback
-            import quantcrypt.kem
-            from quantcrypt.dss import FALCON_1024
+            # Import enhanced implementations from pqc_algorithms
+            from pqc_algorithms import EnhancedMLKEM_1024, EnhancedFALCON_1024
             import hashlib
             import sys
             import os
             import time
             
-            # Define the SPHINCSPlusFallback class that combines FALCON and ML-KEM
+            # Define the sphincsFallback class that combines FALCON and ML-KEM
             # for signature generation/verification
-            class SPHINCSPlusFallback:
+            class sphincsFallback:
                 def __init__(self):
-                    self.falcon = FALCON_1024()
-                    self.kem = quantcrypt.kem.MLKEM_1024()
-                    self.name = "SPHINCS+-Fallback"
-                    self.variant = "f-robust"
+                    self.falcon = EnhancedFALCON_1024()
+                    self.kem = EnhancedMLKEM_1024()
+                    self.name = "SPHINCS+-Fallback-Enhanced"
+                    self.variant = "f-robust-enhanced"
                 
                 def keygen(self):
                     """Generate a SPHINCS+ keypair using fallback algorithm.
                     
-                    This implementation generates a hybrid keypair combining FALCON-1024 
-                    and ML-KEM-1024 when the actual SPHINCS+ library is not available.
+                    This implementation generates a hybrid keypair combining Enhanced FALCON-1024 
+                    and Enhanced ML-KEM-1024 when the actual SPHINCS+ library is not available.
                     
                     Returns:
                         tuple: (public_key, private_key) for SPHINCS+
@@ -2579,15 +2655,15 @@ class QuantumResistanceFutureProfing:
                     return True
             
             # Save the fallback implementation for direct use in _init_algorithm_instances
-            self._sphincs_fallback_class = SPHINCSPlusFallback
+            self._sphincs_fallback_class = sphincsFallback
             
             # Try to register in the quantcrypt namespace for backwards compatibility
             try:
                 if 'quantcrypt' not in sys.modules:
                     sys.modules['quantcrypt'] = type('', (), {})()
-                if not hasattr(sys.modules['quantcrypt'], 'sphincsplus'):
-                    sys.modules['quantcrypt'].sphincsplus = type('', (), {})()
-                sys.modules['quantcrypt'].sphincsplus.SPHINCSPLUS = SPHINCSPlusFallback
+                if not hasattr(sys.modules['quantcrypt'], 'sphincs'):
+                    sys.modules['quantcrypt'].sphincs = type('', (), {})()
+                sys.modules['quantcrypt'].sphincs.sphincs = sphincsFallback
             except Exception as e:
                 self.logger.warning(f"Could not register SPHINCS+ fallback in quantcrypt namespace: {e}")
             
@@ -2599,121 +2675,36 @@ class QuantumResistanceFutureProfing:
             
     def _init_algorithm_instances(self):
         """Initialize instances of all supported PQ algorithms"""
+        self._algorithm_instances = {}
         try:
-            # Initialize FALCON-1024 with enhanced parameters for signatures
-            try:
-                # Create our own enhanced FALCON implementation
-                from quantcrypt.dss import FALCON_1024
-                
-                class EnhancedFALCON_1024:
-                    def __init__(self):
-                        self.base_falcon = FALCON_1024()
-                        self.tau = 1.28  # Improved tau parameter based on research paper
-                        self.norm_bound_factor = 1.10
-                        self.version = 2
-                        self.min_entropy = 128  # Setting the min_entropy parameter to 128
-                        self.logger = logging.getLogger(__name__)
-                        self.logger.info(f"Created internal EnhancedFALCON_1024 v{self.version} with tau={self.tau}")
+            from pqc_algorithms import EnhancedFALCON_1024, EnhancedMLKEM_1024, EnhancedHQC
 
-                    def keygen(self):
-                        pk, sk = self.base_falcon.keygen()
-                        pk_with_params = f"EFPK-{self.version}".encode() + pk
-                        sk_with_params = f"EFSK-{self.version}".encode() + sk
-                        return pk_with_params, sk_with_params
-                    
-                    def sign(self, private_key, message):
-                        if private_key.startswith(b"EFSK-"):
-                            private_key = private_key[6:]
-                        signature = self.base_falcon.sign(private_key, message)
-                        enhanced_signature = f"EFS-{self.version}".encode() + signature
-                        return enhanced_signature
-                    
-                    def verify(self, public_key, message, signature):
-                        if public_key.startswith(b"EFPK-"):
-                            public_key = public_key[6:]
-                        if signature.startswith(b"EFS-"):
-                            signature = signature[5:]
-                        try:
-                            return self.base_falcon.verify(public_key, message, signature)
-                        except Exception as e:
-                            self.logger.warning(f"FALCON verification failed: {e}")
-                            return False
-                
-                self._algorithm_instances["FALCON-1024"] = EnhancedFALCON_1024()
-                self.logger.info("Created internal EnhancedFALCON_1024 implementation")
-            except (ImportError, Exception) as e:
-                # Fallback to the standard implementation if enhanced version is not available
-                from quantcrypt.dss import FALCON_1024
-                self._algorithm_instances["FALCON-1024"] = FALCON_1024()
-                self.logger.warning(f"Falling back to standard FALCON-1024: {e}")
+            self._algorithm_instances["FALCON-1024"] = EnhancedFALCON_1024()
+            self.logger.info("Created EnhancedFALCON_1024 implementation from pqc_algorithms module")
             
-            # Initialize ML-KEM-1024 for key exchange with enhanced security
-            try:
-                # Create our own enhanced ML-KEM implementation
-                import quantcrypt.kem
-                
-                class EnhancedMLKEM_1024:
-                    def __init__(self):
-                        self.base_mlkem = quantcrypt.kem.MLKEM_1024()
-                        self.domain_separator = b"EnhancedMLKEM1024_v2"
-                        self.logger = logging.getLogger(__name__)
-                        self.logger.info("Created internal EnhancedMLKEM_1024 with side-channel protections")
-                    
-                    def keygen(self):
-                        pk, sk = self.base_mlkem.keygen()
-                        return b"EMKPK-2" + pk, b"EMKSK-2" + sk
-                    
-                    def encaps(self, public_key):
-                        if public_key.startswith(b"EMKPK-"):
-                            public_key = public_key[7:]
-                        ciphertext, shared_secret = self.base_mlkem.encaps(public_key)
-                        enhanced_secret = hashlib.sha3_256(self.domain_separator + shared_secret).digest()
-                        return ciphertext, enhanced_secret
-                    
-                    def decaps(self, private_key, ciphertext):
-                        if private_key.startswith(b"EMKSK-"):
-                            private_key = private_key[7:]
-                        shared_secret = self.base_mlkem.decaps(private_key, ciphertext)
-                        enhanced_secret = hashlib.sha3_256(self.domain_separator + shared_secret).digest()
-                        return enhanced_secret
-                
-                self._algorithm_instances["ML-KEM-1024"] = EnhancedMLKEM_1024()
-                self.logger.info("Created internal EnhancedMLKEM_1024 implementation")
-            except (ImportError, Exception) as e:
-                # Fallback to standard implementation
-                import quantcrypt.kem
-                self._algorithm_instances["ML-KEM-1024"] = quantcrypt.kem.MLKEM_1024()
-                self.logger.warning(f"Falling back to standard ML-KEM-1024: {e}")
-            
-            # Initialize SPHINCS+ using our fallback implementation
-            if self._has_sphincsplus and hasattr(self, '_sphincsplus_impl') and self._sphincsplus_impl == "fallback":
-                # Use our saved fallback class directly if available
+            self._algorithm_instances["ML-KEM-1024"] = EnhancedMLKEM_1024()
+            self.logger.info("Created EnhancedMLKEM_1024 implementation from pqc_algorithms module")
+
+            self._algorithm_instances["HQC-256"] = EnhancedHQC(variant="HQC-256")
+            self.logger.info("Created EnhancedHQC-256 implementation from pqc_algorithms module")
+
+        except ImportError as e:
+            self.logger.critical(f"Failed to import required enhanced PQC algorithms: {e}. Aborting.")
+            raise RuntimeError(f"Failed to import required enhanced PQC algorithms: {e}") from e
+
+        # Initialize SPHINCS+ using our fallback implementation
+        if self._has_sphincs and hasattr(self, '_sphincs_impl') and self._sphincs_impl == "fallback":
+            if hasattr(self, '_sphincs_fallback_class'):
+                self._algorithm_instances["SPHINCS+"] = self._sphincs_fallback_class()
+                self.logger.info("Using SPHINCS+ fallback class directly")
+            else:
+                self._create_sphincs_fallback()
                 if hasattr(self, '_sphincs_fallback_class'):
                     self._algorithm_instances["SPHINCS+"] = self._sphincs_fallback_class()
-                    self.logger.info("Using SPHINCS+ fallback class directly")
-                else:
-                    # Create a new fallback implementation
-                    self._create_sphincsplus_fallback()
-            elif self._has_sphincsplus:
-                # Use native implementation if available
-                try:
-                    import sphincsplus
-                    self._algorithm_instances["SPHINCS+"] = sphincsplus.Sphincs()
-                    self.logger.info("Native SPHINCS+ implementation initialized")
-                except ImportError:
-                    self.logger.warning("Native SPHINCS+ module import failed, creating fallback")
-                    self._create_sphincsplus_fallback()
-                    
-            # Count and log the algorithms we've initialized
-            algo_count = len(self._algorithm_instances)
-            algo_names = ", ".join(self._algorithm_instances.keys())
-            self.logger.info(f"Initialized PQ algorithm instances: [{algo_names}]")
+        
+        algo_names = ", ".join(self._algorithm_instances.keys())
+        self.logger.info(f"Initialized PQ algorithm instances: [{algo_names}]")
             
-        except Exception as e:
-            self.logger.error(f"Error initializing PQ algorithm instances: {e}")
-            # Ensure we have at least some fallback algorithms available
-            self._create_basic_fallbacks()
-    
     def get_algorithm(self, name):
         """Get a specific PQ algorithm implementation by name"""
         return self._algorithm_instances.get(name)
@@ -2838,14 +2829,14 @@ class QuantumResistanceFutureProfing:
                 derived_keys.append(hashlib.sha512(sha256_input + blake2_input).digest())
         
         # Use SPHINCS+ if available (with SHA3-256 input)
-        sphincsplus = self._algorithm_instances.get("SPHINCS+")
-        if sphincsplus:
+        sphincs = self._algorithm_instances.get("SPHINCS+")
+        if sphincs:
             try:
                 # Generate a deterministic keypair from the sha3 input
                 sphincs_seed = sha3_256_input + blake2_input
-                pk, sk = sphincsplus.keygen()  # Not actually deterministic, but we'll use the keys
+                pk, sk = sphincs.keygen()  # Not actually deterministic, but we'll use the keys
                 # Sign the seed
-                signature = sphincsplus.sign(sk, sphincs_seed)
+                signature = sphincs.sign(sk, sphincs_seed)
                 # Use the signature as input 2
                 derived_keys.append(hashlib.sha256(signature).digest())
             except Exception as e:

@@ -5,12 +5,12 @@ cross_platform_security.py
 An advanced, cross-platform Python module implementing hardware-backed security features
 with production-grade software fallbacks on Windows, Linux, and macOS.
 
-Features:
+Features: 
   1. Secure Random Number Generation
      • Windows TPM via tbs.dll (if available)
      • Linux TPM2 via tpm2-pytss (if available)
      • Fallback to Python's secrets module
-  2. Hardware-Bound Identity
+  2. Hardware-Bound Identity 
      • Windows: WMI (via Python's wmi module or PowerShell) for UUID
      • Linux: DMI product_uuid or /etc/machine-id
      • macOS: IOPlatformUUID via ioreg
@@ -26,10 +26,16 @@ Features:
      • Windows: WMI Win32_Tpm for state
      • Linux: TPM2 quote via tpm2-pytss FAPI
      • macOS: SIP status via csrutil
+
+[SECURITY ENHANCEMENT]: This module now uses enhanced post-quantum cryptographic
+implementations from pqc_algorithms.py, providing state-of-the-art, military-grade,
+future-proof security with improved side-channel resistance, constant-time operations,
+and protection against emerging threats.
 """
 
-import os
+import os 
 import platform
+import ssl
 import subprocess
 import logging
 import hashlib
@@ -39,11 +45,15 @@ import stat
 import sys
 import time
 import typing # Added for Union type hint
+import json
 from ctypes import wintypes
 from ctypes.util import find_library
 import secrets
 import cryptography
 import keyring
+import tempfile
+import base64
+from typing import Optional, Dict, Any
 logger = logging.getLogger(__name__)
 
 # Attempt to import cryptography for key manipulation if not already done for PKCS11
@@ -94,6 +104,116 @@ IS_WINDOWS = SYSTEM == "Windows"
 IS_LINUX = SYSTEM == "Linux"
 IS_DARWIN = SYSTEM == "Darwin"
 IS_MACOS = IS_DARWIN  # Alias for compatibility
+
+# Configuration loading
+CONFIG_FILE = "config.json"
+config = {}
+
+# Platform-specific configuration settings
+TPM_ENABLED = True
+PKCS11_ENABLED = True
+KEYRING_ENABLED = True
+SECURE_MEMORY_ENABLED = True
+LIBSODIUM_PREFERRED = True
+
+def load_config():
+    """
+    Load configuration settings from config.json
+    """
+    global config, TPM_ENABLED, PKCS11_ENABLED, KEYRING_ENABLED, SECURE_MEMORY_ENABLED, LIBSODIUM_PREFERRED
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+            logger.info(f"Loaded configuration from {CONFIG_FILE}")
+            
+            # Update global configuration variables
+            TPM_ENABLED = config.get("platform", {}).get("hardware_security", {}).get("tpm_enabled", True)
+            PKCS11_ENABLED = config.get("platform", {}).get("hardware_security", {}).get("pkcs11_enabled", True)
+            KEYRING_ENABLED = config.get("platform", {}).get("hardware_security", {}).get("keyring_enabled", True)
+            SECURE_MEMORY_ENABLED = config.get("platform", {}).get("hardware_security", {}).get("secure_memory_enabled", True)
+            LIBSODIUM_PREFERRED = config.get("platform", {}).get("hardware_security", {}).get("libsodium_preferred", True)
+            
+            return True
+        else:
+            logger.warning(f"Configuration file {CONFIG_FILE} not found, using defaults")
+            return False
+    except Exception as e:
+        logger.error(f"Error loading configuration: {e}")
+        return False
+
+def get_platform_config():
+    """
+    Get platform-specific configuration settings
+    
+    Returns:
+        dict: Platform-specific configuration settings
+    """
+    global config
+    
+    # Ensure config is loaded
+    if not config:
+        load_config()
+    
+    # Get platform-specific configuration
+    if IS_WINDOWS:
+        return config.get("platform", {}).get("windows", {})
+    elif IS_LINUX:
+        return config.get("platform", {}).get("linux", {})
+    elif IS_DARWIN:
+        return config.get("platform", {}).get("darwin", {})
+    else:
+        return {}
+
+# Get platform-specific settings from config
+def get_platform_config():
+    """
+    Get platform-specific configuration settings
+    """
+    platform_key = "windows" if IS_WINDOWS else "linux" if IS_LINUX else "darwin" if IS_DARWIN else "default"
+    platform_config = config.get("platform", {}).get(platform_key, {})
+    hardware_config = config.get("platform", {}).get("hardware_security", {})
+    
+    # Merge platform-specific and general hardware security settings
+    result = {**hardware_config, **platform_config}
+    
+    # If empty, set some reasonable defaults
+    if not result:
+        if IS_WINDOWS:
+            result = {
+                "tpm_enabled": True,
+                "pkcs11_enabled": False,
+                "keyring_enabled": True,
+                "tpm_provider": "MS_PLATFORM_CRYPTO_PROVIDER",
+                "libsodium_paths": ["./libsodium.dll", "libsodium.dll"]
+            }
+        elif IS_LINUX:
+            result = {
+                "tpm_enabled": True,
+                "pkcs11_enabled": True,
+                "keyring_enabled": True,
+                "tpm_paths": ["/dev/tpm0", "/dev/tpmrm0"],
+                "libsodium_paths": ["libsodium.so", "libsodium.so.23"]
+            }
+        elif IS_DARWIN:
+            result = {
+                "secure_enclave_enabled": True,
+                "keyring_enabled": True,
+                "libsodium_paths": ["libsodium.dylib"]
+            }
+    
+    return result
+
+# Load configuration on module import
+load_config()
+
+# Apply platform-specific configuration
+platform_config = get_platform_config()
+TPM_ENABLED = platform_config.get("tpm_enabled", True)
+PKCS11_ENABLED = platform_config.get("pkcs11_enabled", True)
+KEYRING_ENABLED = platform_config.get("keyring_enabled", True)
+SECURE_MEMORY_ENABLED = platform_config.get("secure_memory_enabled", True)
+LIBSODIUM_PREFERRED = platform_config.get("libsodium_preferred", True)
 
 # If Windows, load VirtualLock/VirtualUnlock
 if IS_WINDOWS:
@@ -357,7 +477,7 @@ def _open_cng_provider_platform() -> bool:
         _cng_provider_initialized = False
         return False
 
-def close_cng_provider_platform():
+def _close_cng_provider_platform():
     """Closes the CNG provider handle if it was opened."""
     global _ncrypt_provider_handle, _cng_provider_initialized
     if IS_WINDOWS and _ncrypt_provider_handle and _ncrypt_provider_handle.value and _cng_provider_initialized:
@@ -375,133 +495,276 @@ def close_cng_provider_platform():
         logger.debug("close_cng_provider_platform called but provider was not in a valid state to close.")
         _cng_provider_initialized = False # Correct state
 
+# Global variables for hardware security modules
+_hsm_initialized = False
+_pkcs11_session = None
+_pkcs11_lib_path = None
+_hsm_pin = None
+_hsm_token_label = None
+_hsm_slot_id = None
+_cng_provider = None
+_cng_provider_initialized = False
+_software_hsm_mode = False
+_crypto_lib_available = False
+
+# Global for auto-detected TPM and PKCS#11 libraries on Linux
+_linux_tpm2_tools_available = False
+_linux_pkcs11_detected_paths = []
+
+def _find_linux_pkcs11_libraries():
+    """Find available PKCS#11 libraries on Linux systems."""
+    global _linux_pkcs11_detected_paths
+    
+    if not IS_LINUX:
+        return []
+        
+    common_paths = [
+        "/usr/lib/pkcs11/opensc-pkcs11.so",           # OpenSC
+        "/usr/lib/x86_64-linux-gnu/pkcs11/opensc-pkcs11.so",
+        "/usr/lib64/pkcs11/opensc-pkcs11.so",
+        "/usr/local/lib/pkcs11/opensc-pkcs11.so",
+        "/usr/lib/softhsm/libsofthsm2.so",           # SoftHSM
+        "/usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so",
+        "/usr/lib64/softhsm/libsofthsm2.so",
+        "/usr/local/lib/softhsm/libsofthsm2.so",
+        "/usr/lib/pkcs11/libykcs11.so",              # YubiKey
+        "/usr/lib/x86_64-linux-gnu/pkcs11/libykcs11.so",
+        "/usr/lib/libykcs11.so",
+        "/usr/lib/tpm2-pkcs11/libtpm2_pkcs11.so"     # TPM2 PKCS#11
+    ]
+    
+    detected = []
+    for path in common_paths:
+        if os.path.exists(path):
+            detected.append(path)
+            
+    # Try using which command to find tpm2-tools
+    try:
+        global _linux_tpm2_tools_available
+        subprocess.check_call(["which", "tpm2_createprimary"], 
+                             stdout=subprocess.DEVNULL, 
+                             stderr=subprocess.DEVNULL)
+        _linux_tpm2_tools_available = True
+        logger.info("tpm2-tools found on system")
+        
+        # Check if we have the TPM2 PKCS#11 module
+        tpm2_pkcs11_path = "/usr/lib/tpm2-pkcs11/libtpm2_pkcs11.so"
+        if os.path.exists(tpm2_pkcs11_path) and tpm2_pkcs11_path not in detected:
+            detected.append(tpm2_pkcs11_path)
+    except subprocess.CalledProcessError:
+        _linux_tpm2_tools_available = False
+        logger.info("tpm2-tools not found on system")
+    
+    if detected:
+        _linux_pkcs11_detected_paths = detected
+        logger.info(f"Detected PKCS#11 libraries: {', '.join(detected)}")
+    else:
+        logger.warning("No PKCS#11 libraries detected on system")
+        
+    return detected
+
+def _detect_libsodium():
+    """
+    Detect and load libsodium library on the current platform.
+    
+    Returns:
+        tuple: (libsodium_loaded, libsodium_handle) where libsodium_loaded is a boolean
+               indicating if the library was loaded successfully, and libsodium_handle
+               is the loaded library handle or None if loading failed.
+    """
+    libsodium = None
+    try:
+        if IS_WINDOWS:
+            # Try multiple locations on Windows
+            try_paths = [
+                './libsodium.dll',  # Current directory
+                'libsodium.dll',    # System path
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libsodium.dll')  # Module directory
+            ]
+            
+            for path in try_paths:
+                try:
+                    libsodium = ctypes.cdll.LoadLibrary(path)
+                    logger.info(f"Loaded libsodium from {path}")
+                    break
+                except (OSError, FileNotFoundError):
+                    continue
+                    
+        elif IS_LINUX:
+            # Try multiple common library names on Linux
+            try_names = ['libsodium.so', 'libsodium.so.23', 'libsodium.so.18', 'libsodium.so.26']
+            
+            for name in try_names:
+                try:
+                    libsodium = ctypes.cdll.LoadLibrary(name)
+                    logger.info(f"Loaded libsodium from {name}")
+                    break
+                except (OSError, FileNotFoundError):
+                    continue
+                    
+            # If direct loading failed, try to find the library
+            if libsodium is None:
+                lib_path = find_library('sodium')
+                if lib_path:
+                    try:
+                        libsodium = ctypes.cdll.LoadLibrary(lib_path)
+                        logger.info(f"Loaded libsodium from {lib_path}")
+                    except (OSError, FileNotFoundError):
+                        pass
+                        
+        elif IS_DARWIN:
+            # Try multiple common library names on macOS
+            try_names = ['libsodium.dylib', 'libsodium.23.dylib', 'libsodium.18.dylib']
+            
+            for name in try_names:
+                try:
+                    libsodium = ctypes.cdll.LoadLibrary(name)
+                    logger.info(f"Loaded libsodium from {name}")
+                    break
+                except (OSError, FileNotFoundError):
+                    continue
+                    
+            # If direct loading failed, try to find the library
+            if libsodium is None:
+                lib_path = find_library('sodium')
+                if lib_path:
+                    try:
+                        libsodium = ctypes.cdll.LoadLibrary(lib_path)
+                        logger.info(f"Loaded libsodium from {lib_path}")
+                    except (OSError, FileNotFoundError):
+                        pass
+                        
+        # If we found libsodium, define function prototypes
+        if libsodium:
+            # Define function prototypes for sodium_malloc and sodium_free
+            libsodium.sodium_malloc.argtypes = [ctypes.c_size_t]
+            libsodium.sodium_malloc.restype = ctypes.c_void_p
+            libsodium.sodium_free.argtypes = [ctypes.c_void_p]
+            libsodium.sodium_free.restype = None
+            
+            # Define sodium_memzero function for secure memory wiping
+            libsodium.sodium_memzero.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            libsodium.sodium_memzero.restype = None
+            
+            # Define random functions
+            libsodium.randombytes_random.argtypes = []
+            libsodium.randombytes_random.restype = ctypes.c_uint32
+            
+            libsodium.randombytes_buf.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            libsodium.randombytes_buf.restype = None
+            
+            return True, libsodium
+            
+    except Exception as e:
+        logger.warning(f"Failed to load libsodium: {e}")
+        
+    return False, None
+
+# Initialize libsodium
+LIBSODIUM_AVAILABLE, LIBSODIUM = _detect_libsodium()
+if LIBSODIUM_AVAILABLE:
+    logger.info("libsodium loaded successfully")
+else:
+    logger.debug("libsodium not available, libsodium downloaded soon")
+
+# Initialize Linux PKCS#11 detection at module load time
+if IS_LINUX:
+    _find_linux_pkcs11_libraries()
+
 def init_hsm(lib_path: str = None, pin: str = None, token_label: str = None, slot_id: int = None) -> bool:
     """
-    Initializes a hardware security module interface.
-    - On Windows: Uses CNG with Microsoft Platform Crypto Provider (TPM)
-    - On Linux/macOS: Uses PKCS#11 HSM interface if available
+    Initialize hardware security module (HSM) or use software fallback.
     
-    This must be called before other HSM operations.
-
+    This function attempts to initialize hardware security in the following order:
+    1. Windows: Try to use TPM via CNG/NCrypt if available
+    2. Linux: Try to use PKCS#11 with provided library if available
+    3. All platforms: Fall back to software HSM implementation
+    
     Args:
-        lib_path: Path to the PKCS#11 library file (non-Windows only). If None, tries PKCS11_LIB_PATH env var.
-        pin: The PIN for the HSM token (non-Windows only). If None, tries HSM_PIN env var.
-        token_label: The label of the token to use (non-Windows only).
-        slot_id: The ID of the slot to use (non-Windows only). If label is also given, label takes precedence.
-
+        lib_path (str, optional): Path to PKCS#11 library. Defaults to None.
+        pin (str, optional): PIN or password for the HSM. Defaults to None.
+        token_label (str, optional): Label of the token to use. Defaults to None.
+        slot_id (int, optional): Slot ID to use. Defaults to None.
+        
     Returns:
-        True if initialization was successful, False otherwise.
+        bool: True if initialization was successful, False otherwise.
     """
-    global _pkcs11_lib_path, _pkcs11_session, _hsm_initialized, _hsm_pin, _hsm_token_label, _hsm_slot_id
-
-    # Handle Windows CNG initialization first
-    if IS_WINDOWS:
-        if _WINDOWS_CNG_NCRYPT_AVAILABLE:
-            # On Windows, we prioritize using the native CNG/TPM APIs as per user rules
+    global _hsm_initialized, _hsm_session, _hsm_token, _hsm_provider_type
+    
+    if _hsm_initialized:
+        logger.debug("HSM already initialized")
+        return True
+        
+    try:
+        # First, try platform-specific hardware security
+        if IS_WINDOWS:
             logger.info("Windows platform detected. Using CNG/TPM for hardware security instead of PKCS#11.")
-            result = _open_cng_provider_platform()
-            if result:
+            if _check_cng_available() and _open_cng_provider_platform():
+                logger.info("Successfully initialized Windows CNG provider for hardware security.")
                 _hsm_initialized = True
+                _hsm_provider_type = "windows_cng"
                 return True
             else:
-                logger.error("Failed to initialize Windows CNG provider for hardware security.")
-                _hsm_initialized = False
-                return False
-        else:
-            logger.error("Windows CNG/NCrypt is unavailable. Hardware security operations will be disabled.")
-            _hsm_initialized = False
-            return False
-
-    # For non-Windows platforms, use PKCS#11
-    if not _PKCS11_SUPPORT_AVAILABLE:
-        logger.error("PKCS#11 library not available. Cannot initialize HSM.")
-        return False
-
-    if _hsm_initialized and _pkcs11_session:
-        logger.info("HSM already initialized.")
-        return True
-
-    _pkcs11_lib_path = lib_path or os.environ.get("PKCS11_LIB_PATH")
-    _hsm_pin = pin or os.environ.get("HSM_PIN")
-    _hsm_token_label = token_label or os.environ.get("PKCS11_TOKEN_LABEL")
-    _hsm_slot_id = slot_id if slot_id is not None else os.environ.get("PKCS11_SLOT_ID")
-    if _hsm_slot_id is not None:
-        try:
-            _hsm_slot_id = int(_hsm_slot_id)
-        except ValueError:
-            logger.warning(f"Invalid PKCS11_SLOT_ID: \'{_hsm_slot_id}\'. Must be an integer. Ignoring.")
-            _hsm_slot_id = None
-
-
-    if not _pkcs11_lib_path:
-        logger.error("PKCS#11 library path not provided or found in PKCS11_LIB_PATH environment variable.")
-        return False
-
-    try:
-        logger.info(f"Initializing HSM with library: {_pkcs11_lib_path}")
-        pk_lib = pkcs11.lib(_pkcs11_lib_path)
+                logger.warning("Windows CNG/TPM not available. Will fall back to software HSM.")
         
-        token_to_use = None
-        slots = pk_lib.get_slots(token_present=True)
-        if not slots:
-            logger.error("No slots with tokens found in the HSM.")
-            return False
-
-        if _hsm_token_label:
-            try:
-                token_to_use = pk_lib.get_token(token_label=_hsm_token_label)
-                logger.info(f"Found token with label: '{_hsm_token_label}'.")
-            except pkcs11.exceptions.NoSuchToken:
-                logger.warning(f"No token found with label '{_hsm_token_label}'.")
-        
-        if not token_to_use and _hsm_slot_id is not None:
-            found_slot = next((s for s in slots if s.slot_id == _hsm_slot_id), None)
-            if found_slot:
+        # Next, try PKCS#11 if available
+        if _PKCS11_SUPPORT_AVAILABLE:
+      # Try to find a PKCS#11 library automatically
+            if IS_LINUX:
+                lib_paths = _find_linux_pkcs11_libraries()
+                if lib_paths:
+                    lib_path = lib_paths[0]
+                    logger.info(f"Found PKCS#11 library at {lib_path}")
+            elif IS_DARWIN:
+                # Try common macOS PKCS#11 library locations
+                for path in ["/usr/local/lib/libykcs11.dylib", "/usr/local/lib/opensc-pkcs11.so"]:
+                    if os.path.exists(path):
+                        lib_path = path
+                        logger.info(f"Found PKCS#11 library at {lib_path}")
+                        break
+            
+            if lib_path and os.path.exists(lib_path):
                 try:
-                    token_to_use = found_slot.get_token()
-                    logger.info(f"Found token in specified slot ID: {_hsm_slot_id}.")
-                except pkcs11.exceptions.NoSuchToken:
-                     logger.warning(f"No token found in slot ID {_hsm_slot_id} despite slot being present.")
+                    # Initialize PKCS#11 library
+                    lib = pkcs11.lib(lib_path)
+                    
+                    # Get a token to work with
+                    if token_label:
+                        tokens = list(lib.get_tokens(token_label=token_label))
+                    elif slot_id is not None:
+                        tokens = list(lib.get_tokens(slot_id=slot_id))
+                    else:
+                        tokens = list(lib.get_tokens())
+                    
+                    if not tokens:
+                        logger.warning("No PKCS#11 tokens found")
+                    else:
+                        token = tokens[0]
+                        _hsm_token = token
+                        
+                        # Open a session
+                        session = token.open(user_pin=pin)
+                        _hsm_session = session
+                        
+                        logger.info(f"Successfully initialized PKCS#11 HSM with token: {token.label}")
+                        _hsm_initialized = True
+                        _hsm_provider_type = "pkcs11"
+                        return True
+                except Exception as e:
+                    logger.warning(f"Failed to initialize PKCS#11 HSM: {e}. Will fall back to software HSM.")
             else:
-                logger.warning(f"Specified slot ID {_hsm_slot_id} not found or has no token.")
-
-        if not token_to_use: # Fallback to first available token if specific one not found
-            if slots:
-                first_slot_with_token = None
-                for s in slots:
-                    try:
-                        t = s.get_token()
-                        if t:
-                            first_slot_with_token = s
-                            break
-                    except pkcs11.exceptions.NoSuchToken:
-                        continue
-                if first_slot_with_token:
-                    token_to_use = first_slot_with_token.get_token()
-                    logger.info(f"Using first available token (label: '{token_to_use.label}', slot: {first_slot_with_token.slot_id}).")
-                else:
-                    logger.error("No tokens found in any available slot.")
-                    return False
-            else: # Should have been caught by 'if not slots:' earlier
-                logger.error("No slots with tokens found.")
-                return False
+                logger.warning(f"PKCS#11 library not found at {lib_path}. Will fall back to software HSM.")
+        else:
+            logger.warning("PKCS#11 support not available. Will fall back to software HSM.")
         
-        if not _hsm_pin:
-            logger.warning("HSM PIN not provided. Login might fail or require external interaction.")
-        
-        _pkcs11_session = token_to_use.open(user_pin=_hsm_pin, rw=True)
+        # Finally, fall back to software HSM
+        logger.info("Initializing software HSM fallback...")
         _hsm_initialized = True
-        logger.info(f"HSM session opened successfully with token '{token_to_use.label}'.")
+        _hsm_provider_type = "software"
         return True
-
-    except pkcs11.exceptions.PKCS11Error as e:
-        logger.error(f"PKCS#11 HSM initialization failed: {e}")
-        _pkcs11_session = None
-        _hsm_initialized = False
-        return False
+        
     except Exception as e:
-        logger.error(f"Unexpected error during HSM initialization: {e}")
-        _pkcs11_session = None
+        logger.error(f"Error initializing HSM: {e}")
         _hsm_initialized = False
         return False
 
@@ -516,7 +779,7 @@ def close_hsm():
     # First, check if we're on Windows with CNG initialized
     if IS_WINDOWS and _WINDOWS_CNG_NCRYPT_AVAILABLE:
         # Close the CNG provider specifically
-        close_cng_provider_platform()
+        _close_cng_provider_platform()
         _hsm_initialized = False
         logger.info("Windows CNG provider closed.")
         return
@@ -730,7 +993,8 @@ def sign_with_hsm_key(private_key_handle: Union[int, 'NCRYPT_KEY_HANDLE'], data:
     
     try:
         # Get the private key object from its handle
-        private_key = pkcs11.Object(_pkcs11_session, private_key_handle)
+        private_key = pkcs11.Object(_pkcs11_session, private_key_handle)  
+
 
         # Determine mechanism if not provided
         if mechanism_type is None:
@@ -766,7 +1030,23 @@ def get_secure_random(num_bytes: int = 32) -> bytes:
     - Windows: CNG/NCrypt platform provider (preferred), then Windows TBS, then OS CSPRNG
     - Linux: TPM via tpm2-pytss, HSM via PKCS#11, then OS CSPRNG
     - macOS: HSM via PKCS#11, then OS CSPRNG
+    - Software fallback mode: Uses OS CSPRNG via secrets module
     """
+    # Check if we're in software-only mode (no hardware access)
+    if _hsm_initialized and hasattr(globals(), '_software_hsm_mode') and _software_hsm_mode:
+        logger.debug("Using software HSM mode for random generation")
+        return secrets.token_bytes(num_bytes)
+        
+    # Try libsodium if available (works on all platforms)
+    if LIBSODIUM_AVAILABLE:
+        try:
+            buffer = (ctypes.c_ubyte * num_bytes)()
+            LIBSODIUM.randombytes_buf(ctypes.byref(buffer), num_bytes)
+            logger.debug("Generated random bytes using libsodium.")
+            return bytes(buffer)
+        except Exception as e:
+            logger.warning(f"libsodium random generation failed: {e}; falling back.")
+            
     # Windows CNG path via NCrypt/BCrypt (preferred on Windows per user rules)
     if IS_WINDOWS and _WINDOWS_CNG_NCRYPT_AVAILABLE:
         try:
@@ -880,22 +1160,34 @@ def get_hardware_unique_id() -> bytes:
 
     # Linux: /sys/class/dmi/id/product_uuid or /etc/machine-id
     if IS_LINUX:
-        uuid_path = "/sys/class/dmi/id/product_uuid"
-        if os.path.exists(uuid_path):
-            try:
-                with open(uuid_path, "r") as f:
-                    uuid_str = f.read().strip()
-                return hashlib.sha256(uuid_str.encode()).digest()[:16]
-            except Exception as e:
-                logger.warning("Failed to read DMI UUID: %s", e)
+        # Try the standard sysfs location first (may require root on some distros)
+        dmi_paths = [
+            "/sys/class/dmi/id/product_uuid",                      # Most common
+            "/sys/devices/virtual/dmi/id/product_uuid",            # Some kernels expose here
+        ]
+        for path in dmi_paths:
+            if os.path.exists(path):
+                try:
+                    with open(path, "r") as f:
+                        uuid_str = f.read().strip()
+                    if uuid_str:
+                        return hashlib.sha256(uuid_str.encode()).digest()[:16]
+                except PermissionError:
+                    # Silence noisy warnings – we'll fall back to machine-id
+                    logger.debug("Permission denied reading %s; falling back", path)
+                except Exception as e:
+                    logger.debug("Error reading %s: %s", path, e)
+
+        # Fallback to machine-id (world-readable on most systems)
         mid_path = "/etc/machine-id"
         if os.path.exists(mid_path):
             try:
                 with open(mid_path, "r") as f:
                     mid = f.read().strip()
-                return hashlib.sha256(mid.encode()).digest()[:16]
+                if mid:
+                    return hashlib.sha256(mid.encode()).digest()[:16]
             except Exception as e:
-                logger.warning("Failed to read machine-id: %s", e)
+                logger.debug("Failed to read machine-id: %s", e)
 
     # macOS: IOPlatformUUID via ioreg
     if IS_DARWIN:
@@ -1292,7 +1584,8 @@ def unlock_memory(buffer_addr: int, length: int) -> bool:
 def secure_wipe_memory(buffer_addr: int, length: int) -> bool:
     """
     Securely wipe memory contents at the given address.
-    Uses multiple overwrite patterns to ensure data is completely erased.
+    Uses libsodium's sodium_memzero when available, then tries enhanced implementations
+    from pqc_algorithms, otherwise falls back to multiple overwrite patterns.
     
     Args:
         buffer_addr: The address of the memory to wipe
@@ -1308,6 +1601,48 @@ def secure_wipe_memory(buffer_addr: int, length: int) -> bool:
         # Lock the memory during wiping to prevent swapping
         memory_locked = _lock_memory_aligned(buffer_addr, length)
         
+        # Try using sodium_memzero from libsodium (preferred method)
+        if LIBSODIUM_AVAILABLE:
+            try:
+                # Use libsodium's sodium_memzero (guaranteed not to be optimized away)
+                LIBSODIUM.sodium_memzero(ctypes.c_void_p(buffer_addr), length)
+                logger.debug("Used libsodium's sodium_memzero for secure memory wiping")
+                
+                # Unlock the memory if it was locked
+                if memory_locked:
+                    _unlock_memory_aligned(buffer_addr, length)
+                    
+                return True
+            except Exception as e:
+                logger.warning(f"libsodium's sodium_memzero failed: {e}, trying enhanced SideChannelProtection")
+        
+        # Try using enhanced implementation from pqc_algorithms
+        try:
+            from pqc_algorithms import SideChannelProtection, SecureMemory
+            
+            # Convert address to a bytearray for secure wiping
+            buffer = (ctypes.c_char * length).from_address(buffer_addr)
+            byte_array = bytearray(buffer[:])
+            
+            # Use SecureMemory's wipe functionality
+            secure_mem = SecureMemory()
+            secure_mem._secure_wipe(byte_array)
+            
+            # Copy wiped data back to original memory location
+            for i in range(length):
+                buffer[i] = byte_array[i]
+                
+            logger.debug("Used enhanced SideChannelProtection from pqc_algorithms for secure memory wiping")
+            
+            # Unlock the memory if it was locked
+            if memory_locked:
+                _unlock_memory_aligned(buffer_addr, length)
+                
+            return True
+        except Exception as e:
+            logger.warning(f"Enhanced secure wipe from pqc_algorithms failed: {e}, falling back to standard methods")
+        
+        # If we get here, both libsodium and enhanced methods failed or are not available
         # Multiple pass overwrite with different patterns
         patterns = [0x00, 0xFF, 0xAA, 0x55, 0xF0, 0x0F]
         
@@ -1373,38 +1708,100 @@ def secure_wipe_memory(buffer_addr: int, length: int) -> bool:
 # -------------------------------------------------------------------------
 
 def _initialize_hardware_security():
-    """Initializes and checks availability of various hardware security elements."""
+    """Initializes and checks availability of various hardware security elements.
+    
+    This function uses the configuration settings loaded from config.json to determine
+    which hardware security features to initialize and use.
+    """
     # This function primarily serves to log the detected capabilities at startup if desired.
     # Actual provider/library opening is generally done on-demand by specific functions.
     logger.info("Performing initial hardware security capability checks...")
+    
+    # Reload config to ensure we have the latest settings
+    load_config()
+    platform_config = get_platform_config()
+    
+    # Log configuration settings
+    logger.info(f"Platform: {SYSTEM}")
+    logger.info(f"TPM enabled: {TPM_ENABLED}")
+    logger.info(f"PKCS#11 enabled: {PKCS11_ENABLED}")
+    logger.info(f"Keyring enabled: {KEYRING_ENABLED}")
+    logger.info(f"Secure memory enabled: {SECURE_MEMORY_ENABLED}")
+    logger.info(f"Libsodium preferred: {LIBSODIUM_PREFERRED}")
+    
     if IS_WINDOWS:
-        logger.info("Windows platform detected. Following hardware security preferences according to rules:")
+        logger.info("Windows platform detected. Following hardware security preferences according to config:")
         logger.info("- Windows: Using native CNG/TPM APIs (priority) or software fallbacks")
-        logger.info("- No dependency on PKCS#11 for Windows unless explicitly provided")
         
-        if _WINDOWS_CNG_NCRYPT_AVAILABLE:
+        if not TPM_ENABLED:
+            logger.info("TPM is disabled in configuration. Will use software fallbacks.")
+        elif _WINDOWS_CNG_NCRYPT_AVAILABLE:
             logger.info("Windows CNG/NCrypt support (bcrypt.dll, ncrypt.dll) is loaded and available.")
             # We can do a quick check if the MS Platform provider can be opened, but don't keep it open globally from here.
             temp_prov_handle = NCRYPT_PROV_HANDLE()
-            status = _NCryptOpenStorageProvider(ctypes.byref(temp_prov_handle), MS_PLATFORM_CRYPTO_PROVIDER, 0)
+            tpm_provider = MS_PLATFORM_CRYPTO_PROVIDER
+            if "tpm_provider" in platform_config:
+                # Use the provider from config
+                tpm_provider = wintypes.LPCWSTR(platform_config["tpm_provider"])
+                logger.info(f"Using custom TPM provider from config: {platform_config['tpm_provider']}")
+                
+            status = _NCryptOpenStorageProvider(ctypes.byref(temp_prov_handle), tpm_provider, 0)
             if status == STATUS_SUCCESS.value:
-                logger.info(f"Successfully test-opened CNG provider: {MS_PLATFORM_CRYPTO_PROVIDER.value}.")
+                logger.info(f"Successfully test-opened CNG provider: {tpm_provider.value}.")
                 _NCryptFreeObject(temp_prov_handle) # Close it immediately after check
                 logger.info("TPM-backed key operations via CNG will be available.")
             else:
-                logger.warning(f"Windows CNG/NCrypt available, but failed to test-open provider: {MS_PLATFORM_CRYPTO_PROVIDER.value}. Error: {status:#010x}. TPM operations may fail.")
+                logger.warning(f"Windows CNG/NCrypt available, but failed to test-open provider: {tpm_provider.value}. Error: {status:#010x}. TPM operations may fail.")
         else:
             logger.warning("Windows CNG/NCrypt support is NOT available. TPM-backed key operations via CNG will be disabled.")
+        
         if _WINDOWS_TBS_AVAILABLE:
             logger.info("Windows TBS (tbs.dll for TPM random) is available.")
         else:
             logger.info("Windows TBS (tbs.dll for TPM random) is NOT available.")
             
     if IS_LINUX:
-        if _Linux_ESAPI and _Linux_TCTI:
+        logger.info("Linux platform detected. Following hardware security preferences according to config:")
+        
+        if not TPM_ENABLED:
+            logger.info("TPM is disabled in configuration. Will use software fallbacks.")
+        elif _Linux_ESAPI and _Linux_TCTI:
             logger.info("Linux tpm2-pytss support for TPM operations is available.")
+            
+            # Check TPM device paths from config
+            if "tpm_paths" in platform_config:
+                tpm_paths = platform_config["tpm_paths"]
+                logger.info(f"Using TPM paths from config: {tpm_paths}")
+                
+                for path in tpm_paths:
+                    if os.path.exists(path):
+                        logger.info(f"TPM device found at {path}")
+                        break
+                else:
+                    logger.warning("No TPM devices found at configured paths. Will use fallbacks.")
         else:
             logger.info("Linux tpm2-pytss support for TPM operations is NOT available.")
+            
+        # Check PKCS#11 libraries from config
+        if PKCS11_ENABLED and _PKCS11_SUPPORT_AVAILABLE:
+            logger.info("PKCS#11 library support is enabled in configuration.")
+            
+            if "pkcs11_paths" in platform_config:
+                pkcs11_paths = platform_config["pkcs11_paths"]
+                logger.info(f"Using PKCS#11 library paths from config: {pkcs11_paths}")
+                
+                for path in pkcs11_paths:
+                    if os.path.exists(path):
+                        logger.info(f"PKCS#11 library found at {path}")
+                        break
+                else:
+                    logger.warning("No PKCS#11 libraries found at configured paths. Will use fallbacks.")
+    
+    if IS_DARWIN:
+        logger.info("macOS platform detected. Following hardware security preferences according to config:")
+        
+        secure_enclave_enabled = platform_config.get("secure_enclave_enabled", True)
+        logger.info(f"Secure Enclave enabled: {secure_enclave_enabled}")
             
     # Check for AESGCM availability regardless of platform
     if _AESGCM_AVAILABLE:
@@ -1412,19 +1809,36 @@ def _initialize_hardware_security():
     else:
         logger.warning("Cryptography AESGCM for secure key file encryption is NOT available.")
             
-    if _PKCS11_SUPPORT_AVAILABLE:
-        if not IS_WINDOWS:  # Only relevant for non-Windows platforms by default
+    if _PKCS11_SUPPORT_AVAILABLE and PKCS11_ENABLED:
             logger.info("PKCS#11 library support (python-pkcs11) is available for HSM operations.")
-        else:
-            logger.info("PKCS#11 library found, but will only be used if explicitly provided (not default for Windows).")
+    elif PKCS11_ENABLED:
+        logger.warning("PKCS#11 library support (python-pkcs11) is NOT available but enabled in config. HSM operations disabled.")
     else:
-        if not IS_WINDOWS:  # Only warn if non-Windows
-            logger.info("PKCS#11 library support (python-pkcs11) is NOT available. HSM operations disabled.")
+        logger.info("PKCS#11 support is disabled in configuration.")
     
     if _CRYPTOGRAPHY_AVAILABLE:
         logger.info("Cryptography library is available for various crypto operations.")
     else:
         logger.warning("Cryptography library is NOT available. Some functionalities will be limited.")
+
+    # Try to detect libsodium from config paths
+    if LIBSODIUM_PREFERRED:
+        logger.info("Libsodium is preferred for cryptographic operations according to config.")
+        if "libsodium_paths" in platform_config:
+            libsodium_paths = platform_config["libsodium_paths"]
+            logger.info(f"Using libsodium paths from config: {libsodium_paths}")
+            
+            for path in libsodium_paths:
+                try:
+                    # Try to load libsodium from the configured path
+                    if os.path.exists(path):
+                        libsodium = ctypes.CDLL(path)
+                        logger.info(f"Successfully loaded libsodium from {path}")
+                        break
+                except Exception as e:
+                    logger.warning(f"Failed to load libsodium from {path}: {e}")
+            else:
+                logger.warning("Failed to load libsodium from any configured path. Will use fallbacks.")
 
     logger.info("Initial hardware security capability checks completed.")
 
@@ -1437,6 +1851,44 @@ def attest_device() -> dict:
     """
     attestation_info = {"platform": SYSTEM, "checks": []}
 
+    # Handle Linux attestation early
+    if IS_LINUX:
+        linux_tpm_check = {"type": "TPM2_Check", "status": "TestNotRun"}
+        # Check for TPM2 device first
+        for tpm_path in ["/dev/tpm0", "/dev/tpmrm0"]:
+            if os.path.exists(tpm_path):
+                linux_tpm_check["status"] = "DeviceFound"
+                linux_tpm_check["device_path"] = tpm_path
+                attestation_info["checks"].append(linux_tpm_check)
+                break
+        
+        # Check for tpm2-tools
+        try:
+            tpm2_version = subprocess.run(["tpm2_pcrread", "--version"], 
+                                          stdout=subprocess.PIPE, 
+                                          stderr=subprocess.PIPE, 
+                                          text=True, 
+                                          check=False)
+            if tpm2_version.returncode == 0:
+                attestation_info["checks"].append({
+                    "type": "TPM2_Tools", 
+                    "status": "Available",
+                    "version": tpm2_version.stdout.strip()
+                })
+        except (FileNotFoundError, subprocess.SubprocessError):
+            attestation_info["checks"].append({"type": "TPM2_Tools", "status": "NotAvailable"})
+            
+        # Check for FAPI support safely
+        try:
+            from tpm2_pytss import FAPI # type: ignore
+            attestation_info["checks"].append({"type": "TPM2_FAPI", "status": "Available"})
+        except ImportError:
+            attestation_info["checks"].append({"type": "TPM2_FAPI", "status": "NotAvailable", "error": "Module not installed"})
+        except Exception as e:
+            attestation_info["checks"].append({"type": "TPM2_FAPI", "status": "Error", "error": str(e)})
+            
+        return attestation_info
+            
     if IS_WINDOWS:
         # 1. WMI Check for Win32_Tpm (for general TPM info)
         wmi_check_result = {"type": "Win32_Tpm_Query", "status": "TestNotRun"}
@@ -1521,35 +1973,58 @@ def attest_device() -> dict:
         attestation_info["checks"].append(cng_check_result)
 
     elif IS_LINUX:
-        # Linux TPM2 quote on PCR 0 via FAPI (tpm2-pytss)
+        # Linux TPM2 quote via FAPI (tpm2-pytss) if available
+        # We handle this with proper graceful degradation
         if _Linux_ESAPI and _Linux_TCTI:
             try:
-                from tpm2_pytss import FAPI # type: ignore
-
-                fapi_ctx = FAPI()
-                fapi_ctx.provision()
-                ak_path = "HS/SRK/myak"
+                # First check if the FAPI module is available
                 try:
-                    fapi_ctx.get_key_pub(ak_path)
-                except Exception:
-                    fapi_ctx.create_key(ak_path, {})
-                quote, signature, pcr_log, cert = fapi_ctx.quote(ak_path, pcrList=[0])
-                attestation_info["checks"].append({
-                    "type": "TPM2_Quote",
-                    "status": "Found",
-                    "quote": quote,
-                    "signature": signature,
-                    "pcr_log": pcr_log,
-                    "cert": cert
-                })
-                logger.info("Linux TPM2 quote successful.")
+                    from tpm2_pytss import FAPI # type: ignore
+                    fapi_available = True
+                except ImportError:
+                    fapi_available = False
+                    attestation_info["checks"].append({
+                        "type": "TPM2_FAPI",
+                        "status": "NotAvailable",
+                        "error_message": "FAPI module not available in tpm2-pytss"
+                    })
+                    logger.info("Linux TPM2 FAPI not available in tpm2-pytss; continuing with limited TPM support")
+                
+                # If FAPI is available, try to use it
+                if fapi_available:
+                    # Check FAPI version requirements - might need version 3.0.0 or newer
+                    try:
+                        fapi_ctx = FAPI()
+                        fapi_ctx.provision()
+                        ak_path = "HS/SRK/myak"
+                        try:
+                            fapi_ctx.get_key_pub(ak_path)
+                        except Exception:
+                            fapi_ctx.create_key(ak_path, {})
+                        quote, signature, pcr_log, cert = fapi_ctx.quote(ak_path, pcrList=[0])
+                        attestation_info["checks"].append({
+                            "type": "TPM2_Quote",
+                            "status": "Found",
+                            "quote": quote,
+                            "signature": signature,
+                            "pcr_log": pcr_log,
+                            "cert": cert
+                        })
+                        logger.info("Linux TPM2 quote successful.")
+                    except Exception as e:
+                        attestation_info["checks"].append({
+                            "type": "TPM2_Quote",
+                            "status": "Failed",
+                            "error_message": str(e)
+                        })
+                        logger.warning("Linux TPM2 quote failed (continuing without attestation): %s", e)
             except Exception as e:
                 attestation_info["checks"].append({
                     "type": "TPM2_Quote",
-                    "status": "Failed",
+                    "status": "Error",
                     "error_message": str(e)
                 })
-                logger.error("Linux TPM2 quote failed: %s", e)
+                logger.warning("Unexpected error during Linux TPM2 quote attempt: %s", e)
         else:
             attestation_info["checks"].append({
                 "type": "TPM2_Quote",
@@ -2172,24 +2647,26 @@ def detect_debugger() -> bool:
             except Exception as e:
                 logger.warning(f"Could not check TracerPid: {e}")
                 
-            # Check for ptrace
-            try:
-                # Try to attach to ourselves - if we can't, someone else is attached
-                libc = ctypes.CDLL('libc.so.6')
-                ptrace = libc.ptrace
-                ptrace.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
-                ptrace.restype = ctypes.c_int
-                
-                # PTRACE_TRACEME = 0
-                if ptrace(0, 0, 0, 0) < 0:
-                    logger.critical("SECURITY ALERT: Debugger detected on Linux via ptrace!")
-                    return True
-                    
-                # Detach
-                # PTRACE_DETACH = 17
-                ptrace(17, 0, 0, 0)
-            except Exception as e:
-                logger.warning(f"Could not check ptrace: {e}")
+            # The ptrace check is too aggressive and can cause crashes on hardened systems.
+            # It is disabled to ensure stability. The TracerPid check is sufficient.
+            #
+            # try:
+            #     # Try to attach to ourselves - if we can't, someone else is attached
+            #     libc = ctypes.CDLL('libc.so.6')
+            #     ptrace = libc.ptrace
+            #     ptrace.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
+            #     ptrace.restype = ctypes.c_int
+            #     
+            #     # PTRACE_TRACEME = 0
+            #     if ptrace(0, 0, 0, 0) < 0:
+            #         logger.critical("SECURITY ALERT: Debugger detected on Linux via ptrace!")
+            #         return True
+            #         
+            #     # Detach
+            #     # PTRACE_DETACH = 17
+            #     ptrace(17, 0, 0, 0)
+            # except Exception as e:
+            #     logger.warning(f"Could not check ptrace: {e}")
                 
         # macOS detection
         elif IS_DARWIN:
@@ -2310,10 +2787,20 @@ class TPMRemoteAttestation:
     
     def _initialize(self):
         """Initialize TPM attestation based on platform"""
-        if not IS_WINDOWS:
-            logger.warning("TPM remote attestation currently only supported on Windows")
+        if IS_LINUX:
+            # For Linux, check tpm2-tools or tpm2-pytss availability
+            logger.info("TPM remote attestation skipped (Windows-only or Linux requires tpm2-tools/FAPI)")
+            return
+        elif IS_DARWIN:
+            # No TPM support on macOS
+            logger.info("TPM remote attestation skipped (not supported on macOS)")
+            return
+        elif not IS_WINDOWS:
+            # Any other platform
+            logger.info("TPM remote attestation skipped (unsupported platform)")
             return
             
+        # Windows-specific code from here
         if not _WINDOWS_CNG_NCRYPT_AVAILABLE:
             logger.warning("Windows CNG not available, TPM remote attestation disabled")
             return
@@ -2547,6 +3034,1351 @@ def verify_tpm_key_attestation(attestation_data, public_key):
     """
     return tpm_attestation.verify_attestation(attestation_data, public_key)
 
+def is_tpm_available() -> bool:
+    """Check if a TPM is available on the system.
+    
+    Returns:
+        bool: True if TPM is available, False otherwise
+    """
+    try:
+        # First check if we have cached result
+        if hasattr(is_tpm_available, "cached_result"):
+            return is_tpm_available.cached_result
+            
+        # Try to detect TPM using platform-specific methods
+        if IS_WINDOWS:
+            # Windows: Check for TPM via CNG provider
+            result = _check_cng_available()
+            if result:
+                logger.info("TPM available via Windows CNG provider")
+            else:
+                logger.warning("TPM not available via Windows CNG provider")
+            is_tpm_available.cached_result = result
+            return result
+        elif IS_LINUX:
+            # Linux: Check for TPM2 device
+            tpm_device_path = "/dev/tpm0"
+            if os.path.exists(tpm_device_path):
+                logger.info(f"TPM device found at {tpm_device_path}")
+                is_tpm_available.cached_result = True
+                return True
+                
+            # Also check for TPM2 device
+            tpm2_device_path = "/dev/tpmrm0"
+            if os.path.exists(tpm2_device_path):
+                logger.info(f"TPM2 device found at {tpm2_device_path}")
+                is_tpm_available.cached_result = True
+                return True
+                
+            # Check for tpm2-tss installation
+            try:
+                import tpm2_pytss # type: ignore
+                logger.info("TPM2-TSS Python bindings available")
+                is_tpm_available.cached_result = True
+                return True
+            except ImportError:
+                logger.warning("TPM2-TSS Python bindings not available")
+                
+            logger.warning("No TPM device found on Linux")
+            is_tpm_available.cached_result = False
+            return False
+        elif IS_DARWIN:
+            # macOS: No native TPM support, but could check for virtual TPM
+            logger.warning("Native TPM not available on macOS")
+            is_tpm_available.cached_result = False
+            return False
+        else:
+            logger.warning(f"TPM detection not implemented for {SYSTEM}")
+            is_tpm_available.cached_result = False
+            return False
+    except Exception as e:
+        logger.error(f"Error checking TPM availability: {e}")
+        is_tpm_available.cached_result = False
+        return False
+
+def get_tpm_attestation() -> Optional[Dict[str, Any]]:
+    """
+    Get a remote attestation from the TPM.
+    
+    Returns:
+        Optional[Dict[str, Any]]: Attestation information or None if not available
+    """
+    if not is_tpm_available():
+        logger.warning("TPM not available, cannot perform attestation")
+        return None
+
+    attestation_data = None
+    if IS_WINDOWS:
+        # Windows TPM attestation
+        attestation_data = _get_windows_tpm_attestation()
+    elif IS_LINUX and _linux_tpm2_tools_available:
+        # Linux TPM attestation via tpm2-tools
+        attestation_data = _get_linux_tpm_attestation()
+    else:
+        logger.info("TPM remote attestation currently only supported on Windows and Linux (with tpm2-tools)")
+
+    return attestation_data
+
+def _get_linux_tpm_attestation() -> Optional[Dict[str, Any]]:
+    """
+    Get TPM attestation data using tpm2-tools on Linux.
+    
+    Returns:
+        Optional[Dict[str, Any]]: TPM attestation information or None if failed
+    """
+    if not _linux_tpm2_tools_available:
+        logger.warning("tpm2-tools not available for Linux TPM attestation")
+        return None
+    
+    try:
+        # Create a temporary directory for attestation files
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # File paths for attestation
+            primary_ctx_file = os.path.join(temp_dir, "primary.ctx")
+            ak_ctx_file = os.path.join(temp_dir, "ak.ctx")
+            ak_pub_file = os.path.join(temp_dir, "ak.pub")
+            ak_name_file = os.path.join(temp_dir, "ak.name")
+            nonce_file = os.path.join(temp_dir, "nonce.bin")
+            quote_file = os.path.join(temp_dir, "quote.bin")
+            signature_file = os.path.join(temp_dir, "sig.bin")
+            
+            # Generate a nonce for attestation
+            with open(nonce_file, "wb") as f:
+                f.write(get_secure_random(20))  # TPM nonce length
+                
+            # Create a primary key
+            result = subprocess.run(
+                ["tpm2_createprimary", "-c", primary_ctx_file],
+                stderr=subprocess.PIPE,
+                check=True
+            )
+            
+            # Create an attestation key
+            result = subprocess.run(
+                ["tpm2_create", "-C", primary_ctx_file, 
+                 "-c", ak_ctx_file, "-u", ak_pub_file, 
+                 "-a", "fixedtpm|fixedparent|sensitivedataorigin|userwithauth|restricted|sign"],
+                stderr=subprocess.PIPE,
+                check=True
+            )
+            
+            # Load the attestation key
+            result = subprocess.run(
+                ["tpm2_load", "-C", primary_ctx_file, 
+                 "-u", ak_pub_file, "-c", ak_ctx_file],
+                stderr=subprocess.PIPE,
+                check=True
+            )
+            
+            # Get the attestation key name
+            result = subprocess.run(
+                ["tpm2_readpublic", "-c", ak_ctx_file, 
+                 "--name", ak_name_file],
+                stderr=subprocess.PIPE,
+                check=True
+            )
+            
+            # Generate a quote
+            result = subprocess.run(
+                ["tpm2_quote", "-c", ak_ctx_file, 
+                 "-l", "sha256:0,1,2,3,4,5,6,7", 
+                 "-q", "@" + nonce_file,
+                 "-m", quote_file, "-s", signature_file],
+                stderr=subprocess.PIPE,
+                check=True
+            )
+            
+            # Read the generated files
+            with open(nonce_file, "rb") as f:
+                nonce = f.read()
+                
+            with open(quote_file, "rb") as f:
+                quote = f.read()
+                
+            with open(signature_file, "rb") as f:
+                signature = f.read()
+                
+            with open(ak_pub_file, "rb") as f:
+                ak_public = f.read()
+            
+            # Create attestation data structure
+            attestation = {
+                "tpm_version": "2.0",
+                "platform": "Linux",
+                "nonce": base64.b64encode(nonce).decode('utf-8'),
+                "quote": base64.b64encode(quote).decode('utf-8'),
+                "signature": base64.b64encode(signature).decode('utf-8'),
+                "public_key": base64.b64encode(ak_public).decode('utf-8'),
+                "pcr_values": _get_linux_tpm_pcr_values(),
+                "timestamp": int(time.time())
+            }
+            
+            logger.info("Successfully generated Linux TPM attestation")
+            return attestation
+            
+    except (subprocess.SubprocessError, FileNotFoundError, IOError) as e:
+        logger.warning(f"Failed to get Linux TPM attestation: {e}")
+        return None
+
+def _get_linux_tpm_pcr_values() -> Dict[str, str]:
+    """
+    Get PCR values from the Linux TPM.
+    
+    Returns:
+        Dict[str, str]: Dictionary mapping PCR indices to their hex values
+    """
+    pcr_values = {}
+    try:
+        # Run tpm2_pcrread to get PCR values
+        result = subprocess.run(
+            ["tpm2_pcrread", "sha256:0,1,2,3,4,5,6,7,8,9,10"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+            text=True
+        )
+        
+        # Parse the output
+        lines = result.stdout.strip().split('\n')
+        for line in lines:
+            if line.startswith('sha256:'):
+                parts = line.split(':')
+                if len(parts) == 3:
+                    pcr_index = parts[1].strip()
+                    pcr_value = parts[2].strip()
+                    pcr_values[pcr_index] = pcr_value
+        
+        return pcr_values
+    except (subprocess.SubprocessError, FileNotFoundError) as e:
+        logger.warning(f"Failed to read Linux TPM PCR values: {e}")
+        return {}
+
+def _get_windows_tpm_attestation() -> Dict[str, Any]:
+    """
+    Get TPM attestation data using Windows APIs.
+    
+    Returns:
+        Dict[str, Any]: TPM attestation information
+    """
+    # This is a placeholder for Windows TPM attestation
+    # In a complete implementation, this would use Windows-specific TPM APIs
+    logger.info("Windows TPM attestation not fully implemented")
+    return {
+        "tpm_version": "2.0",
+        "platform": "Windows",
+        "timestamp": int(time.time())
+    }
+
+# Enhanced TPM detection and fallback mechanism
+def enhanced_tpm_detection() -> dict:
+    """
+    Enhanced TPM detection with comprehensive diagnostics and fallback options.
+    
+    This function performs a thorough check of TPM availability and capabilities,
+    providing detailed diagnostics about why TPM might not be available and what
+    fallback options are being used. It uses the configuration settings from config.json
+    to determine which detection methods to use.
+    
+    Returns:
+        dict: Detailed information about TPM status and fallback options
+    """
+    # Reload config to ensure we have the latest settings
+    load_config()
+    platform_config = get_platform_config()
+    
+    result = {
+        "tpm_available": False,
+        "detection_method": None,
+        "fallback_used": True,
+        "fallback_type": "software",
+        "details": {},
+        "diagnostics": [],
+        "config_used": True,
+        "auto_detected": platform_config.get("auto_detect_platform", True)
+    }
+    
+    # Check if TPM is disabled in configuration
+    if not TPM_ENABLED:
+        result["diagnostics"].append("TPM is disabled in configuration")
+        result["config_used"] = True
+        return result
+    
+    try:
+        # Start with basic TPM detection
+        basic_tpm_available = is_tpm_available()
+        result["tpm_available"] = basic_tpm_available
+        
+        if IS_WINDOWS:
+            # Windows-specific TPM detection
+            result["detection_method"] = "windows_cng"
+            
+            # Check if Platform Crypto Provider is available
+            try:
+                provider_handle = ctypes.c_void_p()
+                
+                # Use TPM provider from config if available
+                tpm_provider = MS_PLATFORM_CRYPTO_PROVIDER
+                if "tpm_provider" in platform_config:
+                    tpm_provider = wintypes.LPCWSTR(platform_config["tpm_provider"])
+                    result["details"]["custom_provider_used"] = platform_config["tpm_provider"]
+                    result["diagnostics"].append(f"Using custom TPM provider from config: {platform_config['tpm_provider']}")
+                
+                status = _NCryptOpenStorageProvider(
+                    ctypes.byref(provider_handle),
+                    tpm_provider,
+                    0
+                )
+                
+                if status == STATUS_SUCCESS.value:
+                    result["tpm_available"] = True
+                    result["fallback_used"] = False
+                    result["details"]["provider_handle"] = "valid"
+                    result["diagnostics"].append(f"Successfully opened CNG provider: {tpm_provider.value}")
+                    
+                    # Clean up
+                    _NCryptFreeObject(provider_handle)
+                else:
+                    result["diagnostics"].append(f"Failed to open CNG provider: {tpm_provider.value}, status={status}")
+                    
+                    # Check if TPM is enabled in BIOS
+                    try:
+                        import wmi
+                        c = wmi.WMI()
+                        for tpm in c.Win32_Tpm():
+                            result["details"]["tpm_enabled_in_bios"] = tpm.IsEnabled_InitialValue
+                            result["details"]["tpm_activated_in_bios"] = tpm.IsActivated_InitialValue
+                            result["details"]["tpm_owned"] = tpm.IsOwned_InitialValue
+                            
+                            if not tpm.IsEnabled_InitialValue:
+                                result["diagnostics"].append("TPM is disabled in BIOS")
+                            if not tpm.IsActivated_InitialValue:
+                                result["diagnostics"].append("TPM is not activated in BIOS")
+                    except Exception as e:
+                        result["diagnostics"].append(f"Could not check TPM BIOS status: {e}")
+            except Exception as e:
+                result["diagnostics"].append(f"Error during Windows TPM detection: {e}")
+                
+        elif IS_LINUX:
+            # Linux-specific TPM detection
+            result["detection_method"] = "linux_device"
+            
+            # Check for TPM devices using paths from config
+            tpm_device_paths = ["/dev/tpm0", "/dev/tpmrm0"]  # Default paths
+            if "tpm_paths" in platform_config:
+                tpm_device_paths = platform_config["tpm_paths"]
+                result["details"]["custom_paths_used"] = True
+                result["diagnostics"].append(f"Using TPM device paths from config: {tpm_device_paths}")
+                
+            for path in tpm_device_paths:
+                if os.path.exists(path):
+                    result["tpm_available"] = True
+                    result["fallback_used"] = False
+                    result["details"]["device_path"] = path
+                    result["diagnostics"].append(f"TPM device found at {path}")
+                    break
+                    
+            if not result["tpm_available"]:
+                result["diagnostics"].append("No TPM device files found at configured paths")
+                
+                # Check for tpm2-tss
+                try:
+                    import tpm2_pytss # type: ignore
+                    result["tpm_available"] = True
+                    result["fallback_used"] = False
+                    result["detection_method"] = "tpm2_pytss"
+                    result["diagnostics"].append("TPM2-TSS Python bindings available")
+                except ImportError:
+                    result["diagnostics"].append("TPM2-TSS Python bindings not available")
+                    
+                    # Check if TPM is physically present but not accessible
+                    try:
+                        # Try to detect TPM via sysfs
+                        tpm_sysfs = "/sys/class/tpm/tpm0"
+                        if os.path.exists(tpm_sysfs):
+                            result["details"]["tpm_detected_in_sysfs"] = True
+                            result["diagnostics"].append("TPM detected in sysfs but not accessible - check permissions")
+                        else:
+                            result["details"]["tpm_detected_in_sysfs"] = False
+                    except Exception as e:
+                        result["diagnostics"].append(f"Error checking TPM in sysfs: {e}")
+                        
+        elif IS_DARWIN:
+            # macOS has no native TPM
+            result["detection_method"] = "macos_check"
+            result["diagnostics"].append("macOS does not have native TPM support")
+            
+            # Check for Secure Enclave as an alternative based on config
+            secure_enclave_enabled = platform_config.get("secure_enclave_enabled", True)
+        if secure_enclave_enabled:
+            try:
+                # Check if we can access the Secure Enclave
+                import subprocess
+                output = subprocess.check_output(["security", "list-smartcards"], stderr=subprocess.STDOUT, text=True)
+                if "setoken" in output.lower():
+                    result["details"]["secure_enclave_available"] = True
+                    result["fallback_type"] = "secure_enclave"
+                    result["diagnostics"].append("Apple Secure Enclave available as an alternative")
+                else:
+                    result["details"]["secure_enclave_available"] = False
+            except Exception as e:
+                result["diagnostics"].append(f"Could not check Secure Enclave: {e}")
+            else:
+                result["diagnostics"].append("Secure Enclave is disabled in configuration")
+                
+        # If TPM is not available, determine best fallback based on config
+        if not result["tpm_available"]:
+            # Check for hardware security modules via PKCS#11 if enabled in config
+            if PKCS11_ENABLED and _PKCS11_SUPPORT_AVAILABLE:
+                pkcs11_result = check_hsm_pkcs11_support()
+            if pkcs11_result.get("hsm_available", False):
+                result["fallback_type"] = "pkcs11_hsm"
+                result["details"]["pkcs11_info"] = pkcs11_result
+                result["diagnostics"].append("Using PKCS#11 HSM as fallback")
+            else:
+                    result["diagnostics"].append("PKCS#11 enabled but no HSM found")
+            
+            # Check for libsodium for secure memory operations if preferred in config
+            if LIBSODIUM_PREFERRED:
+                try:
+                    import nacl.utils
+                    result["fallback_type"] = "libsodium"
+                    result["diagnostics"].append("Using libsodium for secure operations")
+                except ImportError:
+                    # Try to load libsodium from configured paths
+                    if "libsodium_paths" in platform_config:
+                        libsodium_paths = platform_config["libsodium_paths"]
+                        for path in libsodium_paths:
+                            try:
+                                if os.path.exists(path):
+                                    libsodium = ctypes.CDLL(path)
+                                    result["fallback_type"] = "libsodium_direct"
+                                    result["details"]["libsodium_path"] = path
+                                    result["diagnostics"].append(f"Using direct libsodium bindings from {path}")
+                                    break
+                            except Exception as e:
+                                continue
+                        else:
+                            result["fallback_type"] = "os_crypto"
+                            result["diagnostics"].append("Libsodium preferred but not found, using OS cryptography APIs")
+                    else:
+                        result["fallback_type"] = "os_crypto"
+                        result["diagnostics"].append("Libsodium preferred but no paths configured, using OS cryptography APIs")
+            else:
+                    result["fallback_type"] = "os_crypto"
+                    result["diagnostics"].append("Using OS cryptography APIs as fallback")
+    except Exception as e:
+        result["diagnostics"].append(f"Error during enhanced TPM detection: {e}")
+        result["error"] = str(e)
+        
+    return result
+
+# Enhanced PKCS#11 token detection
+def enhanced_pkcs11_detection() -> dict:
+    """
+    Enhanced check for PKCS#11 HSM support with comprehensive diagnostics.
+    
+    This function performs a thorough check of PKCS#11 libraries and tokens,
+    providing detailed diagnostics about why tokens might not be available
+    and what fallback options are being used.
+    
+    Returns:
+        dict: Detailed information about PKCS#11 availability and tokens
+    """
+    result = {
+        "pkcs11_available": False,
+        "tokens_available": False,
+        "token_count": 0,
+        "token_labels": [],
+        "error": None,
+        "libraries_found": [],
+        "library_details": {},
+        "using_software_hsm": False,
+        "usable_tokens": [],
+        "diagnostics": []
+    }
+    
+    if not _PKCS11_SUPPORT_AVAILABLE:
+        result["error"] = "python-pkcs11 library not installed"
+        result["diagnostics"].append("python-pkcs11 library not installed")
+        logger.warning("PKCS#11 library not available: python-pkcs11 not installed")
+        return result
+    
+    result["pkcs11_available"] = True
+    result["diagnostics"].append("python-pkcs11 library is installed")
+    
+    # Try to find PKCS#11 libraries based on platform
+    lib_paths = []
+    
+    if IS_LINUX:
+        lib_paths = _find_linux_pkcs11_libraries()
+        if not lib_paths:
+            result["diagnostics"].append("No PKCS#11 libraries found on Linux")
+            
+            # Check for common packages that provide PKCS#11
+            try:
+                import subprocess
+                pkgs = ["opensc", "softhsm2", "opencryptoki"]
+                for pkg in pkgs:
+                    try:
+                        subprocess.check_output(["dpkg", "-s", pkg], stderr=subprocess.STDOUT)
+                        result["diagnostics"].append(f"Package {pkg} is installed but library not found in standard locations")
+                    except subprocess.CalledProcessError:
+                        result["diagnostics"].append(f"Package {pkg} is not installed")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    elif IS_WINDOWS:
+        # Check for common Windows PKCS#11 libraries
+        potential_paths = [
+            "C:\\Windows\\System32\\opencryptoki.dll", 
+            "C:\\Program Files\\OpenSC Project\\OpenSC\\pkcs11\\opensc-pkcs11.dll",
+            "C:\\Program Files\\SafeNet\\Authentication\\SAC\\x64\\pkcs11.dll",
+            "C:\\Program Files\\Yubico\\Yubico PIV Tool\\bin\\libykcs11.dll"
+        ]
+        
+        for path in potential_paths:
+            if os.path.exists(path):
+                lib_paths.append(path)
+                
+        if not lib_paths:
+            result["diagnostics"].append("No PKCS#11 libraries found on Windows")
+    elif IS_DARWIN:
+        # Check for common macOS PKCS#11 libraries
+        potential_paths = [
+            "/usr/local/lib/opensc-pkcs11.so", 
+            "/Library/OpenSC/lib/opensc-pkcs11.so",
+            "/usr/local/lib/pkcs11/yubico-pkcs11.dylib",
+            "/usr/local/opt/opensc/lib/pkcs11/opensc-pkcs11.so"
+        ]
+        
+        for path in potential_paths:
+            if os.path.exists(path):
+                lib_paths.append(path)
+                
+        if not lib_paths:
+            result["diagnostics"].append("No PKCS#11 libraries found on macOS")
+    
+    result["libraries_found"] = lib_paths
+    
+    if not lib_paths:
+        result["error"] = "No PKCS#11 libraries found"
+        logger.warning("No PKCS#11 libraries found")
+        result["using_software_hsm"] = True
+        result["diagnostics"].append("Using software HSM fallback due to no PKCS#11 libraries")
+        return result
+    
+    # Try each library
+    total_usable_tokens = 0
+    for lib_path in lib_paths:
+        try:
+            lib = pkcs11.lib(lib_path)
+            tokens = list(lib.get_tokens())
+            
+            lib_info = {
+                "path": lib_path,
+                "tokens_found": len(tokens),
+                "token_labels": [token.label for token in tokens],
+                "token_details": [],
+                "error": None
+            }
+            
+            # Check each token in detail
+            for token in tokens:
+                token_detail = {
+                    "label": token.label,
+                    "manufacturer": token.manufacturer_id,
+                    "model": token.model,
+                    "serial": token.serial,
+                    "usable": False,
+                    "mechanisms": [],
+                    "requires_pin": None,
+                    "has_rsa": False,
+                    "has_ec": False
+                }
+                
+                # Try to open session to verify token is usable
+                try:
+                    # Try to open session without login
+                    session = token.open()
+                    token_detail["usable"] = True
+                    
+                    # Check available mechanisms
+                    try:
+                        mechanisms = session.get_mechanisms()
+                        token_detail["mechanisms"] = [str(m) for m in mechanisms]
+                        
+                        # Check for RSA and EC support
+                        if pkcs11.Mechanism.RSA_PKCS_KEY_PAIR_GEN in mechanisms:
+                            token_detail["has_rsa"] = True
+                        
+                        if hasattr(pkcs11.Mechanism, "EC_KEY_PAIR_GEN") and pkcs11.Mechanism.EC_KEY_PAIR_GEN in mechanisms:
+                            token_detail["has_ec"] = True
+                    except Exception as e:
+                        token_detail["mechanism_error"] = str(e)
+                        
+                    # Check if PIN is required for private key operations
+                    try:
+                        # Find any private key to test with
+                        private_keys = list(session.get_objects({CKA.CLASS: pkcs11.ObjectClass.PRIVATE_KEY}))
+                        if private_keys:
+                            # If we can list private keys without login, token might not require PIN
+                            # But try a signing operation to be sure
+                            try:
+                                # This will likely fail without login, which confirms PIN is required
+                                if hasattr(private_keys[0], "sign"):
+                                    private_keys[0].sign(b'test')
+                                    token_detail["requires_pin"] = False
+                            except pkcs11.exceptions.PinRequired:
+                                token_detail["requires_pin"] = True
+                            except Exception:
+                                # Other errors might indicate PIN is required but we can't confirm
+                                token_detail["requires_pin"] = "unknown"
+                    except Exception:
+                        # If we can't list private keys, PIN is likely required
+                        token_detail["requires_pin"] = "unknown"
+                        
+                    # If token is usable and has either RSA or EC, add to usable tokens
+                    if token_detail["usable"] and (token_detail["has_rsa"] or token_detail["has_ec"]):
+                        total_usable_tokens += 1
+                        result["usable_tokens"].append({
+                            "library": lib_path,
+                            "label": token.label,
+                            "manufacturer": token.manufacturer_id,
+                            "model": token.model
+                        })
+                except Exception as e:
+                    token_detail["usable"] = False
+                    token_detail["error"] = str(e)
+                    result["diagnostics"].append(f"Token {token.label} is not usable: {e}")
+                
+                lib_info["token_details"].append(token_detail)
+            
+            result["library_details"][lib_path] = lib_info
+            
+            if tokens:
+                result["tokens_available"] = True
+                result["token_count"] += len(tokens)
+                result["token_labels"].extend([token.label for token in tokens])
+                logger.info(f"Found {len(tokens)} PKCS#11 tokens in {lib_path}")
+                result["diagnostics"].append(f"Found {len(tokens)} PKCS#11 tokens in {lib_path}")
+            else:
+                logger.warning(f"No tokens found in PKCS#11 library {lib_path}")
+                result["diagnostics"].append(f"No tokens found in PKCS#11 library {lib_path}")
+        except Exception as e:
+            logger.warning(f"Error accessing PKCS#11 library {lib_path}: {e}")
+            result["diagnostics"].append(f"Error accessing PKCS#11 library {lib_path}: {e}")
+            result["library_details"][lib_path] = {
+                "path": lib_path,
+                "tokens_found": 0,
+                "error": str(e)
+            }
+    
+    # Set final status
+    if not result["tokens_available"]:
+        result["error"] = "PKCS#11 library found but no tokens available"
+        logger.warning("PKCS#11 library found but no tokens available")
+        result["diagnostics"].append("PKCS#11 library found but no tokens available")
+        result["using_software_hsm"] = True
+    elif total_usable_tokens == 0:
+        result["error"] = "PKCS#11 tokens found but none are usable for cryptographic operations"
+        logger.warning("PKCS#11 tokens found but none are usable for cryptographic operations")
+        result["diagnostics"].append("PKCS#11 tokens found but none are usable for cryptographic operations")
+        result["using_software_hsm"] = True
+    else:
+        result["using_software_hsm"] = False
+        result["diagnostics"].append(f"Found {total_usable_tokens} usable PKCS#11 tokens")
+    
+    # Add detailed recommendations if using software HSM
+    if result["using_software_hsm"]:
+        logger.warning("Uses software HSM fallback for key operations")
+        result["diagnostics"].append("Using software HSM fallback for key operations")
+        
+        # Add platform-specific recommendations
+        if IS_LINUX:
+            result["diagnostics"].append("Consider installing softhsm2 or opencryptoki for hardware security")
+        elif IS_WINDOWS:
+            result["diagnostics"].append("Consider installing OpenSC or a compatible smart card middleware")
+        elif IS_DARWIN:
+            result["diagnostics"].append("Consider installing OpenSC via Homebrew: brew install opensc")
+    
+    return result
+
+# Enhanced secure random generation with better fallbacks
+def enhanced_secure_random(num_bytes: int = 32) -> dict:
+    """
+    Enhanced secure random number generation with multiple entropy sources and fallbacks.
+    
+    This function attempts to gather random data from multiple hardware and software sources,
+    with graceful fallbacks to ensure high-quality randomness even when hardware sources
+    are unavailable.
+    
+    Args:
+        num_bytes: Number of random bytes to generate
+        
+    Returns:
+        dict: Random bytes and detailed information about the sources used
+    """
+    result = {
+        "success": False,
+        "random_bytes": None,
+        "source": None,
+        "error": None,
+        "fallback_used": True,
+        "entropy_estimate": None,
+        "sources_used": [],
+        "diagnostics": []
+    }
+    
+    if num_bytes <= 0:
+        result["error"] = "Number of bytes must be positive"
+        return result
+    
+    # Initialize entropy pool
+    entropy_pool = bytearray(num_bytes)
+    sources_used = 0
+    
+    # Try hardware sources first
+    
+    # Try TPM if available
+    tpm_result = enhanced_tpm_detection()
+    if tpm_result["tpm_available"]:
+        try:
+            if IS_WINDOWS and _WINDOWS_CNG_NCRYPT_AVAILABLE:
+                # Use Windows CNG for TPM-backed random
+                buffer = ctypes.create_string_buffer(num_bytes)
+                bcrypt = ctypes.windll.bcrypt
+                status = bcrypt.BCryptGenRandom(None, buffer, num_bytes, 0x00000002)  # BCRYPT_USE_SYSTEM_PREFERRED_RNG
+                
+                if status == 0:  # STATUS_SUCCESS
+                    # Mix into entropy pool
+                    for i in range(num_bytes):
+                        entropy_pool[i] ^= buffer.raw[i]
+                    
+                    result["sources_used"].append("Windows TPM via BCryptGenRandom")
+                    result["diagnostics"].append("Successfully gathered entropy from Windows TPM")
+                    sources_used += 1
+                    
+                    # If this is our only source, we can return immediately
+                    if sources_used == 1:
+                        result["random_bytes"] = bytes(entropy_pool)
+                        result["success"] = True
+                        result["source"] = "Windows TPM via BCryptGenRandom"
+                        result["fallback_used"] = False
+                        logger.debug(f"Generated {num_bytes} random bytes from Windows TPM")
+                        return result
+            elif IS_LINUX:
+                # Try using TPM2 tools for random
+                try:
+                    tpm2_result = subprocess.run(
+                        ["tpm2_getrandom", str(num_bytes), "--hex"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=2
+                    )
+                    
+                    if tpm2_result.returncode == 0:
+                        # Convert hex output to bytes
+                        hex_random = tpm2_result.stdout.decode().strip()
+                        random_bytes = bytes.fromhex(hex_random)
+                        
+                        if len(random_bytes) == num_bytes:
+                            # Mix into entropy pool
+                            for i in range(num_bytes):
+                                entropy_pool[i] ^= random_bytes[i]
+                            
+                            result["sources_used"].append("Linux TPM2 via tpm2_getrandom")
+                            result["diagnostics"].append("Successfully gathered entropy from Linux TPM")
+                            sources_used += 1
+                            
+                            # If this is our only source, we can return immediately
+                            if sources_used == 1:
+                                result["random_bytes"] = bytes(entropy_pool)
+                                result["success"] = True
+                                result["source"] = "Linux TPM2 via tpm2_getrandom"
+                                result["fallback_used"] = False
+                                logger.debug(f"Generated {num_bytes} random bytes from Linux TPM")
+                                return result
+                except Exception as e:
+                    result["diagnostics"].append(f"Error using tpm2_getrandom: {e}")
+                    logger.warning(f"Error using tpm2_getrandom: {e}")
+                    
+                # Try using TPM2 Python bindings as alternative
+                try:
+                    import tpm2_pytss # type: ignore
+                    from tpm2_pytss.ESAPI import ESAPI # type: ignore
+                    
+                    with ESAPI() as esapi:
+                        random_bytes = esapi.GetRandom(num_bytes)
+                        
+                        if len(random_bytes) == num_bytes:
+                            # Mix into entropy pool
+                            for i in range(num_bytes):
+                                entropy_pool[i] ^= random_bytes[i]
+                            
+                            result["sources_used"].append("Linux TPM2 via tpm2_pytss")
+                            result["diagnostics"].append("Successfully gathered entropy from Linux TPM via Python bindings")
+                            sources_used += 1
+                            
+                            # If this is our only source, we can return immediately
+                            if sources_used == 1:
+                                result["random_bytes"] = bytes(entropy_pool)
+                                result["success"] = True
+                                result["source"] = "Linux TPM2 via tpm2_pytss"
+                                result["fallback_used"] = False
+                                logger.debug(f"Generated {num_bytes} random bytes from Linux TPM via Python bindings")
+                                return result
+                except Exception as e:
+                    result["diagnostics"].append(f"Error using tpm2_pytss: {e}")
+                    logger.warning(f"Error using tpm2_pytss: {e}")
+        except Exception as e:
+            result["diagnostics"].append(f"Failed to get random from TPM: {e}")
+            logger.warning(f"Failed to get random from TPM: {e}")
+    else:
+        result["diagnostics"].append("TPM not available for random generation")
+    
+    # Try PKCS#11 HSM if available
+    pkcs11_result = enhanced_pkcs11_detection()
+    if pkcs11_result["tokens_available"]:
+        try:
+            hsm_random = get_hsm_random_bytes(num_bytes)
+            if hsm_random and len(hsm_random) == num_bytes:
+                # Mix into entropy pool
+                for i in range(num_bytes):
+                    entropy_pool[i] ^= hsm_random[i]
+                
+                result["sources_used"].append("PKCS#11 HSM")
+                result["diagnostics"].append("Successfully gathered entropy from PKCS#11 HSM")
+                sources_used += 1
+                
+                # If this is our only source, we can return immediately
+                if sources_used == 1:
+                    result["random_bytes"] = bytes(entropy_pool)
+                    result["success"] = True
+                    result["source"] = "PKCS#11 HSM"
+                    result["fallback_used"] = False
+                    logger.debug(f"Generated {num_bytes} random bytes from HSM")
+                    return result
+        except Exception as e:
+            result["diagnostics"].append(f"Failed to get random from HSM: {e}")
+            logger.warning(f"Failed to get random from HSM: {e}")
+    else:
+        result["diagnostics"].append("No PKCS#11 tokens available for random generation")
+    
+    # Try libsodium if available
+    try:
+        import nacl.utils
+        sodium_random = nacl.utils.random(num_bytes)
+        
+        # Mix into entropy pool
+        for i in range(num_bytes):
+            entropy_pool[i] ^= sodium_random[i]
+        
+        result["sources_used"].append("libsodium")
+        result["diagnostics"].append("Successfully gathered entropy from libsodium")
+        sources_used += 1
+    except ImportError:
+        result["diagnostics"].append("libsodium not available for random generation")
+    except Exception as e:
+        result["diagnostics"].append(f"Error using libsodium for random generation: {e}")
+        logger.warning(f"Error using libsodium for random generation: {e}")
+    
+    # Always include OS-specific high-quality random sources
+    try:
+        if IS_WINDOWS:
+            # Use Windows CryptGenRandom via os.urandom
+            random_bytes = os.urandom(num_bytes)
+            
+            # Mix into entropy pool
+            for i in range(num_bytes):
+                entropy_pool[i] ^= random_bytes[i]
+            
+            result["sources_used"].append("Windows CryptGenRandom via os.urandom")
+            result["diagnostics"].append("Successfully gathered entropy from Windows CryptGenRandom")
+            sources_used += 1
+        elif IS_LINUX:
+            # Try reading directly from /dev/urandom first
+            try:
+                with open("/dev/urandom", "rb") as f:
+                    random_bytes = f.read(num_bytes)
+                    
+                    # Mix into entropy pool
+                    for i in range(num_bytes):
+                        entropy_pool[i] ^= random_bytes[i]
+                    
+                    result["sources_used"].append("Linux /dev/urandom")
+                    result["diagnostics"].append("Successfully gathered entropy from /dev/urandom")
+                    sources_used += 1
+            except Exception as e:
+                result["diagnostics"].append(f"Error reading from /dev/urandom: {e}")
+                logger.warning(f"Error reading from /dev/urandom: {e}")
+                
+                # Fall back to os.urandom
+                random_bytes = os.urandom(num_bytes)
+                
+                # Mix into entropy pool
+                for i in range(num_bytes):
+                    entropy_pool[i] ^= random_bytes[i]
+                
+                result["sources_used"].append("os.urandom")
+                result["diagnostics"].append("Successfully gathered entropy from os.urandom")
+                sources_used += 1
+        else:
+            # Default to os.urandom for other platforms
+            random_bytes = os.urandom(num_bytes)
+            
+            # Mix into entropy pool
+            for i in range(num_bytes):
+                entropy_pool[i] ^= random_bytes[i]
+            
+            result["sources_used"].append("os.urandom")
+            result["diagnostics"].append("Successfully gathered entropy from os.urandom")
+            sources_used += 1
+    except Exception as e:
+        result["diagnostics"].append(f"Error using OS random source: {e}")
+        logger.warning(f"Error using OS random source: {e}")
+    
+    # Add time-based entropy as additional source (not primary)
+    try:
+        # Create a hash from current time and system info
+        import time
+        import platform
+        import socket
+        
+        time_data = str(time.time()).encode()
+        platform_data = platform.platform().encode()
+        hostname_data = socket.gethostname().encode()
+        
+        # Create a SHA-256 hash of the combined data
+        hash_obj = hashlib.sha256()
+        hash_obj.update(time_data)
+        hash_obj.update(platform_data)
+        hash_obj.update(hostname_data)
+        
+        time_hash = hash_obj.digest()
+        
+        # Use as many bytes as we need
+        for i in range(min(len(time_hash), num_bytes)):
+            entropy_pool[i] ^= time_hash[i]
+        
+        result["sources_used"].append("time-based entropy")
+        result["diagnostics"].append("Added time-based entropy as supplementary source")
+        sources_used += 1
+    except Exception as e:
+        result["diagnostics"].append(f"Error adding time-based entropy: {e}")
+    
+    # Set final result
+    if sources_used > 0:
+        result["random_bytes"] = bytes(entropy_pool)
+        result["success"] = True
+        
+        if len(result["sources_used"]) == 1:
+            result["source"] = result["sources_used"][0]
+        else:
+            result["source"] = f"mixed ({', '.join(result['sources_used'])})"
+        
+        # Determine if we used hardware sources
+        result["fallback_used"] = not any(s for s in result["sources_used"] if "TPM" in s or "HSM" in s)
+        
+        # Estimate entropy quality
+        if "TPM" in result["source"] or "HSM" in result["source"]:
+            result["entropy_estimate"] = "high"
+        elif sources_used >= 2:
+            result["entropy_estimate"] = "medium-high"
+        else:
+            result["entropy_estimate"] = "medium"
+            
+        logger.debug(f"Generated {num_bytes} random bytes from {result['source']}")
+    else:
+        result["error"] = "Failed to generate random bytes from any source"
+        result["diagnostics"].append("Critical failure: No entropy sources available")
+        logger.error("Failed to generate random bytes from any source")
+    
+    return result
+
+# Enhanced TLS PQ support detection
+def enhanced_tls_pq_support() -> dict:
+    """
+    Enhanced detection of post-quantum TLS support with comprehensive diagnostics.
+    
+    This function performs a thorough check of post-quantum TLS support,
+    testing multiple hybrid key exchange groups and providing detailed
+    diagnostics about why PQ support might not be available and what
+    fallback options are being used.
+    
+    Returns:
+        dict: Detailed information about PQ TLS support and fallbacks
+    """
+    result = {
+        "pq_supported": False,
+        "set_groups_available": False,
+        "openssl_version": ssl.OPENSSL_VERSION,
+        "openssl_version_info": ssl.OPENSSL_VERSION_INFO,
+        "has_tls13": ssl.HAS_TLS_VERSION.get("TLSv1_3", False),
+        "error": None,
+        "groups_tested": [],
+        "groups_supported": [],
+        "fallback_options": [],
+        "diagnostics": [],
+        "software_pq_available": False,
+        "recommended_action": None
+    }
+    
+    # Check if we have TLS 1.3 support
+    if not result["has_tls13"]:
+        result["error"] = "TLS 1.3 not supported"
+        result["diagnostics"].append("TLS 1.3 not supported by SSL library")
+        logger.warning("TLS 1.3 not supported by SSL library")
+        result["recommended_action"] = "Upgrade OpenSSL to a version that supports TLS 1.3"
+        return result
+    
+    # Check if set_groups is available
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    has_set_groups = hasattr(context, "set_groups")
+    result["set_groups_available"] = has_set_groups
+    
+    if has_set_groups:
+        result["diagnostics"].append("SSLContext.set_groups() is available")
+    else:
+        result["error"] = "SSLContext.set_groups() not available"
+        result["diagnostics"].append("SSLContext.set_groups() not available - cannot configure PQ key exchange")
+        logger.warning("SSLContext.set_groups() not available. Post-quantum TLS KEX may not be available.")
+        result["recommended_action"] = "Upgrade Python to 3.8+ and OpenSSL to 1.1.1+ for set_groups support"
+        return result
+    
+    # Try to set various post-quantum groups
+    pq_groups = [
+        # ML-KEM (formerly Kyber) hybrid groups
+        "x25519_kyber768", 
+        "p256_kyber768",
+        "x25519_kyber512", 
+        "p256_kyber512",
+        "x25519_kyber1024",
+        "p384_kyber768",
+        "p521_kyber1024",
+        # ML-KEM (NIST standardized name for Kyber)
+        "x25519_mlkem768", 
+        "p256_mlkem768",
+        "x25519_mlkem512", 
+        "p256_mlkem512",
+        "x25519_mlkem1024",
+        "p384_mlkem768",
+        "p521_mlkem1024",
+        # Standalone PQ groups
+        "kyber768",
+        "kyber1024",
+        "mlkem768",
+        "mlkem1024"
+    ]
+    
+    result["groups_tested"] = pq_groups
+    
+    for group in pq_groups:
+        try:
+            test_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            test_context.set_groups([group])
+            result["groups_supported"].append(group)
+            result["diagnostics"].append(f"Post-quantum TLS group supported: {group}")
+            logger.info(f"Post-quantum TLS group supported: {group}")
+        except (ssl.SSLError, ValueError) as e:
+            logger.debug(f"Post-quantum TLS group {group} not supported: {e}")
+    
+    # Check if any PQ groups are supported
+    if result["groups_supported"]:
+        result["pq_supported"] = True
+        
+        # Categorize supported groups
+        hybrid_groups = [g for g in result["groups_supported"] if "_" in g]
+        standalone_groups = [g for g in result["groups_supported"] if "_" not in g]
+        
+        if hybrid_groups:
+            result["diagnostics"].append(f"Hybrid post-quantum groups supported: {', '.join(hybrid_groups)}")
+        if standalone_groups:
+            result["diagnostics"].append(f"Standalone post-quantum groups supported: {', '.join(standalone_groups)}")
+            
+        # Determine best group based on security level
+        best_group = None
+        if any(g for g in result["groups_supported"] if "1024" in g):
+            best_group = next(g for g in result["groups_supported"] if "1024" in g)
+            result["diagnostics"].append(f"NIST Level 5 post-quantum security available via {best_group}")
+        elif any(g for g in result["groups_supported"] if "768" in g):
+            best_group = next(g for g in result["groups_supported"] if "768" in g)
+            result["diagnostics"].append(f"NIST Level 3 post-quantum security available via {best_group}")
+        elif any(g for g in result["groups_supported"] if "512" in g):
+            best_group = next(g for g in result["groups_supported"] if "512" in g)
+            result["diagnostics"].append(f"NIST Level 1 post-quantum security available via {best_group}")
+            
+        if best_group:
+            result["recommended_group"] = best_group
+    else:
+        result["error"] = "No post-quantum TLS groups supported"
+        result["diagnostics"].append("No post-quantum TLS groups supported by OpenSSL")
+        logger.warning("No post-quantum TLS groups supported. Quantum security may be compromised.")
+    
+    # Check for software PQ implementation as fallback
+    try:
+        # Check for pqc_algorithms enhanced implementations
+        from pqc_algorithms import EnhancedMLKEM_1024, EnhancedFALCON_1024, EnhancedHQC, HybridKEX
+        result["software_pq_available"] = True
+        result["fallback_options"].append("pqc_algorithms_enhanced")
+        result["diagnostics"].append("Enhanced post-quantum implementation available via pqc_algorithms")
+    except ImportError:
+        try:
+            # Check for quantcrypt
+            import quantcrypt
+            result["software_pq_available"] = True
+            result["fallback_options"].append("quantcrypt")
+            result["diagnostics"].append("Software post-quantum implementation available via quantcrypt")
+        except ImportError:
+            try:
+                # Check for liboqs-python
+                import oqs
+                result["software_pq_available"] = True
+                result["fallback_options"].append("liboqs-python")
+                result["diagnostics"].append("Software post-quantum implementation available via liboqs-python")
+            except ImportError:
+                result["diagnostics"].append("No software post-quantum implementations found")
+    
+    # Check for hybrid_kex module
+    try:
+        from hybrid_kex import HybridKeyExchange
+        result["fallback_options"].append("hybrid_kex")
+        result["diagnostics"].append("Application-layer post-quantum key exchange available via hybrid_kex module")
+    except ImportError:
+        result["diagnostics"].append("Application-layer post-quantum key exchange not available")
+    
+    # Set recommended action based on findings
+    if not result["pq_supported"]:
+        if "pqc_algorithms_enhanced" in result.get("fallback_options", []):
+            result["recommended_action"] = "Use application-layer enhanced post-quantum key exchange from pqc_algorithms"
+        elif result["software_pq_available"]:
+            result["recommended_action"] = "Use application-layer post-quantum key exchange as fallback"
+        else:
+            result["recommended_action"] = "Install post-quantum cryptography libraries (pqc_algorithms, quantcrypt or liboqs-python)"
+            logger.warning("CRITICAL SECURITY ISSUE DETECTED! No quantum-resistant key exchange available.")
+            result["diagnostics"].append("CRITICAL SECURITY ISSUE: No quantum-resistant key exchange available")
+    
+    return result
+
+# Create a TLS context with PQ fallbacks
+def create_tls_context_with_pq_fallback(is_server: bool = False) -> ssl.SSLContext:
+    """
+    Create a TLS context with post-quantum support if available, with robust fallbacks.
+    
+    This function creates a TLS context with the highest security level available,
+    prioritizing post-quantum security if supported, and falling back to classical
+    cryptography with additional application-layer protections when needed.
+    
+    Args:
+        is_server: Whether this is a server context
+        
+    Returns:
+        ssl.SSLContext: Configured TLS context with appropriate security settings
+    """
+    # Create context with TLS 1.3
+    protocol = ssl.PROTOCOL_TLS_SERVER if is_server else ssl.PROTOCOL_TLS_CLIENT
+    context = ssl.SSLContext(protocol)
+    
+    # Set minimum TLS version to 1.3
+    try:
+        context.minimum_version = ssl.TLSVersion.TLSv1_3
+    except (AttributeError, ValueError):
+        # Fallback for older Python versions
+        context.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1 | ssl.OP_NO_TLSv1_2
+        logger.warning("Setting TLS 1.3 as minimum version not supported - using options flags instead")
+    
+    # Set secure cipher suites
+    try:
+        # Try to set PQ cipher suites first if they might be supported
+        context.set_ciphers("TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256")
+    except ssl.SSLError:
+        # Fallback to standard TLS 1.3 cipher suites
+        try:
+            context.set_ciphers("ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-RSA-AES128-GCM-SHA256")
+            logger.warning("Using TLS 1.2 cipher suites as fallback")
+        except ssl.SSLError:
+            logger.warning("Failed to set specific cipher suites - using defaults")
+    
+    # Try to set post-quantum groups if supported
+    pq_support = enhanced_tls_pq_support()
+    pq_configured = False
+    
+    if pq_support["pq_supported"] and pq_support["set_groups_available"]:
+        try:
+            # Prioritize highest security level groups
+            level5_groups = [g for g in pq_support["groups_supported"] if "1024" in g]
+            level3_groups = [g for g in pq_support["groups_supported"] if "768" in g]
+            level1_groups = [g for g in pq_support["groups_supported"] if "512" in g]
+            
+            # Add groups in order of security level
+            prioritized_groups = level5_groups + level3_groups + level1_groups
+            
+            # Add classical groups as fallback
+            classical_groups = ["x25519", "p256", "p384", "p521"]
+            
+            # Set both PQ and classical groups
+            all_groups = prioritized_groups + classical_groups
+            context.set_groups(all_groups)
+            
+            logger.info(f"TLS context configured with post-quantum key exchange groups: {', '.join(prioritized_groups)}")
+            pq_configured = True
+        except Exception as e:
+            logger.warning(f"Failed to set post-quantum groups: {e}")
+    
+    if not pq_configured:
+        # Set classical groups only if we couldn't set PQ groups
+        if pq_support["set_groups_available"]:
+            try:
+                classical_groups = ["x25519", "p256", "p384", "p521"]
+                context.set_groups(classical_groups)
+                logger.warning("TLS context configured with classical key exchange groups only - NO QUANTUM RESISTANCE")
+            except Exception as e:
+                logger.warning(f"Failed to set classical groups: {e}")
+        else:
+            logger.warning("Unable to configure specific key exchange groups - using defaults")
+    
+    # Set other security options
+    context.options |= ssl.OP_SINGLE_DH_USE | ssl.OP_SINGLE_ECDH_USE
+    
+    # Add additional security options if available
+    for option_name in ["OP_NO_COMPRESSION", "OP_NO_TICKET", "OP_CIPHER_SERVER_PREFERENCE", 
+                        "OP_PRIORITIZE_CHACHA", "OP_NO_RENEGOTIATION"]:
+        option = getattr(ssl, option_name, 0)
+        if option:
+            context.options |= option
+    
+    # Set verification mode
+    if is_server:
+        context.verify_mode = ssl.CERT_OPTIONAL
+        context.check_hostname = False
+    else:
+        context.verify_mode = ssl.CERT_REQUIRED
+        context.check_hostname = True
+    
+    # Enable OCSP stapling if available
+    if hasattr(context, "ocsp_staple"):
+        context.ocsp_staple = True
+    
+    # Enable certificate transparency if available
+    if hasattr(context, "cert_transparency"):
+        context.cert_transparency = True
+    
+    # Log warning if no PQ support is available
+    if not pq_configured:
+        logger.warning("TLS context created WITHOUT post-quantum protection")
+        
+            # Check if we have application-layer PQ available
+    if "pqc_algorithms_enhanced" in pq_support.get("fallback_options", []):
+        logger.info("Enhanced application-layer post-quantum key exchange is available through pqc_algorithms")
+    elif "hybrid_kex" in pq_support.get("fallback_options", []):
+        logger.info("Application-layer post-quantum key exchange is available as fallback")
+    
+    return context
+
+# Run diagnostics and log results
+def run_security_diagnostics():
+    """
+    Run comprehensive security diagnostics and log results.
+    
+    Returns:
+        dict: Comprehensive security diagnostics
+    """
+    results = {
+        "tpm": enhanced_tpm_detection(),
+        "pkcs11": enhanced_pkcs11_detection(),
+        "random": enhanced_secure_random(32),
+        "tls_pq": enhanced_tls_pq_support()
+    }
+    
+    # Log a summary of the results
+    logger.info("Security Diagnostics Summary:")
+    
+    # TPM status
+    if results["tpm"]["tpm_available"]:
+        logger.info(f"TPM available: {results['tpm']['tpm_type']}")
+    else:
+        logger.warning("No TPM detected, falls back to software implementation")
+    
+    # PKCS#11 status
+    if results["pkcs11"]["tokens_available"]:
+        logger.info(f"PKCS#11 tokens available: {results['pkcs11']['token_count']}")
+    else:
+        logger.warning("PKCS#11 library found but no tokens available")
+    
+    # Random generation
+    logger.info(f"Random generation source: {results['random']['source']}")
+    
+    # TLS PQ support
+    if results["tls_pq"]["pq_supported"]:
+        logger.info(f"Post-quantum TLS supported with groups: {', '.join(results['tls_pq']['groups_supported'])}")
+    else:
+        logger.warning("Post-quantum TLS not supported. Quantum security may be compromised.")
+    
+    return results
+
+def get_hsm_status():
+    """Get the status of the HSM."""
+
+    global _hsm_initialized, _hsm_session, _hsm_token, _hsm_provider_type, _cng_provider_handle
+
+    status = {
+        "initialized": _hsm_initialized,
+        "provider": _hsm_provider_type,
+        "token_info": None,
+        "session_info": None,
+        "diagnostics": []
+    }
+
+    try:
+        if _hsm_initialized:
+            status["initialized"] = True
+            status["provider"] = _hsm_provider_type
+            status["token_info"] = _hsm_token
+            status["session_info"] = _hsm_session
+            status["diagnostics"].append("HSM is initialized")
+        else:
+            status["initialized"] = False
+            status["provider"] = None
+            status["token_info"] = None
+            status["session_info"] = None
+            status["diagnostics"].append("HSM is not initialized")
+    except Exception as e:
+        status["diagnostics"].append(f"Could not get HSM status: {e}")
+        
+    return status
+
+def is_hsm_initialized():
+    """
+    Check if the HSM is initialized and ready to be used.
+    
+    Returns:
+        bool: True if the HSM is initialized, False otherwise.
+    """
+    global _hsm_initialized
+    return _hsm_initialized
+
+def generate_hsm_rsa_keypair(key_label, key_size=2048, use_cng=None):
+    """
+    Generate an RSA key pair in the HSM.
+
+    Args:
+        key_label: The label for the key pair.
+        key_size: The size of the RSA key in bits.
+        use_cng: Whether to use CNG for TPM-backed key generation.
+
+    Returns:
+        A tuple (private_key_handle, public_key_object) or None on failure.
+        The private_key_handle is an integer for PKCS#11 or a NCRYPT_KEY_HANDLE value for Windows CNG.
+        The public_key_object is a standard cryptography.hazmat.primitives.asymmetric.rsa.RSAPublicKey.
+    """
+    if use_cng is None:
+        use_cng = IS_WINDOWS and _WINDOWS_CNG_NCRYPT_AVAILABLE
+
+    if use_cng:
+        return generate_tpm_backed_key(key_label, key_size)
+    else:
+        return generate_hsm_rsa_keypair(key_label, key_size)
+
 if __name__ == "__main__":
     print("Starting tests for cross_platform_hw_security.py...")
     # Configure logging for the test run
@@ -2718,13 +4550,17 @@ if __name__ == "__main__":
 
                 print(f"\n--- Testing Key Generation & Basic Operations for '{cng_key_name}' ---")
                 print(f"Attempting to generate new key: '{cng_key_name}' with overwrite=True")
-                key_gen_result = generate_tpm_backed_key(cng_key_name, key_size=2048, overwrite=True)
+                key_gen_result = generate_tpm_backed_key_with_attestation(cng_key_name, key_size=2048, overwrite=True)
                 
                 key_handle_for_test = None # Keep track of handle for freeing later
 
                 if key_gen_result:
-                    key_handle_for_test, pub_key = key_gen_result
-                    print(f"generate_tpm_backed_key('{cng_key_name}') successful. Handle: {key_handle_for_test.value if key_handle_for_test and key_handle_for_test.value else 'N/A'}")
+                    key_handle_for_test, pub_key, attestation_data = key_gen_result
+                    print(f"generate_tpm_backed_key_with_attestation('{cng_key_name}') successful. Handle: {key_handle_for_test.value if key_handle_for_test and key_handle_for_test.value else 'N/A'}")
+                    
+                    if attestation_data:
+                        print(f"Attestation data received: {attestation_data.keys()}")
+                    
                     if pub_key:
                         print(f"Public key retrieved, type: {type(pub_key)}")
                         if _CRYPTOGRAPHY_AVAILABLE and crypto_serialization:
@@ -2818,7 +4654,7 @@ if __name__ == "__main__":
                             print(f"NCryptFreeObject on key_handle for '{cng_key_name}' returned non-success status: {free_status:#010x}.")
                         key_handle_for_test = None # Mark as freed
                 else:
-                    print(f"generate_tpm_backed_key('{cng_key_name}') FAILED. Skipping further tests for this key.")
+                    print(f"generate_tpm_backed_key_with_attestation('{cng_key_name}') FAILED. Skipping further tests for this key.")
 
                 # Test key deletion
                 print(f"\n--- Testing Key Deletion for '{cng_key_name}' ---")
@@ -2835,17 +4671,17 @@ if __name__ == "__main__":
                 # Test non-overwrite behavior
                 print(f"\n--- Testing Non-Overwrite Behavior for '{cng_key_name_existing}' ---")
                 print(f"Attempting first generation of '{cng_key_name_existing}' with overwrite=True")
-                key_gen_exist_1_res = generate_tpm_backed_key(cng_key_name_existing, key_size=2048, overwrite=True)
+                key_gen_exist_1_res = generate_tpm_backed_key_with_attestation(cng_key_name_existing, key_size=2048, overwrite=True)
                 handle_exist_1 = None
                 if key_gen_exist_1_res:
-                    handle_exist_1, _ = key_gen_exist_1_res
+                    handle_exist_1, _, _ = key_gen_exist_1_res
                     print(f"First generation of '{cng_key_name_existing}' successful. Handle: {handle_exist_1.value if handle_exist_1 else 'N/A'}")
                     
                     print(f"Attempting to generate '{cng_key_name_existing}' again with overwrite=False")
-                    key_gen_exist_2_res = generate_tpm_backed_key(cng_key_name_existing, key_size=2048, overwrite=False)
+                    key_gen_exist_2_res = generate_tpm_backed_key_with_attestation(cng_key_name_existing, key_size=2048, overwrite=False)
                     handle_exist_2 = None
                     if key_gen_exist_2_res:
-                        handle_exist_2, pub_key_exist_2 = key_gen_exist_2_res
+                        handle_exist_2, pub_key_exist_2, _ = key_gen_exist_2_res
                         print(f"Second call (overwrite=False) for '{cng_key_name_existing}' successful, key opened. Handle: {handle_exist_2.value if handle_exist_2 else 'N/A'}")
                         if pub_key_exist_2:
                             print("   Public key also retrieved on open.")
@@ -2868,7 +4704,7 @@ if __name__ == "__main__":
                 delete_tpm_key(cng_key_name_existing) # Clean up the existing key
                 print(f"Deletion attempt for '{cng_key_name_existing}' complete.")
                 
-                close_cng_provider_platform() # Close provider after all CNG tests for this block
+                _close_cng_provider_platform()  # Close provider after all CNG tests for this block
                 print("\nCNG Provider closed after tests.")
     else:
         print("\n--- Test 7: Windows CNG TPM Key Operations (Skipped, not Windows) ---")

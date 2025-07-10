@@ -1,24 +1,39 @@
 """
-Double Ratchet Protocol with Post-Quantum Security Extensions
- 
-Implements a cryptographically secure message encryption protocol combining the Signal
-Double Ratchet algorithm with post-quantum cryptographic primitives for forward secrecy, 
-break-in recovery, and quantum-resistance through a hybrid approach.
- 
-Security features:
-- Classical security: X25519 for DH exchanges
-- Quantum resistance: ML-KEM-1024 for key encapsulation
-- Message signing: FALCON-1024 signatures
-- Symmetric encryption: ChaCha20-Poly1305 AEAD
-- Key derivation: HKDF with domain separation
-- Hardware security: TPM/SGX/Secure Enclave integration when available
-- Side-channel resistance: Constant-time operations
-- Hardware binding: Device attestation support
-- Advanced threat detection: Behavioral analysis and anomaly detection
-- Key compartmentalization: Split key material across security domains
-""" 
+Advanced Double Ratchet Protocol with Military-Grade Post-Quantum Security
+
+This module implements a state-of-the-art secure messaging protocol based on
+Signal's Double Ratchet algorithm, enhanced with post-quantum cryptography and
+advanced security features for maximum protection against both classical and
+quantum adversaries.
+
+Core Security Architecture:
+1. Forward Secrecy: Automatic key rotation prevents past message compromise
+2. Break-in Recovery: Security is restored even after key compromise
+3. Post-Quantum Resistance: Hybrid classical/quantum-resistant algorithms
+4. Hardware Security Integration: TPM/SGX/Secure Enclave when available
+5. Side-Channel Protection: Constant-time operations and memory protection
+6. Threat Detection: Behavioral analysis and cryptographic anomaly detection
+
+Cryptographic Components:
+- Classical Security: X25519 for Diffie-Hellman exchanges
+- Quantum Resistance: ML-KEM-1024 (NIST standardized) for key encapsulation
+- Message Authentication: FALCON-1024 (NIST standardized) for signatures
+- Symmetric Encryption: ChaCha20-Poly1305 AEAD for message confidentiality
+- Key Derivation: HKDF with domain separation for cryptographic isolation
+
+Advanced Security Features:
+- Secure Memory Management: Protected memory for sensitive key material
+- Hardware Binding: Device attestation for hardware-level trust
+- Key Compartmentalization: Split key material across security domains
+- Out-of-order Message Handling: Secure processing of delayed messages
+- Replay Attack Prevention: Message deduplication with secure caching
+
+This implementation follows NIST's recommendations for post-quantum security
+and is designed for high-security applications where both classical and
+quantum threats must be mitigated.
+"""
 # Import standard libraries
-import gc
+import gc 
 import os
 import hmac 
 import hashlib
@@ -52,11 +67,33 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.exceptions import InvalidTag
 
-# Post-quantum cryptography
-from quantcrypt import kem
-from quantcrypt.dss import FALCON_1024
+# Post-quantum cryptography - Updated to use enhanced implementations
+from pqc_algorithms import EnhancedMLKEM_1024, EnhancedFALCON_1024, EnhancedHQC, HybridKEX, ConstantTime, SideChannelProtection, SecureMemory, SecurityTest
 
-# Set up logger for this module
+# Configure dedicated logger for Double Ratchet protocol operations
+ratchet_logger = logging.getLogger("double_ratchet")
+ratchet_logger.setLevel(logging.DEBUG)
+
+# Ensure logs directory exists
+if not os.path.exists("logs"):
+    os.makedirs("logs")
+
+# Setup file logging with detailed information for security auditing
+ratchet_file_handler = logging.FileHandler(os.path.join("logs", "double_ratchet.log"))
+ratchet_file_handler.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] [%(funcName)s] %(message)s')
+ratchet_file_handler.setFormatter(formatter)
+ratchet_logger.addHandler(ratchet_file_handler)
+
+# Setup console logging for immediate operational feedback
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(formatter)
+ratchet_logger.addHandler(console_handler)
+
+ratchet_logger.info("Double Ratchet logger initialized")
+
+# Standard logger for backward compatibility
 logger = logging.getLogger(__name__)
 
 # Advanced side-channel protection (if available)
@@ -66,7 +103,7 @@ try:
 except ImportError:
     HAS_CONSTANT_TIME = False
 
-# Configure logging
+# Configure logging for backward compatibility
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s'
@@ -75,7 +112,9 @@ logger.setLevel(logging.INFO)
 
 # Add file handler for security audit logging
 try:
-    file_handler = logging.FileHandler('security_audit.log')
+    logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+    os.makedirs(logs_dir, exist_ok=True)
+    file_handler = logging.FileHandler(os.path.join(logs_dir, 'security_audit.log'))
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(
         logging.Formatter('%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] [%(funcName)s] %(message)s')
@@ -329,7 +368,7 @@ class HardwareSecurityModule:
             elif cphs.IS_LINUX and cphs._AESGCM_AVAILABLE:
                 # Linux file-based with encryption
                 return cphs.store_key_file_linux(key_id, key_data)
-            elif cphs._PKCS11_SUPPORT_AVAILABLE and cphs._hsm_initialized:
+            elif cphs.is_hsm_initialized():
                 # HSM via PKCS#11
                 return cphs.store_secret_os_keyring(key_id, key_data)  # Fallback to keyring
             else:
@@ -566,15 +605,19 @@ class ThreatDetection:
 class EntropyVerifier:
     """Enhanced entropy verification with ML-based anomaly detection."""
     
-    # Constants for entropy checks - Lowered thresholds for better compatibility
-    MIN_ACCEPTABLE_ENTROPY = 1.8  # Further lowered from 2.0
-    IDEAL_ENTROPY_BYTES = 5.5     # Further lowered from 6.0
+    # Constants for entropy checks - Improved thresholds for better security
+    MIN_ACCEPTABLE_ENTROPY = 2.0  # Raised back to recommended security level
+    IDEAL_ENTROPY_BYTES = 6.0     # Raised back to recommended security level
     SUSPICIOUS_PATTERNS = [
         bytes([0] * 8),
-        bytes([255] * 8)
-        # Removed patterns: bytes(range(8)) and bytes(range(7, -1, -1))
-        # as these can appear in legitimate key derivations
+        bytes([255] * 8),
+        # Re-added higher security patterns due to enhanced implementations
+        bytes(range(8)),
+        bytes(range(7, -1, -1))
     ]
+    
+    # SecurityTest should already be imported at the top of the file
+    _HAVE_ENHANCED_SECURITY_TEST = 'SecurityTest' in globals() and SecurityTest is not None
     
     @classmethod
     def calculate_shannon_entropy(cls, data: bytes) -> float:
@@ -584,7 +627,16 @@ class EntropyVerifier:
         """
         if not data:
             return 0.0
-            
+        
+        # Try to use enhanced implementation if available
+        if cls._HAVE_ENHANCED_SECURITY_TEST:
+            try:
+                # Use the enhanced SecurityTest implementation for better side-channel resistance
+                return SecurityTest.calculate_entropy(data)
+            except Exception as e:
+                logger.debug(f"Enhanced entropy calculation failed: {e}, falling back to standard implementation")
+        
+        # Fall back to standard implementation
         # Count byte occurrences
         byte_counts = [0] * 256
         for byte in data:
@@ -616,6 +668,17 @@ class EntropyVerifier:
     @classmethod
     def detect_patterns(cls, data: bytes) -> List[str]:
         """Detect suspicious patterns in cryptographic material."""
+        # Try to use enhanced implementation if available
+        if cls._HAVE_ENHANCED_SECURITY_TEST:
+            try:
+                # Use the enhanced SecurityTest implementation for better pattern detection
+                enhanced_issues = SecurityTest.detect_cryptographic_weaknesses(data)
+                if enhanced_issues:
+                    return enhanced_issues
+            except Exception as e:
+                logger.debug(f"Enhanced pattern detection failed: {e}, falling back to standard implementation")
+        
+        # Fall back to standard implementation
         issues = []
         
         # Check byte distribution
@@ -633,17 +696,16 @@ class EntropyVerifier:
                 if data[i:i+len(pattern)] == pattern:
                     issues.append(f"detected_pattern_{pattern.hex()[:8]}")
                     
-        # Modified: Reduce byte diversity threshold
-        # Check for low or uneven distribution
+        # Check for low or uneven distribution - using higher security threshold
         unique_bytes = sum(1 for count in byte_counts if count > 0)
-        if unique_bytes < 16:  # Reduced from 32
+        if unique_bytes < 32:  # Restored to 32 for better security
             issues.append("low_byte_diversity")
         
-        # Check for excessive zeros or ones - increased threshold
+        # Check for excessive zeros or ones - using stricter threshold
         data_len = len(data)
-        if zeros > data_len * 0.7:  # Increased from 0.5
+        if zeros > data_len * 0.5:  # Restored to 0.5 for better security
             issues.append("excessive_zeros")
-        if ones > data_len * 0.7:   # Increased from 0.5
+        if ones > data_len * 0.5:   # Restored to 0.5 for better security
             issues.append("excessive_ones")
             
         return issues
@@ -656,27 +718,40 @@ class EntropyVerifier:
         Returns:
             Tuple of (passed, entropy_value, issues_detected)
         """
+        # Try to use enhanced implementation if available
+        if cls._HAVE_ENHANCED_SECURITY_TEST:
+            try:
+                # Use the enhanced SecurityTest implementation for comprehensive security verification
+                passed, entropy, issues = SecurityTest.verify_cryptographic_quality(data)
+                # Log detailed report for debugging
+                logger.debug(f"Enhanced entropy verification for {description}: " +
+                           f"overall={entropy:.2f}, issues={','.join(issues) if issues else 'none'}")
+                return passed, entropy, issues
+            except Exception as e:
+                logger.debug(f"Enhanced entropy verification failed: {e}, falling back to standard implementation")
+        
+        # Fall back to standard implementation
         entropy = cls.calculate_shannon_entropy(data)
         block_entropies = cls.calculate_block_entropy(data)
         pattern_issues = cls.detect_patterns(data)
         
         issues = pattern_issues
         
-        # Check overall entropy - reduced strictness for suboptimal entropy
+        # Check overall entropy with standard thresholds for better security
         if entropy < cls.MIN_ACCEPTABLE_ENTROPY:
             issues.append("critical_low_entropy")
-        elif entropy < 4.5:  # Reduced from 5.0
+        elif entropy < 5.0:  # Restored to 5.0 for better security
             issues.append("suboptimal_entropy")
             
-        # Check if any block has very low entropy - reduced threshold
-        if block_entropies and min(block_entropies) < 1.5:  # Reduced from 2.0
+        # Check if any block has very low entropy - standard threshold
+        if block_entropies and min(block_entropies) < 2.0:  # Restored to 2.0 for better security
             issues.append("localized_low_entropy")
             
-        # Check variance between blocks - increased acceptable variance
+        # Check variance between blocks - standard acceptable variance
         if len(block_entropies) > 1:
             max_entropy = max(block_entropies)
             min_entropy = min(block_entropies)
-            if max_entropy - min_entropy > 5.0:  # Increased from 4.0
+            if max_entropy - min_entropy > 4.0:  # Restored to 4.0 for better security
                 issues.append("high_entropy_variance")
                 
         # Log detailed report for debugging
@@ -1029,14 +1104,26 @@ threat_detector = ThreatDetection()
 
 @dataclass
 class MessageHeader:
-    """
-    Secure message header for the Double Ratchet protocol.
+    """Secure binary message header for the Double Ratchet protocol.
     
-    Structure:
-    - 32 bytes: X25519 public key for DH ratchet
+    This class represents the binary message header used in the Double Ratchet
+    protocol. The header contains all information needed for ratchet operation
+    and replay protection, with a fixed binary layout for efficient parsing.
+    
+    Binary structure (48 bytes total):
+    - 32 bytes: X25519 public key for DH ratchet (raw format)
     - 4 bytes: Previous chain length (unsigned int, big endian)
     - 4 bytes: Message number in current chain (unsigned int, big endian)
-    - 8 bytes: Unique message identifier (random bytes)
+    - 8 bytes: Unique message identifier (cryptographically random bytes)
+    
+    The header serves multiple security purposes:
+    1. Communicates the sender's current ratchet public key
+    2. Provides message ordering information for chain ratcheting
+    3. Includes a unique message ID for replay attack prevention
+    4. Enables out-of-order message handling
+    
+    All fields undergo validation during initialization to prevent
+    malformed headers that could lead to security vulnerabilities.
     """
     
     # Header size in bytes (fixed for binary compatibility)
@@ -1130,19 +1217,44 @@ class MessageHeader:
 
 
 class DoubleRatchet:
-    """
-    Advanced Double Ratchet with Post-Quantum Security Extensions.
+    """Military-grade secure messaging protocol with post-quantum protection.
     
-    Key features:
-    1. Forward secrecy: Compromising current keys doesn't expose past messages
-    2. Break-in recovery: Security is restored after key compromise
-    3. Post-quantum resistance: Hybrid classical/quantum-resistant algorithms
-    4. Out-of-order message handling: Maintains security with delayed messages
-    5. Message authentication: Protection against tampering and forgery
-    6. Hardware-backed security: Integration with secure enclaves when available
-    7. Side-channel resistance: Constant-time operations where possible
-    8. Threshold security: Optional key compartmentalization
-    9. Advanced threat detection: Behavioral and cryptographic anomaly detection
+    Implements the Double Ratchet algorithm with significant security enhancements
+    for protecting communications against both classical and quantum adversaries.
+    This implementation provides comprehensive security guarantees through multiple
+    layers of defense and state-of-the-art cryptographic techniques.
+    
+    Core Security Guarantees:
+    1. Forward Secrecy: Automatic key rotation ensures past messages remain secure
+       even if current keys are compromised
+    
+    2. Break-in Recovery: Security is automatically restored after key compromise
+       through the DH ratchet mechanism
+    
+    3. Post-Quantum Resistance: Hybrid approach combining classical X25519 with
+       NIST-standardized ML-KEM-1024 and FALCON-1024 algorithms
+    
+    4. Message Integrity: Authenticated encryption with ChaCha20-Poly1305 AEAD
+       prevents message tampering and forgery
+    
+    5. Out-of-Order Security: Maintains security properties even when messages
+       arrive out of order or are delayed
+    
+    6. Hardware Protection: Optional integration with TPM, SGX, or Secure Enclave
+       when available for hardware-level security
+    
+    7. Side-Channel Resistance: Constant-time operations and memory protection
+       to prevent timing and cache-based attacks
+    
+    8. Compartmentalization: Optional threshold security with key splitting
+       across security domains
+    
+    9. Threat Detection: Behavioral analysis and cryptographic anomaly detection
+       to identify potential attacks
+    
+    This implementation follows NIST guidelines for post-quantum security and
+    is suitable for applications requiring the highest level of communication
+    security in adversarial environments.
     """
     
     # Security parameters - Enhanced defaults
@@ -1186,29 +1298,41 @@ class DoubleRatchet:
         self, 
         root_key: bytes, 
         is_initiator: bool = True, 
-        enable_pq: bool = True,  # PQ security enabled by default
+        enable_pq: bool = True,
         max_skipped_keys: int = 100,
-        security_level: str = "MAXIMUM",  # Changed  HIGH as default
-        threshold_security: bool = False,  # Enable key compartmentalization
-        hardware_binding: bool = False,    # Enable hardware binding
-        side_channel_protection: bool = True, # Enable side-channel protections
-        anomaly_detection: bool = True,     # Enable anomaly detection
-        max_replay_cache_size: int = MAX_REPLAY_CACHE_SIZE # Added parameter
+        security_level: str = "MAXIMUM",
+        threshold_security: bool = False,
+        hardware_binding: bool = False,
+        side_channel_protection: bool = True,
+        anomaly_detection: bool = True,
+        max_replay_cache_size: int = MAX_REPLAY_CACHE_SIZE
     ):
-        """
-        Initialize a new Double Ratchet session.
+        """Initialize a Double Ratchet session with security configuration.
+        
+        Creates a new Double Ratchet session with the specified security parameters.
+        The default configuration provides maximum security with post-quantum
+        protection and side-channel resistance.
         
         Args:
-            root_key: The initial root key from a key exchange protocol (32 bytes)
-            is_initiator: Whether this party initiated the conversation
-            enable_pq: Whether to enable post-quantum security enhancements (default: True)
-            max_skipped_keys: Maximum number of skipped message keys to store
-            security_level: Security profile ("STANDARD", "HIGH", or "PARANOID")
-            threshold_security: Enable threshold cryptography for key compartmentalization
-            hardware_binding: Enable hardware binding when available
-            side_channel_protection: Enable side-channel attack protections
-            anomaly_detection: Enable behavioral anomaly detection
-            max_replay_cache_size: Maximum number of message IDs to store for replay detection
+            root_key: Initial 32-byte shared secret key from key exchange
+            is_initiator: True if this side initiated the conversation
+            enable_pq: Enable post-quantum cryptography (ML-KEM-1024)
+            max_skipped_keys: Maximum number of message keys to cache for out-of-order messages
+            security_level: Security profile to use ("MAXIMUM", "HIGH", "STANDARD")
+            threshold_security: Enable key compartmentalization across security domains
+            hardware_binding: Bind cryptographic operations to hardware security modules
+            side_channel_protection: Enable protections against timing/cache attacks
+            anomaly_detection: Enable behavioral and cryptographic anomaly detection
+            max_replay_cache_size: Maximum size of the replay protection cache
+            
+        Raises:
+            ValueError: If root_key is invalid or security parameters are incompatible
+            SecurityError: If security requirements cannot be satisfied
+            
+        Security note:
+            The default parameters provide maximum security suitable for most
+            applications. Only disable security features if you have specific
+            performance requirements and understand the security implications.
         """
         # Verify the root key's security properties
         verify_key_material(root_key, expected_length=self.ROOT_KEY_SIZE, 
@@ -1290,27 +1414,17 @@ class DoubleRatchet:
         # Post-quantum state
         if self.enable_pq:
             # Initialize KEM components - always use EnhancedML-KEM-1024 for best security
-            try:
-                from pqc_algorithms import EnhancedMLKEM_1024
-                self.kem = EnhancedMLKEM_1024()
-                logger.info("Using EnhancedMLKEM_1024 for post-quantum key encapsulation")
-            except ImportError:
-                self.kem = kem.MLKEM_1024()
-                logger.warning("Using standard MLKEM_1024 for key encapsulation. Could not import enhanced version.")
+            self.kem = EnhancedMLKEM_1024()
+            logger.info("Using EnhancedMLKEM_1024 for post-quantum key encapsulation")
             
             self.kem_public_key, self.kem_private_key = self.kem.keygen()
             self.remote_kem_public_key = None
             self.kem_ciphertext = None
             self.kem_shared_secret = None  # Store shared secret after decapsulation
             
-            # Initialize signature components - use enhanced FALCON-1024 if available
-            try:
-                from pqc_algorithms import EnhancedFALCON_1024
-                self.dss = EnhancedFALCON_1024()
-                logger.info("Using EnhancedFALCON_1024 for post-quantum signatures")
-            except ImportError:
-                self.dss = FALCON_1024()
-                logger.warning("Using standard FALCON_1024 for post-quantum signatures. Could not import enhanced version.")
+            # Initialize signature components - use enhanced FALCON-1024
+            self.dss = EnhancedFALCON_1024()
+            logger.info("Using EnhancedFALCON_1024 for post-quantum signatures")
 
             self.dss_public_key, self.dss_private_key = self.dss.keygen()
             self.remote_dss_public_key = None
@@ -1777,18 +1891,28 @@ class DoubleRatchet:
                 pass
     
     def _encrypt(self, plaintext: bytes) -> bytes:
-        """
-        Encrypt a message using the Double Ratchet protocol.
+        """Internal implementation of the Double Ratchet encryption protocol.
         
-        This method:
-        1. Advances the sending chain to generate a new message key
-        2. Creates a message header with the current ratchet public key
-        3. Encrypts the plaintext using ChaCha20-Poly1305
-        4. In post-quantum mode, signs the ciphertext with FALCON-1024
-        5. Assembles the final message with all required components
+        Performs the core encryption operations:
         
+        1. Advances the sending chain to derive a fresh message key
+        2. Creates a message header with ratchet state information
+        3. Generates authenticated data from the header
+        4. Encrypts plaintext with ChaCha20-Poly1305 AEAD
+        5. Signs the encrypted data with FALCON-1024 (if PQ enabled)
+        6. Assembles the complete message with all components
+        
+        This method implements the cryptographic operations described in
+        the Double Ratchet specification with post-quantum enhancements.
+        
+        Args:
+            plaintext: Raw message data to encrypt
+            
         Returns:
-            Complete encrypted message with header
+            bytes: Complete encrypted message with header, signature, and ciphertext
+            
+        Raises:
+            SecurityError: If encryption fails or Double Ratchet is not initialized
         """
         # Validate input
         if not isinstance(plaintext, bytes):
@@ -1848,14 +1972,37 @@ class DoubleRatchet:
         return message
 
     def encrypt(self, plaintext: bytes) -> bytes:
-        """
-        Public encrypt method for sending messages securely.
+        """Encrypt a message with the Double Ratchet protocol.
+        
+        Performs secure message encryption with forward secrecy and
+        post-quantum protection. The encryption process includes:
+        
+        1. Chain key ratcheting to generate a unique message key
+        2. Authenticated encryption with ChaCha20-Poly1305 AEAD
+        3. Message signing with FALCON-1024 (if post-quantum enabled)
+        4. Header generation with current ratchet state information
+        5. Replay protection with unique message identifiers
+        
+        The resulting message contains:
+        - Header with X25519 public key and chain state information
+        - FALCON signature (if post-quantum enabled)
+        - Nonce for ChaCha20-Poly1305
+        - Authenticated encrypted payload
         
         Args:
-            plaintext: The message to encrypt
+            plaintext: Raw message data to encrypt
             
         Returns:
-            Encrypted message with header and authentication
+            bytes: Complete encrypted message ready for transmission
+            
+        Raises:
+            TypeError: If plaintext is not bytes
+            ValueError: If plaintext exceeds maximum size
+            SecurityError: If encryption fails or security constraints are violated
+            
+        Security note:
+            Each message uses a unique key derived through the ratchet mechanism,
+            ensuring forward secrecy even if future keys are compromised.
         """
         if not isinstance(plaintext, bytes):
             raise TypeError("Plaintext must be bytes")
@@ -1870,17 +2017,31 @@ class DoubleRatchet:
         return self._encrypt(plaintext)
 
     def _decrypt_with_cipher(self, nonce: bytes, ciphertext: bytes, auth_data: bytes, message_key: bytes) -> bytes:
-        """
-        Decrypt ciphertext with ChaCha20-Poly1305 AEAD.
+        """Decrypt ciphertext with ChaCha20-Poly1305 AEAD with secure memory handling.
+        
+        Performs authenticated decryption with ChaCha20-Poly1305 while implementing
+        secure memory management practices to protect the message key:
+        
+        1. Creates a temporary copy of the message key in a mutable buffer
+        2. Performs authenticated decryption with ChaCha20-Poly1305
+        3. Securely erases the key material from memory after use
+        4. Uses platform-specific memory protection when available
         
         Args:
-            nonce: The nonce used for encryption
-            ciphertext: The ciphertext to decrypt
-            auth_data: Authenticated associated data
-            message_key: The key to use for decryption
+            nonce: 12-byte nonce used for encryption
+            ciphertext: Encrypted message data
+            auth_data: Authenticated associated data (typically derived from header)
+            message_key: 32-byte key derived from the ratchet chain
         
         Returns:
-            Decrypted plaintext
+            bytes: Decrypted plaintext if authentication succeeds
+            
+        Raises:
+            SecurityError: If authentication fails (tag verification fails)
+            
+        Security note:
+            This method implements defense-in-depth by using both high-level
+            secure erasure and low-level memory protection techniques.
         """
         # Create a mutable copy of the message key for better memory hygiene
         # This copy will be securely erased after use
@@ -1913,18 +2074,38 @@ class DoubleRatchet:
                 pass
     
     def decrypt(self, message: bytes) -> bytes:
-        """
-        Decrypt a message using the Double Ratchet protocol.
+        """Decrypt a message using the Double Ratchet protocol.
         
-        This method:
-        1. Parses the message to extract header and encrypted content
-        2. In post-quantum mode, verifies the FALCON signature
-        3. Performs a DH ratchet step if needed
-        4. Derives the appropriate message key (or uses a stored skipped key)
-        5. Decrypts and authenticates the ciphertext
+        Performs secure message decryption with comprehensive security checks:
         
+        1. Message structure validation and parsing
+        2. Replay attack detection using unique message IDs
+        3. Cryptographic signature verification (FALCON-1024 if PQ enabled)
+        4. DH ratchet step execution if sender's key has changed
+        5. Message key derivation through chain ratcheting
+        6. Authenticated decryption with ChaCha20-Poly1305
+        
+        The decryption process handles:
+        - Out-of-order message delivery through skipped message keys
+        - Key rotation through DH ratchet steps
+        - Post-quantum signature verification
+        - Replay attack prevention
+        
+        Args:
+            message: Complete encrypted message to decrypt
+            
         Returns:
-            Decrypted plaintext
+            bytes: Decrypted plaintext message
+            
+        Raises:
+            TypeError: If message is not bytes
+            ValueError: If message format is invalid
+            SecurityError: If authentication fails, signature verification fails,
+                          or any security constraint is violated
+                          
+        Security note:
+            Failed authentication or signature verification will immediately
+            abort the decryption process to prevent oracle attacks.
         """
         # Validate input
         if not isinstance(message, bytes):
@@ -2482,7 +2663,23 @@ class DoubleRatchet:
         return self.dss_public_key
 
     def secure_cleanup(self) -> None:
-        """Securely erase all sensitive key material from memory."""
+        """Securely erase all cryptographic material from memory.
+        
+        Performs comprehensive cleanup of all sensitive key material:
+        1. Securely erases all private keys and chain keys
+        2. Clears all skipped message keys
+        3. Resets the replay protection cache
+        4. Triggers garbage collection to remove lingering references
+        
+        This method should be called when the DoubleRatchet instance
+        is no longer needed to prevent sensitive cryptographic material
+        from remaining in memory where it could be exposed through memory
+        dumps or cold boot attacks.
+        
+        Security note:
+            This method is critical for maintaining forward secrecy.
+            Always call this method when a session is complete.
+        """
         logger.info("Double Ratchet state securely cleaned up")
 
         # Create a list of all potentially sensitive attributes
@@ -2661,20 +2858,32 @@ class DoubleRatchet:
             raise SecurityError(f"Key initialization failed: {str(e)}")
 
     def _secure_verify(self, public_key, payload, signature, description="signature"):
-        """
-        Securely verify a signature, aborting immediately on mismatch.
+        """Verify a digital signature with enhanced security and error handling.
+        
+        Performs secure signature verification with several security enhancements:
+        1. Validates all inputs before verification
+        2. Uses constant-time operations where possible
+        3. Implements fail-closed security (exceptions on failure)
+        4. Provides detailed security logging
+        
+        This method is designed to be resistant to signature forgery attacks
+        and timing side-channel attacks.
         
         Args:
-            public_key: The public key bytes to use for verification
-            payload: The payload that was signed
-            signature: The signature to verify
-            description: Description for logging
+            public_key: FALCON public key bytes for verification
+            payload: Original data that was signed
+            signature: Signature bytes to verify
+            description: Description for error messages and logging
             
         Returns:
-            True if verification succeeds
+            bool: True if verification succeeds (never returns False)
             
         Raises:
-            SecurityError: If verification fails or throws an exception
+            SecurityError: If verification fails for any reason
+            
+        Security note:
+            This method follows the principle of failing closed - any verification
+            error results in an exception rather than a boolean False return.
         """
         try:
             if not self.dss.verify(public_key, payload, signature):
