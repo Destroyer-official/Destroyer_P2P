@@ -7,11 +7,10 @@ keyring
 psutil
 tpm2-pytss==2.0.0; platform_system == "Linux"
 wmi
-liboqs-python
-
+cryptography
 # PyNaCl is optional - our cross‑platform secure memory implementation provides an alternative
-PyNaCl
 
+tqdm
 pyzmq
 requests 
 
