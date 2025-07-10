@@ -1,17 +1,12 @@
 cryptography
-pyserial
-pyaes
 cffi
 pycryptodome
-pypiwin32
 quantcrypt
 dnspython
 keyring
 psutil
-tpm2-pytss
+tpm2-pytss==2.0.0; platform_system == "Linux"
 wmi
-liboqs
-pkcs11
 liboqs-python
 
 # PyNaCl is optional - our cross‑platform secure memory implementation provides an alternative
@@ -24,7 +19,6 @@ requests
 python-pkcs11; sys_platform != "win32"
 
 # DANE and Certificate Transparency dependencies
-pyopenssl
 python-dateutil
 pyjwt
 
