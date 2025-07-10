@@ -1,4 +1,5 @@
 """
+<<<<<<< HEAD
 Advanced Double Ratchet Protocol with Military-Grade Post-Quantum Security
 
 This module implements a state-of-the-art secure messaging protocol based on
@@ -32,6 +33,26 @@ This implementation follows NIST's recommendations for post-quantum security
 and is designed for high-security applications where both classical and
 quantum threats must be mitigated.
 """
+=======
+Double Ratchet Protocol with Post-Quantum Security Extensions
+ 
+Implements a cryptographically secure message encryption protocol combining the Signal
+Double Ratchet algorithm with post-quantum cryptographic primitives for forward secrecy, 
+break-in recovery, and quantum-resistance through a hybrid approach.
+ 
+Security features:
+- Classical security: X25519 for DH exchanges
+- Quantum resistance: ML-KEM-1024 for key encapsulation
+- Message signing: FALCON-1024 signatures
+- Symmetric encryption: ChaCha20-Poly1305 AEAD 
+- Key derivation: HKDF with domain separation
+- Hardware security: TPM/SGX/Secure Enclave integration when available
+- Side-channel resistance: Constant-time operations
+- Hardware binding: Device attestation support
+- Advanced threat detection: Behavioral analysis and anomaly detection
+- Key compartmentalization: Split key material across security domains
+""" 
+>>>>>>> 979c39aab35023924fc0b55b837b097b0135c5af
 # Import standard libraries
 import gc 
 import os

@@ -1706,10 +1706,14 @@ class HybridKEX:
         mlkem_pk = public_key[offset:offset+mlkem_pk_len]
         offset += mlkem_pk_len
         
+<<<<<<< HEAD
         hqc_pk_len = struct.unpack("<I", public_key[offset:offset+4])[0]
         offset += 4
         hqc_pk = public_key[offset:offset+hqc_pk_len]
         offset += hqc_pk_len
+=======
+        return ciphertext, enhanced_secret 
+>>>>>>> 979c39aab35023924fc0b55b837b097b0135c5af
         
         falcon_pk_len = struct.unpack("<I", public_key[offset:offset+4])[0]
         offset += 4

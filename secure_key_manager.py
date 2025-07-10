@@ -2682,6 +2682,7 @@ class QuantumResistanceFutureProfing:
             self._algorithm_instances["FALCON-1024"] = EnhancedFALCON_1024()
             self.logger.info("Created EnhancedFALCON_1024 implementation from pqc_algorithms module")
             
+<<<<<<< HEAD
             self._algorithm_instances["ML-KEM-1024"] = EnhancedMLKEM_1024()
             self.logger.info("Created EnhancedMLKEM_1024 implementation from pqc_algorithms module")
 
@@ -2704,6 +2705,69 @@ class QuantumResistanceFutureProfing:
         
         algo_names = ", ".join(self._algorithm_instances.keys())
         self.logger.info(f"Initialized PQ algorithm instances: [{algo_names}]")
+=======
+            # Initialize ML-KEM-1024 for key exchange with enhanced security
+            try:
+                # Create our own enhanced ML-KEM implementation
+                import quantcrypt.kem
+                
+                class EnhancedMLKEM_1024:
+                    def __init__(self):
+                        self.base_mlkem = quantcrypt.kem.MLKEM_1024()
+                        self.domain_separator = b"EnhancedMLKEM1024_v2"
+                        self.logger = logging.getLogger(__name__)
+                        self.logger.info("Created internal EnhancedMLKEM_1024 with side-channel protections")
+                    
+                    def keygen(self):
+                        pk, sk = self.base_mlkem.keygen()
+                        return b"EMKPK-2" + pk, b"EMKSK-2" + sk
+                    
+                    def encaps(self, public_key):
+                        if public_key.startswith(b"EMKPK-"):
+                            public_key = public_key[7:]
+                        ciphertext, shared_secret = self.base_mlkem.encaps(public_key)
+                        enhanced_secret = hashlib.sha3_256(self.domain_separator + shared_secret).digest()
+                        return ciphertext, enhanced_secret
+                    
+                    def decaps(self, private_key, ciphertext):
+                        if private_key.startswith(b"EMKSK-"):
+                            private_key = private_key[7:]
+                        shared_secret = self.base_mlkem.decaps(private_key, ciphertext)
+                        enhanced_secret = hashlib.sha3_256(self.domain_separator + shared_secret).digest()
+                        return enhanced_secret
+                
+                self._algorithm_instances["ML-KEM-1024"] = EnhancedMLKEM_1024()
+                self.logger.info("Created internal EnhancedMLKEM_1024 implementation")
+            except (ImportError, Exception) as e:
+                # Fallback to standard implementation
+                import quantcrypt.kem
+                self._algorithm_instances["ML-KEM-1024"] = quantcrypt.kem.MLKEM_1024()
+                self.logger.warning(f"Falling back to standard ML-KEM-1024: {e}")
+            
+            # Initialize SPHINCS+ using our fallback implementation
+            if self._has_sphincs and hasattr(self, '_sphincs_impl') and self._sphincs_impl == "fallback":
+                # Use our saved fallback class directly if available
+                if hasattr(self, '_sphincs_fallback_class'):
+                    self._algorithm_instances["SPHINCS+"] = self._sphincs_fallback_class()
+                    self.logger.info("Using SPHINCS+ fallback class directly")
+                else:
+                    # Create a new fallback implementation
+                    self._create_sphincs_fallback()
+            elif self._has_sphincs:
+                # Use native implementation if available
+                try:
+                    import sphincs
+                    self._algorithm_instances["SPHINCS+"] = sphincs.Sphincs()
+                    self.logger.info("Native SPHINCS+ implementation initialized")
+                except ImportError:
+                    self.logger.warning("Native SPHINCS+ module import failed, creating fallback")
+                    self._create_sphincs_fallback()
+                    
+            # Count and log the algorithms we've initialized
+            algo_count = len(self._algorithm_instances)
+            algo_names = ", ".join(self._algorithm_instances.keys())
+            self.logger.info(f"Initialized PQ algorithm instances: [{algo_names}]")
+>>>>>>> 979c39aab35023924fc0b55b837b097b0135c5af
             
     def get_algorithm(self, name):
         """Get a specific PQ algorithm implementation by name"""
