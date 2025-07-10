@@ -1,21 +1,74 @@
-cryptography
-cffi
-pycryptodome
-quantcrypt
-dnspython
-keyring
-PyNaCl
-psutil
-wmi
-cryptography
-# PyNaCl is optional - our cross‑platform secure memory implementation provides an alternative
-python-pkcs11
-tqdm
-pyzmq
-requests 
+cryptography>=41.0.0
+cffi>=1.15.0
+pycryptodome>=3.19.0
+quantcrypt>=0.2.0
+dnspython>=2.4.0
+keyring>=24.0.0
+PyNaCl>=1.5.0
+psutil>=5.9.0
+wmi>=1.5.1
+python-pkcs11>=0.7.0
+tqdm>=4.65.0
+pyzmq>=25.0.0
+requests>=2.31.0
+python-dateutil>=2.8.2
+pyjwt>=2.8.0
 
-# PKCS#11 is only needed for non‑Windows platforms
+# Advanced Security Dependencies
+numpy>=1.24.0
+scipy>=1.10.0
+scikit-learn>=1.3.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
 
-python-dateutil
-pyjwt
+# Additional Security Libraries
+bcrypt>=4.0.0
+argon2-cffi>=23.0.0
+scrypt>=0.8.20
+passlib>=1.7.4
+
+# Networking and Communication
+tornado>=6.3.0
+aiohttp>=3.8.0
+websockets>=11.0.0
+paramiko>=3.3.0
+
+# Data Processing and Analysis
+pandas>=2.0.0
+jsonschema>=4.17.0
+pyyaml>=6.0.0
+toml>=0.10.2
+
+# Cryptographic Libraries
+ecdsa>=0.18.0
+ed25519>=1.5
+rsa>=4.9.0
+pycryptodomex>=3.19.0
+cryptg>=0.4.0
+
+# Hardware Security Module Support
+pkcs11>=0.7.0
+python-pkcs11>=0.7.0
+
+# Additional Security Tools
+yara-python>=4.3.0
+python-magic>=0.4.27
+hashlib-compat>=1.0.1
+
+# Performance and Optimization
+cython>=3.0.0
+numba>=0.57.0
+ujson>=5.8.0
+
+# Testing and Development
+pytest>=7.4.0
+pytest-cov>=4.1.0
+coverage>=7.2.0
+black>=23.7.0
+flake8>=6.0.0
+mypy>=1.5.0
+
+# Documentation
+sphinx>=7.1.0
+sphinx-rtd-theme>=1.3.0
 
