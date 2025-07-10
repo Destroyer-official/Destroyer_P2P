@@ -4,6 +4,7 @@ pycryptodome
 quantcrypt
 dnspython
 keyring
+PyNaCl
 psutil
 wmi
 cryptography
@@ -15,8 +16,6 @@ requests
 
 # PKCS#11 is only needed for non‑Windows platforms
 
-
-# DANE and Certificate Transparency dependencies
 python-dateutil
 pyjwt
 
