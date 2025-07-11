@@ -7,8 +7,8 @@
  psutil==7.0.0
  wmi==1.5.1
 - liboqs-python
-+ # liboqs-python has no PyPI release; install bindings from GitHub or use:
-+ # pip install pyoqs-sdk==1.0
+# liboqs-python has no PyPI release; install bindings from GitHub or use:
+# pip install pyoqs-sdk==1.0
  PyNaCl==1.5.0
  pyzmq==27.0.0
  requests==2.32.4
