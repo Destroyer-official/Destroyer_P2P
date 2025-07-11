@@ -5,7 +5,7 @@ quantcrypt
 dnspython
 keyring
 psutil
-tpm2-pytss==2.0.0; platform_system == "Linux"
+#tpm2-pytss==2.0.0; platform_system == "Linux"
 wmi
 liboqs-python
 
