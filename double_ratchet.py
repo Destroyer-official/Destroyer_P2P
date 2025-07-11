@@ -1318,7 +1318,7 @@ class DoubleRatchet:
             is_initiator: True if this side initiated the conversation
             enable_pq: Enable post-quantum cryptography (ML-KEM-1024)
             max_skipped_keys: Maximum number of message keys to cache for out-of-order messages
-            security_level: Security profile to use ("MAXIMUM", "HIGH", "STANDARD")
+            security_level: Security profile to use ("MAXIMUM"")
             threshold_security: Enable key compartmentalization across security domains
             hardware_binding: Bind cryptographic operations to hardware security modules
             side_channel_protection: Enable protections against timing/cache attacks
@@ -2901,28 +2901,11 @@ class DoubleRatchetDefaults:
     
     # Security level configurations
     SECURITY_LEVELS = {
-        "STANDARD": {
-            "enable_pq": True,               # Post-quantum security
-            "max_skipped_keys": 100,         # Maximum skipped keys
-            "key_rotation_messages": 30,     # Messages before key rotation
-            "key_rotation_time": 3600,       # Seconds before key rotation (1 hour)
-            "max_message_size": 524288,      # 512KB max message size
-            "strict_verification": True,     # Strict signature verification
-            "side_channel_protection": True, # Mitigate side-channel attacks
-            "memory_protection": False,      # Enhanced memory protection
-            "anomaly_detection": True,       # Basic anomaly detection
-            "hardware_binding": False,       # Hardware binding (if available)
-            "threshold_security": False,     # Threshold cryptography splitting
-            "message_padding": False,        # Add random padding to messages
-            "anti_tampering": False,         # Extra anti-tampering measures
-            "secure_erasure_passes": 4,      # Number of secure erasure passes
-            "replay_cache_size": 200,        # Maximum replay cache size
-            "replay_cache_expiry": 3600      # Replay cache expiry time (1 hour)
-        },
+
         "MAXIMUM": { # This was HIGH, settings updated by user
             "enable_pq": True,
-            "max_skipped_keys": 5,          # Reduced skipped keys
-            "key_rotation_messages": 5,     # More frequent rotation
+            "max_skipped_keys":0,          # Reduced skipped keys
+            "key_rotation_messages": 1,     # More frequent rotation
             # "key_rotation_time": 1800,       # 30 minutes key rotation
             "key_rotation_time": 10,       # 10 second key rotation
             "max_message_size": 262144,      # 256KB max message size
@@ -2934,28 +2917,10 @@ class DoubleRatchetDefaults:
             "threshold_security": True,      # Enable threshold security
             "message_padding": True,         # Add random padding
             "anti_tampering": True,          # Advanced anti-tampering 
-            "secure_erasure_passes": 8,      # Increased erasure passes
-            "replay_cache_size": 500,        # Larger replay cache
+            "secure_erasure_passes": 10,      # Increased erasure passes
+            "replay_cache_size": 1000,        # Larger replay cache
             "replay_cache_expiry": 7200      # Longer expiry (2 hours)
         },
-        "PARANOID": {
-            "enable_pq": True,
-            "max_skipped_keys": 0,          # No skipped keys - immediate rejection
-            "key_rotation_messages": 1,     # Rotate keys after every message
-            "key_rotation_time": 300,       # 5 minutes max key lifetime
-            "max_message_size": 65536,      # 64KB max message size
-            "strict_verification": True,
-            "side_channel_protection": True,
-            "memory_protection": True,
-            "anomaly_detection": True,
-            "hardware_binding": True,
-            "threshold_security": True,
-            "message_padding": True,
-            "anti_tampering": True,
-            "secure_erasure_passes": 10,
-            "replay_cache_size": 1000,      # Very large replay cache
-            "replay_cache_expiry": 86400    # Very long expiry (24 hours)
-        }
       
     }
     

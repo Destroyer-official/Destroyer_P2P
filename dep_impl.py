@@ -712,6 +712,12 @@ class EnhancedDEP:
         Initialize stack canary values for additional protection.
         These canaries are used to detect stack-based buffer overflows.
         """
+        # Skip on non-Windows platforms
+        if not self.is_windows:
+            log.debug("Stack canaries not supported on non-Windows platforms")
+            self.canary_values = []
+            return
+            
         try:
             # Generate random canary values
             self.canary_values = []
@@ -738,6 +744,16 @@ class EnhancedDEP:
     
     def _place_canaries(self):
         """Place canaries in strategic memory locations."""
+        # Skip on non-Windows platforms
+        if not self.is_windows:
+            log.debug("Skipping canary placement on non-Windows platform")
+            return
+            
+        # Ensure Windows API functions are available
+        if not hasattr(self, 'VirtualAlloc') or not self.VirtualAlloc:
+            log.warning("VirtualAlloc function not available, cannot place canaries")
+            return
+            
         try:
             # Allocate small memory regions for canaries
             self.canary_regions = []
@@ -777,6 +793,10 @@ class EnhancedDEP:
         Returns:
             bool: True if all canaries are intact, False otherwise
         """
+        # Skip on non-Windows platforms
+        if not self.is_windows:
+            return True
+            
         if not hasattr(self, 'canary_regions') or not self.canary_regions:
             return True
             

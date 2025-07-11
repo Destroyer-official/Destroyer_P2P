@@ -4,18 +4,21 @@ pycryptodome
 quantcrypt
 dnspython
 keyring
-PyNaCl
 psutil
+tpm2-pytss==2.0.0; platform_system == "Linux"
 wmi
-cryptography
+liboqs-python
+
 # PyNaCl is optional - our cross‑platform secure memory implementation provides an alternative
-python-pkcs11
-tqdm
+PyNaCl
+
 pyzmq
 requests 
 
-# PKCS#11 is only needed for non‑Windows platforms
+# PKCS#11 support for all platforms
+python-pkcs11
 
+# DANE and Certificate Transparency dependencies
 python-dateutil
 pyjwt
 

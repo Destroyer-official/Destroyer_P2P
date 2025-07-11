@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-cross_platform_security.py
+platform_hsm_interface.py
  
 An advanced, cross-platform Python module implementing hardware-backed security features
 with production-grade software fallbacks on Windows, Linux, and macOS.
@@ -16,21 +16,26 @@ Features:
      • macOS: IOPlatformUUID via ioreg
      • Secure fallback file with restricted permissions
   3. Secure Key Storage
-     • Windows: TPM CNG KSP (stub) or Windows Credential Manager via keyring
-     • macOS: Keychain via keyring
-     • Linux: AES-GCM encrypted file + mlock-secured buffer
+     • Windows: TPM CNG KSP or PKCS#11 via SoftHSM2
+     • macOS: Keychain via keyring or PKCS#11
+     • Linux: PKCS#11 (SoftHSM2, OpenSC, YubiHSM) or AES-GCM encrypted file
   4. Hardware Key Isolation
-     • Windows: VirtualLock() on page-aligned memory
-     • Linux/macOS: mlock() on page-aligned memory
+     • Windows: VirtualLock() on page-aligned memory or PKCS#11 via SoftHSM2
+     • Linux/macOS: PKCS#11 hardware isolation or mlock() on page-aligned memory
   5. Device Attestation
      • Windows: WMI Win32_Tpm for state
      • Linux: TPM2 quote via tpm2-pytss FAPI
      • macOS: SIP status via csrutil
+  6. Cross-Platform HSM Support
+     • PKCS#11 support across all platforms (Windows, Linux, macOS)
+     • Automatic detection and configuration of hardware security tokens
+     • Consistent API for hardware-backed cryptography operations
 
 [SECURITY ENHANCEMENT]: This module now uses enhanced post-quantum cryptographic
 implementations from pqc_algorithms.py, providing state-of-the-art, military-grade,
 future-proof security with improved side-channel resistance, constant-time operations,
-and protection against emerging threats.
+and protection against emerging threats. PKCS#11 support is now available on all
+platforms, including Windows, to provide true cross-platform hardware security.
 """
 
 import os 
@@ -478,22 +483,20 @@ def _open_cng_provider_platform() -> bool:
         return False
 
 def _close_cng_provider_platform():
-    """Closes the CNG provider handle if it was opened."""
-    global _ncrypt_provider_handle, _cng_provider_initialized
-    if IS_WINDOWS and _ncrypt_provider_handle and _ncrypt_provider_handle.value and _cng_provider_initialized:
-        if _NCryptFreeObject: # Check if function pointer is valid
-            status = _NCryptFreeObject(_ncrypt_provider_handle)
-            if status == STATUS_SUCCESS.value:
-                logger.info("CNG provider handle freed successfully.")
-            else:
-                logger.error(f"Failed to free CNG provider handle. Error: {status:#010x} (HRESULT)")
-        else:
-            logger.warning("NCryptFreeObject is not available, cannot free CNG provider handle.")
-        _ncrypt_provider_handle = NCRYPT_PROV_HANDLE() # Reset to null handle
-        _cng_provider_initialized = False
-    elif _cng_provider_initialized: # If it was marked initialized but handle is bad or not windows
-        logger.debug("close_cng_provider_platform called but provider was not in a valid state to close.")
-        _cng_provider_initialized = False # Correct state
+    """Close CNG provider if it was opened."""
+    global _cng_provider, _cng_provider_initialized
+    
+    if _cng_provider_initialized and _cng_provider:
+        try:
+            # Call NCryptFreeObject on the provider
+            if IS_WINDOWS and ncrypt and hasattr(ncrypt, 'NCryptFreeObject'):
+                ncrypt.NCryptFreeObject(_cng_provider)
+                logger.debug("CNG provider closed")
+        except Exception as e:
+            logger.error(f"Error closing CNG provider: {e}")
+        finally:
+            _cng_provider = None
+            _cng_provider_initialized = False
 
 # Global variables for hardware security modules
 _hsm_initialized = False
@@ -510,6 +513,79 @@ _crypto_lib_available = False
 # Global for auto-detected TPM and PKCS#11 libraries on Linux
 _linux_tpm2_tools_available = False
 _linux_pkcs11_detected_paths = []
+_windows_pkcs11_detected_paths = []
+
+def _find_windows_pkcs11_libraries():
+    """Find available PKCS#11 libraries on Windows systems."""
+    global _windows_pkcs11_detected_paths
+    
+    if not IS_WINDOWS:
+        return []
+        
+    common_paths = [
+        # SoftHSM2 common paths
+        "C:\\Program Files\\SoftHSM2\\lib\\softhsm2-x64.dll",
+        "C:\\Program Files (x86)\\SoftHSM2\\lib\\softhsm2.dll",
+        # OpenSC paths
+        "C:\\Program Files\\OpenSC Project\\OpenSC\\pkcs11\\opensc-pkcs11.dll",
+        # YubiKey paths
+        "C:\\Program Files\\Yubico\\Yubico PIV Tool\\bin\\libykcs11.dll",
+        # Common security token vendor paths
+        "C:\\Windows\\System32\\eTPKCS11.dll",
+        "C:\\Program Files\\SafeNet\\Authentication\\SAC\\x64\\pkcs11.dll",
+        # Other common PKCS#11 implementations
+        "C:\\Windows\\System32\\opencryptoki.dll"
+    ]
+    
+    detected = []
+    for path in common_paths:
+        if os.path.exists(path):
+            detected.append(path)
+    
+    # Also check if SoftHSM2 is installed in a custom location specified by environment variable
+    softhsm2_path = os.environ.get("SOFTHSM2_LIB")
+    if softhsm2_path and os.path.exists(softhsm2_path) and softhsm2_path not in detected:
+        detected.append(softhsm2_path)
+            
+    if detected:
+        _windows_pkcs11_detected_paths = detected
+        logger.info(f"Detected Windows PKCS#11 libraries: {', '.join(detected)}")
+    else:
+        logger.warning("No PKCS#11 libraries detected on Windows system")
+        
+    return detected
+
+def _find_macos_pkcs11_libraries():
+    """Find available PKCS#11 libraries on macOS systems."""
+    if not IS_DARWIN:
+        return []
+        
+    common_paths = [
+        "/usr/local/lib/opensc-pkcs11.so",
+        "/Library/OpenSC/lib/opensc-pkcs11.so",
+        "/usr/local/lib/pkcs11/yubico-pkcs11.dylib",
+        "/usr/local/lib/libykcs11.dylib",
+        "/usr/local/opt/opensc/lib/pkcs11/opensc-pkcs11.so",
+        "/usr/local/opt/softhsm/lib/softhsm/libsofthsm2.so",
+        "/usr/local/lib/softhsm/libsofthsm2.so"
+    ]
+    
+    detected = []
+    for path in common_paths:
+        if os.path.exists(path):
+            detected.append(path)
+    
+    # Also check environment variables
+    softhsm2_path = os.environ.get("SOFTHSM2_LIB")
+    if softhsm2_path and os.path.exists(softhsm2_path) and softhsm2_path not in detected:
+        detected.append(softhsm2_path)
+            
+    if detected:
+        logger.info(f"Detected macOS PKCS#11 libraries: {', '.join(detected)}")
+    else:
+        logger.warning("No PKCS#11 libraries detected on macOS system")
+        
+    return detected
 
 def _find_linux_pkcs11_libraries():
     """Find available PKCS#11 libraries on Linux systems."""
@@ -667,9 +743,13 @@ if LIBSODIUM_AVAILABLE:
 else:
     logger.debug("libsodium not available, libsodium downloaded soon")
 
-# Initialize Linux PKCS#11 detection at module load time
+# Initialize PKCS#11 detection at module load time for all platforms
 if IS_LINUX:
     _find_linux_pkcs11_libraries()
+elif IS_WINDOWS:
+    _find_windows_pkcs11_libraries()
+elif IS_DARWIN:
+    _find_macos_pkcs11_libraries()
 
 def init_hsm(lib_path: str = None, pin: str = None, token_label: str = None, slot_id: int = None) -> bool:
     """
@@ -696,9 +776,66 @@ def init_hsm(lib_path: str = None, pin: str = None, token_label: str = None, slo
         return True
         
     try:
-        # First, try platform-specific hardware security
+        # Try PKCS#11 first on all platforms
+        if _PKCS11_SUPPORT_AVAILABLE:
+            # Try to find a PKCS#11 library automatically if none provided
+            if lib_path is None:
+                if IS_LINUX:
+                    lib_paths = _find_linux_pkcs11_libraries()
+                    if lib_paths:
+                        lib_path = lib_paths[0]
+                        logger.info(f"Found PKCS#11 library at {lib_path}")
+                elif IS_WINDOWS:
+                    lib_paths = _find_windows_pkcs11_libraries()
+                    if lib_paths:
+                        lib_path = lib_paths[0]
+                        logger.info(f"Found PKCS#11 library at {lib_path}")
+                    # On Windows, only use TPM if explicitly configured that way
+                    elif PKCS11_ENABLED and not config.get("platform", {}).get("windows", {}).get("prefer_tpm_over_pkcs11", True):
+                        logger.info("Windows platform detected. No PKCS#11 library found, will check for TPM/CNG.")
+                elif IS_DARWIN:
+                    lib_paths = _find_macos_pkcs11_libraries()
+                    if lib_paths:
+                        lib_path = lib_paths[0]
+                        logger.info(f"Found PKCS#11 library at {lib_path}")
+                else:
+                    logger.warning(f"Unsupported platform {SYSTEM} for PKCS#11 library detection")
+        
+        # If PKCS#11 library is found, initialize it
+        if _PKCS11_SUPPORT_AVAILABLE and lib_path and os.path.exists(lib_path):
+            try:
+                # Initialize PKCS#11 library
+                lib = pkcs11.lib(lib_path)
+                
+                # Get a token to work with
+                if token_label:
+                    tokens = list(lib.get_tokens(token_label=token_label))
+                elif slot_id is not None:
+                    tokens = list(lib.get_tokens(slot_id=slot_id))
+                else:
+                    tokens = list(lib.get_tokens())
+                
+                if not tokens:
+                    logger.warning(f"No PKCS#11 tokens found in library {lib_path}")
+                else:
+                    token = tokens[0]
+                    _hsm_token = token
+                    
+                    # Open a session
+                    session = token.open(user_pin=pin)
+                    _hsm_session = session
+                    
+                    logger.info(f"Successfully initialized PKCS#11 HSM with token: {token.label}")
+                    _hsm_initialized = True
+                    _hsm_provider_type = "pkcs11"
+                    return True
+            except Exception as e:
+                logger.warning(f"Failed to initialize PKCS#11 HSM with library {lib_path}: {e}. Will try next option.")
+                lib_path = None  # Clear the lib_path so we can try the fallback options
+        
+        # If PKCS#11 initialization failed or is not available, try platform-specific hardware security
         if IS_WINDOWS:
-            logger.info("Windows platform detected. Using CNG/TPM for hardware security instead of PKCS#11.")
+            logger.info("Trying Windows CNG/TPM for hardware security.")
             if _check_cng_available() and _open_cng_provider_platform():
                 logger.info("Successfully initialized Windows CNG provider for hardware security.")
                 _hsm_initialized = True
@@ -706,54 +843,6 @@ def init_hsm(lib_path: str = None, pin: str = None, token_label: str = None, slo
                 return True
             else:
                 logger.warning("Windows CNG/TPM not available. Will fall back to software HSM.")
-        
-        # Next, try PKCS#11 if available
-        if _PKCS11_SUPPORT_AVAILABLE:
-      # Try to find a PKCS#11 library automatically
-            if IS_LINUX:
-                lib_paths = _find_linux_pkcs11_libraries()
-                if lib_paths:
-                    lib_path = lib_paths[0]
-                    logger.info(f"Found PKCS#11 library at {lib_path}")
-            elif IS_DARWIN:
-                # Try common macOS PKCS#11 library locations
-                for path in ["/usr/local/lib/libykcs11.dylib", "/usr/local/lib/opensc-pkcs11.so"]:
-                    if os.path.exists(path):
-                        lib_path = path
-                        logger.info(f"Found PKCS#11 library at {lib_path}")
-                        break
-            
-            if lib_path and os.path.exists(lib_path):
-                try:
-                    # Initialize PKCS#11 library
-                    lib = pkcs11.lib(lib_path)
-                    
-                    # Get a token to work with
-                    if token_label:
-                        tokens = list(lib.get_tokens(token_label=token_label))
-                    elif slot_id is not None:
-                        tokens = list(lib.get_tokens(slot_id=slot_id))
-                    else:
-                        tokens = list(lib.get_tokens())
-                    
-                    if not tokens:
-                        logger.warning("No PKCS#11 tokens found")
-                    else:
-                        token = tokens[0]
-                        _hsm_token = token
-                        
-                        # Open a session
-                        session = token.open(user_pin=pin)
-                        _hsm_session = session
-                        
-                        logger.info(f"Successfully initialized PKCS#11 HSM with token: {token.label}")
-                        _hsm_initialized = True
-                        _hsm_provider_type = "pkcs11"
-                        return True
-                except Exception as e:
-                    logger.warning(f"Failed to initialize PKCS#11 HSM: {e}. Will fall back to software HSM.")
-            else:
-                logger.warning(f"PKCS#11 library not found at {lib_path}. Will fall back to software HSM.")
         else:
             logger.warning("PKCS#11 support not available. Will fall back to software HSM.")
         
@@ -800,22 +889,52 @@ def close_hsm():
 
 def check_hsm_pkcs11_support() -> dict:
     """
-    Checks availability of PKCS#11 HSM support and configuration.
+    Checks availability of PKCS#11 HSM support and configuration across all platforms.
     
     Returns:
         dict: Dictionary with information about HSM support:
             - pkcs11_support_enabled: Whether the PKCS#11 library is available
             - hsm_available: Whether an HSM is detected and configured
             - initialized: Whether an HSM session is currently initialized
-            - library_path: Path to the PKCS#11 library if configured
+            - library_paths: Available PKCS#11 library paths by platform
+            - active_library: Currently active PKCS#11 library if initialized
+            - cross_platform_support: Whether cross-platform PKCS#11 is configured
     """
+    # Get environment variable for backwards compatibility
     pkcs11_lib_path = os.environ.get("PKCS11_LIB_PATH", "")
+    
+    # Get all available libraries across platforms
+    available_libraries = get_available_pkcs11_libraries()
+    
+    # Check for cross-platform configuration
+    has_windows = bool(available_libraries["windows"])
+    has_linux = bool(available_libraries["linux"])
+    has_macos = bool(available_libraries["darwin"])
+    
+    # At least two platforms supported for "cross-platform" claim
+    cross_platform_support = (has_windows + has_linux + has_macos) >= 2
+    
+    # Determine if there's an active PKCS#11 library
+    active_library = None
+    if _hsm_initialized and _hsm_provider_type == "pkcs11" and _hsm_token:
+        try:
+            # Try to get information about the active library
+            active_library = {
+                "path": _pkcs11_lib_path if _pkcs11_lib_path else pkcs11_lib_path,
+                "token_label": _hsm_token.label if _hsm_token else None,
+                "token_model": _hsm_token.model if _hsm_token else None,
+                "token_manufacturer": _hsm_token.manufacturer_id if _hsm_token else None
+            }
+        except Exception:
+            pass
     
     return {
         "pkcs11_support_enabled": _PKCS11_SUPPORT_AVAILABLE,
-        "hsm_available": _PKCS11_SUPPORT_AVAILABLE and bool(pkcs11_lib_path),
-        "initialized": _hsm_initialized,
-        "library_path": _pkcs11_lib_path if _pkcs11_lib_path else pkcs11_lib_path
+        "hsm_available": _PKCS11_SUPPORT_AVAILABLE and (bool(available_libraries["current_platform"]) or bool(pkcs11_lib_path)),
+        "initialized": _hsm_initialized and _hsm_provider_type == "pkcs11",
+        "library_paths": available_libraries,
+        "active_library": active_library,
+        "cross_platform_support": cross_platform_support
     }
 
 def get_hsm_random_bytes(num_bytes: int) -> bytes:
@@ -3494,7 +3613,13 @@ def enhanced_pkcs11_detection() -> dict:
         "library_details": {},
         "using_software_hsm": False,
         "usable_tokens": [],
-        "diagnostics": []
+        "diagnostics": [],
+        "cross_platform_support": False,
+        "platform_libraries": {
+            "windows": [],
+            "linux": [],
+            "darwin": []
+        }
     }
     
     if not _PKCS11_SUPPORT_AVAILABLE:
@@ -3507,11 +3632,30 @@ def enhanced_pkcs11_detection() -> dict:
     result["diagnostics"].append("python-pkcs11 library is installed")
     
     # Try to find PKCS#11 libraries based on platform
-    lib_paths = []
+    # Use our new cross-platform detection functions
+    platform_libraries = get_available_pkcs11_libraries()
+    lib_paths = platform_libraries["current_platform"]
     
-    if IS_LINUX:
-        lib_paths = _find_linux_pkcs11_libraries()
-        if not lib_paths:
+    # Update the result with platform-specific library information
+    result["platform_libraries"]["windows"] = platform_libraries["windows"]
+    result["platform_libraries"]["linux"] = platform_libraries["linux"]
+    result["platform_libraries"]["darwin"] = platform_libraries["darwin"]
+    
+    # Calculate cross-platform support status
+    has_windows = bool(platform_libraries["windows"])
+    has_linux = bool(platform_libraries["linux"]) 
+    has_macos = bool(platform_libraries["darwin"])
+    result["cross_platform_support"] = (has_windows + has_linux + has_macos) >= 2
+    
+    # Add platform-specific diagnostics
+    if IS_WINDOWS:
+        if not platform_libraries["windows"]:
+            result["diagnostics"].append("No PKCS#11 libraries found on Windows")
+            result["diagnostics"].append("Consider installing SoftHSM2 for Windows for testing purposes")
+        else:
+            result["diagnostics"].append(f"Found {len(platform_libraries['windows'])} PKCS#11 libraries on Windows")
+    elif IS_LINUX:
+        if not platform_libraries["linux"]:
             result["diagnostics"].append("No PKCS#11 libraries found on Linux")
             
             # Check for common packages that provide PKCS#11
@@ -3528,36 +3672,14 @@ def enhanced_pkcs11_detection() -> dict:
                         pass
             except Exception:
                 pass
-    elif IS_WINDOWS:
-        # Check for common Windows PKCS#11 libraries
-        potential_paths = [
-            "C:\\Windows\\System32\\opencryptoki.dll", 
-            "C:\\Program Files\\OpenSC Project\\OpenSC\\pkcs11\\opensc-pkcs11.dll",
-            "C:\\Program Files\\SafeNet\\Authentication\\SAC\\x64\\pkcs11.dll",
-            "C:\\Program Files\\Yubico\\Yubico PIV Tool\\bin\\libykcs11.dll"
-        ]
-        
-        for path in potential_paths:
-            if os.path.exists(path):
-                lib_paths.append(path)
-                
-        if not lib_paths:
-            result["diagnostics"].append("No PKCS#11 libraries found on Windows")
+        else:
+            result["diagnostics"].append(f"Found {len(platform_libraries['linux'])} PKCS#11 libraries on Linux")
     elif IS_DARWIN:
-        # Check for common macOS PKCS#11 libraries
-        potential_paths = [
-            "/usr/local/lib/opensc-pkcs11.so", 
-            "/Library/OpenSC/lib/opensc-pkcs11.so",
-            "/usr/local/lib/pkcs11/yubico-pkcs11.dylib",
-            "/usr/local/opt/opensc/lib/pkcs11/opensc-pkcs11.so"
-        ]
-        
-        for path in potential_paths:
-            if os.path.exists(path):
-                lib_paths.append(path)
-                
-        if not lib_paths:
+        if not platform_libraries["darwin"]:
             result["diagnostics"].append("No PKCS#11 libraries found on macOS")
+            result["diagnostics"].append("Consider installing SoftHSM2 via Homebrew: brew install softhsm")
+        else:
+            result["diagnostics"].append(f"Found {len(platform_libraries['darwin'])} PKCS#11 libraries on macOS")
     
     result["libraries_found"] = lib_paths
     
@@ -4378,6 +4500,180 @@ def generate_hsm_rsa_keypair(key_label, key_size=2048, use_cng=None):
         return generate_tpm_backed_key(key_label, key_size)
     else:
         return generate_hsm_rsa_keypair(key_label, key_size)
+
+_hsm_provider_type = "software"
+
+def get_available_pkcs11_libraries():
+    """
+    Returns a dictionary of available PKCS#11 libraries on the current platform.
+    
+    Returns:
+        dict: Dictionary with platform name as key and list of libraries as values
+    """
+    result = {
+        "windows": [],
+        "linux": [],
+        "darwin": [],
+        "current_platform": []
+    }
+    
+    if IS_WINDOWS:
+        result["windows"] = _find_windows_pkcs11_libraries()
+        result["current_platform"] = result["windows"]
+    elif IS_LINUX:
+        result["linux"] = _find_linux_pkcs11_libraries()
+        result["current_platform"] = result["linux"]
+    elif IS_DARWIN:
+        result["darwin"] = _find_macos_pkcs11_libraries()
+        result["current_platform"] = result["darwin"]
+    
+    return result
+
+def initialize_softhsm2(token_label="SecurityToken", pin="1234", so_pin="5678"):
+    """
+    Helper function to initialize SoftHSM2 for testing purposes.
+    This is particularly useful on Windows where SoftHSM2 might be installed
+    but not configured.
+    
+    Args:
+        token_label (str): Label for the token to initialize
+        pin (str): User PIN for the token
+        so_pin (str): Security Officer PIN for the token
+    
+    Returns:
+        tuple: (success, message) where success is a boolean indicating if the 
+        initialization was successful, and message provides additional information
+    """
+    if not _PKCS11_SUPPORT_AVAILABLE:
+        return (False, "python-pkcs11 is not installed. Install it first.")
+    
+    # Check if SoftHSM2 is available
+    softhsm2_path = None
+    softhsm2_conf = None
+    softhsm2_util = None
+    
+    if IS_WINDOWS:
+        # Check environment variable first
+        softhsm2_path = os.environ.get("SOFTHSM2_LIB")
+        softhsm2_conf = os.environ.get("SOFTHSM2_CONF")
+        
+        if not softhsm2_path:
+            # Check common installation paths
+            common_paths = [
+                "C:\\Program Files\\SoftHSM2\\lib\\softhsm2-x64.dll",
+                "C:\\Program Files (x86)\\SoftHSM2\\lib\\softhsm2.dll"
+            ]
+            for path in common_paths:
+                if os.path.exists(path):
+                    softhsm2_path = path
+                    break
+        
+        # Look for softhsm2-util.exe
+        common_util_paths = [
+            "C:\\Program Files\\SoftHSM2\\bin\\softhsm2-util.exe",
+            "C:\\Program Files (x86)\\SoftHSM2\\bin\\softhsm2-util.exe"
+        ]
+        for path in common_util_paths:
+            if os.path.exists(path):
+                softhsm2_util = path
+                break
+    elif IS_LINUX:
+        # On Linux, softhsm2-util is typically in PATH
+        try:
+            subprocess.check_call(["which", "softhsm2-util"], 
+                                 stdout=subprocess.DEVNULL, 
+                                 stderr=subprocess.DEVNULL)
+            softhsm2_util = "softhsm2-util"
+        except subprocess.CalledProcessError:
+            pass
+        
+        # Check common library paths
+        common_paths = [
+            "/usr/lib/softhsm/libsofthsm2.so",
+            "/usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so"
+        ]
+        for path in common_paths:
+            if os.path.exists(path):
+                softhsm2_path = path
+                break
+                
+        softhsm2_conf = os.environ.get("SOFTHSM2_CONF", "/etc/softhsm2.conf")
+    elif IS_DARWIN:
+        # On macOS, softhsm2-util might be installed via Homebrew
+        try:
+            subprocess.check_call(["which", "softhsm2-util"], 
+                                 stdout=subprocess.DEVNULL, 
+                                 stderr=subprocess.DEVNULL)
+            softhsm2_util = "softhsm2-util"
+        except subprocess.CalledProcessError:
+            # Try Homebrew path
+            if os.path.exists("/usr/local/bin/softhsm2-util"):
+                softhsm2_util = "/usr/local/bin/softhsm2-util"
+        
+        # Check common library paths
+        common_paths = [
+            "/usr/local/opt/softhsm/lib/softhsm/libsofthsm2.so",
+            "/usr/local/lib/softhsm/libsofthsm2.so"
+        ]
+        for path in common_paths:
+            if os.path.exists(path):
+                softhsm2_path = path
+                break
+                
+        softhsm2_conf = os.environ.get("SOFTHSM2_CONF")
+    
+    if not softhsm2_path:
+        return (False, "SoftHSM2 library not found. Please install it first.")
+    
+    if not softhsm2_util:
+        return (False, "softhsm2-util not found. Please install it first.")
+    
+    # Create a tokens directory in the user's home directory if it doesn't exist
+    if not softhsm2_conf:
+        tokens_dir = os.path.join(os.path.expanduser("~"), ".softhsm2", "tokens")
+        os.makedirs(tokens_dir, exist_ok=True)
+        
+        # Create a config file
+        softhsm2_conf = os.path.join(os.path.expanduser("~"), ".softhsm2", "softhsm2.conf")
+        with open(softhsm2_conf, "w") as f:
+            f.write(f"directories.tokendir = {tokens_dir}\n")
+            f.write("objectstore.backend = file\n")
+        
+        # Set the environment variable
+        os.environ["SOFTHSM2_CONF"] = softhsm2_conf
+    
+    # Initialize a token
+    try:
+        if IS_WINDOWS:
+            # On Windows, we need to run the command directly
+            cmd = [
+                softhsm2_util, "--init-token", "--free",
+                "--label", token_label,
+                "--pin", pin,
+                "--so-pin", so_pin
+            ]
+        else:
+            # On Linux/macOS, we can just call the command
+            cmd = [
+                "softhsm2-util", "--init-token", "--free",
+                "--label", token_label,
+                "--pin", pin,
+                "--so-pin", so_pin
+            ]
+        
+        env = os.environ.copy()
+        env["SOFTHSM2_CONF"] = softhsm2_conf
+        
+        subprocess.check_call(cmd, env=env)
+        
+        return (True, f"SoftHSM2 token {token_label} initialized successfully. Library path: {softhsm2_path}")
+    except subprocess.CalledProcessError as e:
+        return (False, f"Error initializing SoftHSM2 token: {e}")
+    except Exception as e:
+        return (False, f"Unexpected error initializing SoftHSM2 token: {e}")
+
+def _check_cng_available() -> bool:
+    """Check if Windows CNG is available on the system."""
 
 if __name__ == "__main__":
     print("Starting tests for cross_platform_hw_security.py...")
