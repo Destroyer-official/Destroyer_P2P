@@ -1,157 +1,149 @@
-<!-- Improved Header with Modern Styling -->
-<div align="center">
-  <h1>⚡ SECURE P2P CHAT ⚡</h1>
-  <h3> Quantum-Resistant Communications Platform </h3>
-  
-  <p>
-  <img src="https://img.shields.io/badge/SECURITY-MAXIMUM-brightgreen?style=for-the-badge" alt="Security: Maximum">
-  <img src="https://img.shields.io/badge/ENCRYPTION-QUANTUM_RESISTANT-blue?style=for-the-badge" alt="Encryption: Quantum-Resistant">
-  <img src="https://img.shields.io/badge/PROTOCOL-MULTI_LAYERED-orange?style=for-the-badge" alt="Protocol: Multi-Layered">
-  </p>
-  <p>
-  <img src="https://img.shields.io/badge/PLATFORM-CROSS_PLATFORM-purple?style=for-the-badge" alt="Platform: Cross-Platform">
-  <img src="https://img.shields.io/badge/HARDWARE-TPM_HSM-red?style=for-the-badge" alt="Hardware: TPM/HSM">
-  <img src="https://img.shields.io/badge/LICENSE-MIT-yellow?style=for-the-badge" alt="License: MIT">
-  </p>
-</div>
+# Post-Quantum Secure P2P Communication Platform
 
-<hr>
+[![NIST FIPS 203](https://img.shields.io/badge/NIST-FIPS%20203-blue.svg)](https://csrc.nist.gov/pubs/fips/203/final)
+[![NIST FIPS 204](https://img.shields.io/badge/NIST-FIPS%20204-blue.svg)](https://csrc.nist.gov/pubs/fips/204/final)
+[![NIST FIPS 205](https://img.shields.io/badge/NIST-FIPS%20205-blue.svg)](https://csrc.nist.gov/pubs/fips/205/final)
+[![Python 3.8+](https://img.shields.io/badge/Python-3.8+-green.svg)](https://python.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## Overview
+A production-ready peer-to-peer communication platform implementing NIST-standardized post-quantum cryptographic algorithms with comprehensive protections against implementation attacks. The system provides end-to-end encryption resistant to both classical cryptanalytic techniques and large-scale quantum computer attacks.
 
-Secure P2P Chat is a maximum encrypted communication system designed for high-security environments. It combines classical cryptography with post-quantum algorithms to provide protection against both conventional and quantum computing threats.
+## Technical Overview
 
-### 🚀 NEW: Enhanced Post-Quantum Cryptography
+This platform implements a multi-layered security architecture combining classical and post-quantum cryptographic primitives to ensure communication security in the presence of both current and future cryptanalytic threats. The implementation follows defense-in-depth principles with multiple independent security mechanisms.
 
-This project now integrates enhanced post-quantum cryptographic implementations from `pqc_algorithms.py`, providing state-of-the-art, military-grade, future-proof security with improved side-channel resistance, constant-time operations, and protection against emerging threats.
+### Core Security Properties
 
-### Core Security Features
+- **Post-Quantum Resistance**: Protection against attacks by cryptographically relevant quantum computers (CRQCs)
+- **Forward Secrecy**: Compromise of long-term keys does not affect past session security
+- **Break-in Recovery**: Security restoration after temporary key compromise
+- **Authenticated Encryption**: Confidentiality and authenticity guarantees for all communications
+- **Perfect Forward Secrecy**: Regular key rotation prevents retroactive decryption
 
-- **Hybrid Post-Quantum Cryptography**: Combines classical X25519 Diffie-Hellman with quantum-resistant ML-KEM-1024 and FALCON-1024
-- **Double Ratchet Algorithm**: Forward secrecy and break-in recovery with TPM hardware acceleration
-- **TLS 1.3 with ChaCha20-Poly1305**: maximum transport security
-- **Certificate Exchange**: Secure certificate validation with DANE TLSA option
-- **Ephemeral Identity**: Automatic key rotation for enhanced privacy
-- **Hardware Security**: TPM/HSM integration on supported platforms
+### System Architecture
 
-## 🔐 Post-Quantum Cryptography Implementation
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Application Layer                           │
+├─────────────────────────────────────────────────────────────────┤
+│              Secure P2P Communication Protocol                  │
+├─────────────────────────────────────────────────────────────────┤
+│                  Double Ratchet Protocol                       │
+│              (Forward Secrecy + Break-in Recovery)             │
+├─────────────────────────────────────────────────────────────────┤
+│                Hybrid Key Exchange Protocol                     │
+│          (X25519 + ML-KEM-1024 + FALCON-1024)                 │
+├─────────────────────────────────────────────────────────────────┤
+│                    TLS 1.3 Transport Layer                     │
+│               (ChaCha20-Poly1305 + ML-KEM-1024)               │
+├─────────────────────────────────────────────────────────────────┤
+│                  Hardware Security Layer                       │
+│                    (TPM/HSM Integration)                       │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-The latest update introduces direct integration of post-quantum cryptography throughout the codebase:
+## Cryptographic Algorithms
 
-<table>
-<tr>
-<td width="60%">
+### Post-Quantum Key Encapsulation
 
-- **PostQuantumCrypto Class**: Added to `tls_channel_manager.py`, providing native implementation of:
-  - **EnhancedML-KEM-1024**: For quantum-resistant key encapsulation with improved side-channel protection
-  - **EnhancedFALCON-1024**: For quantum-resistant digital signatures with improved parameters
+**ML-KEM-1024 (Module Lattice-based Key Encapsulation Mechanism)**
+- **Standard**: NIST FIPS 203 (August 2024)
+- **Security Level**: NIST Level 5 (256-bit post-quantum security)
+- **Mathematical Foundation**: Module Learning with Errors (M-LWE) problem
+- **Parameter Set**: k=4, q=3329, n=256, η₁=2, η₂=2
+- **Key Sizes**: Public 1568 bytes, Private 3168 bytes, Ciphertext 1568 bytes
+- **Security Assumption**: Hardness of M-LWE in polynomial ring ℤq[X]/(X²⁵⁶ + 1)
+- **Attack Resistance**: Lattice reduction attacks (BKZ, LLL), quantum algorithms
 
-- **Enhanced CustomCipherSuite**: Updated to use Krypton for post-quantum encryption with proper stateful API approach and specific key sizes
+### Post-Quantum Digital Signatures
 
-</td>
-<td>
+**FALCON-1024 (Fast-Fourier Lattice-based Compact Signatures)**
+- **Standard**: NIST FIPS 205 (August 2024) - FN-DSA variant
+- **Security Level**: NIST Level 5 (256-bit post-quantum security)
+- **Mathematical Foundation**: Short Integer Solution (SIS) problem over NTRU lattices
+- **Parameter Set**: n=1024, q=12289, σ=1.28 (enhanced τ parameter)
+- **Key Sizes**: Public 1793 bytes, Private 2305 bytes, Signature ~1280 bytes
+- **Security Assumption**: Hardness of SIS problem in NTRU lattice
+- **Unique Properties**: Compact signatures, stateless operation, fast verification
 
-<div align="center">
-<img src="https://img.shields.io/badge/ML--KEM--1024-ENHANCED-success?style=flat-square" alt="ML-KEM-1024: Enhanced"><br>
-<img src="https://img.shields.io/badge/FALCON--1024-ENHANCED-success?style=flat-square" alt="FALCON-1024: Enhanced"><br>
-<img src="https://img.shields.io/badge/TLS%201.3-ENABLED-success?style=flat-square" alt="TLS 1.3: Enabled"><br>
-<img src="https://img.shields.io/badge/Double%20Ratchet-ENABLED-success?style=flat-square" alt="Double Ratchet: Enabled"><br>
-</div>
+### Backup Algorithm for Diversity
 
-</td>
-</tr>
-</table>
+**HQC-256 (Hamming Quasi-Cyclic)**
+- **Standard**: NIST Round 4 alternate candidate (IR 8545, March 2025)
+- **Security Level**: NIST Level 5 (256-bit post-quantum security)
+- **Mathematical Foundation**: Syndrome Decoding of quasi-cyclic codes
+- **Purpose**: Algorithmic diversity for defense-in-depth architectures
+- **Applications**: Critical systems requiring multiple independent security assumptions
 
-### Recent Security Improvements
+### Classical Cryptography Components
 
-#### Enhanced PQC Module Integration (July 2025)
+**X25519 Elliptic Curve Diffie-Hellman**
+- **Standard**: RFC 7748
+- **Curve**: Curve25519 y² = x³ + 486662x² + x over 𝔽₂²⁵⁵₋₁₉
+- **Security Level**: 128-bit classical security
+- **Purpose**: Hybrid key exchange for defense against quantum algorithm failure
 
-The project now fully integrates enhanced post-quantum cryptographic implementations from `pqc_algorithms.py`:
+**ChaCha20-Poly1305 Authenticated Encryption**
+- **Standard**: RFC 8439
+- **Cipher**: ChaCha20 stream cipher with 256-bit keys
+- **Authentication**: Poly1305 MAC for authenticated encryption
+- **Nonce**: 96-bit nonce with 32-bit counter
+## Security Architecture
 
-- **Enhanced ML-KEM-1024**: Improved key encapsulation with better side-channel resistance and security
-- **Enhanced FALCON-1024**: Upgraded signature algorithm with military-grade security enhancements
-- **Enhanced HQC**: Additional algorithm for cryptographic diversity
-- **Constant-Time Operations**: Improved protection against timing side-channel attacks
-- **Side-Channel Protection**: Enhanced security against all forms of side-channel attacks
-- **Secure Memory Management**: Improved secure memory wiping and protection
-- **Security Testing**: Enhanced security testing and validation capabilities
+### Multi-Layer Defense Strategy
 
-These implementations have been integrated throughout the entire codebase, replacing standard implementations with enhanced versions for truly state-of-the-art, military-grade, future-proof security.
+#### Layer 1: Transport Security
+- **TLS 1.3 Only**: Eliminates legacy protocol vulnerabilities
+- **Post-Quantum Cipher Suites**: ML-KEM-1024 key exchange groups
+- **Perfect Forward Secrecy**: Ephemeral key exchange for each session
+- **Certificate Pinning**: Protection against CA compromise
 
-#### EnhancedFALCON_1024 Implementation (June 2025)
+#### Layer 2: Application-Level Encryption
+- **Double Ratchet Protocol**: Signal protocol with post-quantum enhancements
+- **Message Authentication**: FALCON-1024 signatures for non-repudiation
+- **Out-of-Order Delivery**: Secure handling of delayed/reordered messages
+- **Key Ratcheting**: Regular key update for forward secrecy
 
-The FALCON-1024 signature algorithm has been enhanced with the following improvements:
+#### Layer 3: Hardware Security Integration
+- **TPM 2.0 Support**: Hardware-backed key storage and attestation
+- **HSM Integration**: PKCS#11 hardware security module support
+- **Secure Enclaves**: Intel SGX and ARM TrustZone integration
+- **Hardware Entropy**: TRNG for cryptographic key generation
 
-- **Improved Parameters**: Increased tau parameter from 1.1 to 1.28 for stronger Rényi divergence security bounds based on research paper "A Closer Look at Falcon" (eprint.iacr.org/2024/1769)
-- **Reduced Minimum Entropy**: Lowered minimum entropy requirement from 256 to 128 bits to prevent legitimate signatures from being rejected
-- **Robust Prefix Handling**: Added proper type checking and error handling for prefix processing of keys and signatures
-- **Fallback Verification**: Implemented a fallback mechanism to try verification with both original and prefix-stripped values
-- **Better Error Handling**: Improved error messages and logging to distinguish between expected test failures and real failures
-- **Version Tracking**: Added version metadata with "EFPK-2", "EFSK-2", and "EFS-2" prefixes to public keys, private keys, and signatures
-- **Signature Entropy Validation**: Added entropy checks for signatures to detect potential side-channel leakage
+### Implementation Attack Resistance
 
-These enhancements make the FALCON-1024 implementation more robust while maintaining its security benefits.
+#### Side-Channel Attack Mitigation
+- **Constant-Time Operations**: Execution time independent of secret data
+- **Memory Access Regularization**: Uniform memory access patterns
+- **Power Analysis Countermeasures**: Masking against differential power analysis
+- **Cache-Timing Protection**: Memory layout optimization to prevent cache attacks
+- **Speculative Execution Barriers**: Mitigation of Spectre-class attacks
 
-#### EnhancedMLKEM_1024 Implementation (June 2025)
+#### Fault Injection Attack Protection
+- **Dual-Path Computation**: Redundant calculations with cross-verification
+- **Input Validation**: Cryptographic binding of parameters
+- **Implicit Rejection**: CCA2 security through invalid ciphertext rejection
+- **Error Detection Codes**: Integrity verification of critical operations
+- **Control Flow Integrity**: Protection against code injection attacks
 
-The ML-KEM-1024 key encapsulation mechanism has been enhanced with:
+#### Memory Security Hardening
+- **Secure Memory Allocation**: Guard pages and canary values
+- **Automatic Zeroization**: DoD 5220.22-M compliant data sanitization
+- **Memory Locking**: Prevention of sensitive data swap to persistent storage
+- **Address Space Layout Randomization**: ASLR compatibility for memory protection
 
-- **Side-Channel Protection**: Implemented constant-time operations to prevent timing attacks
-- **Ciphertext Validation**: Added validation checks to prevent malleability attacks
-- **Entropy Verification**: Performs additional entropy checks on generated keys
-- **Domain Separation**: Added protection against multi-target attacks with domain separation
-- **Memory Hardening**: Applied memory protection techniques for key material
-- **Version Compatibility**: Added "EMKPK-2" and "EMKSK-2" prefixes to public and private keys
-- **Enhanced Key Validation**: Added key material validation to detect implementation flaws
+## Implementation Features
 
-#### Certificate Exchange and IPv6 Compatibility (June 2025)
+### Core Security Modules
 
-The certificate exchange process has been improved to provide better compatibility with IPv6 and mixed IPv4/IPv6 environments:
-
-- **Enhanced IPv6 Support**: Updated socket binding in server mode to use the IPv6 wildcard address `"::"` instead of client-specific addresses
-- **Improved Port Management**: Fixed exchange_port_offset handling to ensure consistent port usage during certificate exchanges
-- **Binding Optimizations**: Enhanced socket binding to handle dual-stack IPv6 configurations properly
-- **Error Handling**: Improved error handling and reporting for connection timeout and invalid address errors
-
-#### Configuration Management and Constant-Time Operations (June 2025)
-
-Application configuration and cryptographic operations have been enhanced:
-
-- **Base Directory Configuration**: Added proper initialization and handling of the `base_dir` configuration attribute
-- **Constant-Time Cryptographic Operations**: Implemented the `ConstantTime` utility class providing:
-  - Constant-time byte string comparison to prevent timing attacks
-  - Constant-time conditional selection between byte strings
-  - Constant-time HMAC verification for secure authentication checks
-- **Environment Variables**: Improved environment variable handling for configuration and clearer documentation of available options
-
-#### Double Ratchet Timing Side-Channel Protection (June 2025)
-
-Addressed timing side-channel vulnerabilities in the Double Ratchet implementation:
-
-- **Constant-time Key Comparisons**: Implemented constant-time comparison for cryptographic keys to prevent information leakage
-- **Improved Key Derivation**: Replaced variable-time operations with constant-time implementations
-- **Constant-time Message ID Verification**: Enhanced replay cache to use constant-time operations
-- **Constant-time KDF Selection**: Modified KDF to prevent timing differences between hardware and software implementations
-
-### Security Performance Analysis
-
-Performance impact of security enhancements based on benchmarks:
-
-| Algorithm | Operation | Performance Impact |
-|-----------|-----------|-------------------|
-| FALCON-1024 | Key Generation | 7.99% faster |
-| FALCON-1024 | Signing | 2.57% slower |
-| FALCON-1024 | Verification | 2.08% slower |
-| ML-KEM-1024 | Key Generation | 18.21% faster |
-| ML-KEM-1024 | Encapsulation | 5.28% slower |
-| ML-KEM-1024 | Decapsulation | 31.56% faster |
-| Overall | All Operations | 7.97% improvement |
-
-The security enhancements result in a slight performance improvement on average, demonstrating that our security improvements do not come at a performance cost.
-
-### Enhanced PQC Integration Points
-
-Our post-quantum cryptographic primitives are integrated at multiple layers:
+| Module | Purpose | Key Features |
+|--------|---------|--------------|
+| `pqc_algorithms.py` | Post-quantum cryptographic primitives | Enhanced ML-KEM-1024, FALCON-1024, HQC-256 |
+| `tls_channel_manager.py` | TLS 1.3 with post-quantum extensions | Post-quantum cipher suites, certificate validation |
+| `double_ratchet.py` | Forward-secure messaging protocol | Signal protocol with quantum-resistant enhancements |
+| `hybrid_kex.py` | Hybrid classical/post-quantum key exchange | X25519 + ML-KEM-1024 combined security |
+| `secure_key_manager.py` | Cryptographic key lifecycle management | Hardware-backed storage, secure erasure |
+| `platform_hsm_interface.py` | Hardware security module integration | TPM 2.0, PKCS#11, secure enclave support |
 
 1. **Certificate Exchange (ca_services.py)**
    - Uses FALCON-1024 for authentication signatures with improved forgery resistance

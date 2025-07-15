@@ -1,42 +1,108 @@
 """
-Secure P2P Chat Implementation
+Post-Quantum Secure Peer-to-Peer Communication Protocol
 
-This module provides a robust, secure peer-to-peer chat application with
-multi-layered security features including:
+This module implements a production-ready peer-to-peer communication system
+with comprehensive security protections against both classical and quantum
+cryptanalytic attacks. The implementation follows a defense-in-depth security
+architecture with multiple independent layers of protection.
 
-- Post-quantum cryptography (ML-KEM-1024 and FALCON-1024)
-- Hybrid key exchange (X3DH + post-quantum)
-- Double Ratchet for message encryption with forward secrecy
-- TLS 1.3 for transport security
-- Hardware security module integration when available
-- Memory protection and anti-tampering mechanisms
+Protocol Stack Architecture:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Security Architecture:
-1. Transport Layer: TLS 1.3 with ChaCha20-Poly1305 and post-quantum key exchange
-2. Key Exchange: Hybrid X3DH + ML-KEM-1024 for quantum-resistant key agreement
-3. Message Encryption: Double Ratchet with FALCON-1024 signatures and AES-256-GCM
-4. Identity Protection: Ephemeral identities with disposable key pairs
-5. Forward Secrecy: Regular key rotation and zero-knowledge session ratcheting
-6. Memory Protection: Secure memory allocation, canary values, anti-debugging
+Layer 4 - Application Protocol:
+• End-to-end message authentication using FALCON-1024 digital signatures
+• Message ordering and deduplication with cryptographic replay protection
+• Contact identity management with ephemeral key rotation
+• File transfer with chunked authenticated encryption
 
-Post-Quantum Security:
-- ML-KEM-1024: NIST-standardized lattice-based key encapsulation mechanism
-- FALCON-1024: Hash-based signature scheme resistant to quantum attacks
-- HQC-256: Code-based encryption as additional quantum-resistant layer
+Layer 3 - Forward Secrecy Protocol (Double Ratchet):
+• Based on Signal Protocol with post-quantum enhancements
+• Provides forward secrecy (past messages secure after key compromise)
+• Break-in recovery (future messages secure after compromise recovery)
+• Out-of-order message delivery with secure buffering
+• Key derivation using HKDF-Extract-and-Expand (RFC 5869)
 
-Hardware Security:
-- TPM/HSM integration for key isolation when available
-- Secure enclaves for protected key operations on supported platforms
-- libsodium for cross-platform cryptographic operations
+Layer 2 - Key Exchange Protocol (Hybrid):
+• Classical X25519 ECDH (RFC 7748) for immediate security
+• ML-KEM-1024 post-quantum key encapsulation (NIST FIPS 203)
+• FALCON-1024 authentication signatures (NIST FIPS 205)
+• Combined security: min(128-bit classical, 256-bit post-quantum)
+• Protection against harvest-now-decrypt-later attacks
 
-Anti-Tampering:
-- Runtime integrity verification
-- Anti-debugging protections
-- Memory canaries to detect buffer overflows
-- Constant-time operations to prevent timing attacks
+Layer 1 - Transport Security Protocol:
+• TLS 1.3 (RFC 8446) with post-quantum cipher suites
+• ChaCha20-Poly1305 AEAD for confidentiality and authenticity
+• Certificate pinning and DANE validation for PKI security
+• Perfect forward secrecy through ephemeral key exchange
 
-Author: Secure Communications Team
-License: MIT 
+Cryptographic Algorithm Specifications:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Post-Quantum Key Encapsulation:
+• ML-KEM-1024: Module Learning with Errors over polynomial ring ℤ₃₃₂₉[X]/(X²⁵⁶+1)
+• Security Level: NIST Level 5 (256-bit quantum security)
+• Key Sizes: Public 1568B, Private 3168B, Ciphertext 1568B, Shared Secret 32B
+• Attack Resistance: Lattice reduction (BKZ), quantum algorithms (Shor, Grover)
+
+Post-Quantum Digital Signatures:
+• FALCON-1024: Short Integer Solution over NTRU lattices
+• Security Level: NIST Level 5 (256-bit quantum security)  
+• Key Sizes: Public 1793B, Private 2305B, Signature ~1280B
+• Properties: Compact signatures, stateless operation, fast verification
+
+Classical Cryptography (Hybrid Security):
+• X25519: Curve25519 elliptic curve Diffie-Hellman key exchange
+• ChaCha20-Poly1305: Stream cipher with polynomial authenticator
+• HKDF-SHA256: Key derivation function with domain separation
+• Blake2b: Cryptographic hash function for integrity verification
+
+Implementation Security Features:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Side-Channel Attack Resistance:
+• Constant-time cryptographic operations independent of secret data
+• Memory access pattern regularization to prevent cache-timing attacks
+• Power consumption masking against differential power analysis (DPA)
+• Temporal noise injection to disrupt precise timing measurements
+• Microarchitectural state isolation (branch prediction, speculative execution)
+
+Fault Injection Attack Mitigation:
+• Dual-path computation with redundant verification
+• Input parameter validation with cryptographic binding
+• Implicit rejection of malformed ciphertexts (CCA2 security)
+• Error detection codes on critical computational paths
+• Control flow integrity monitoring and verification
+
+Memory Protection Mechanisms:
+• Secure memory allocation with guard pages and canary values
+• Automatic key material zeroization using DoD 5220.22-M patterns
+• Memory locking to prevent swap file exposure of sensitive data
+• Address space layout randomization (ASLR) compatibility
+• Hardware memory protection unit (MPU) integration when available
+
+Hardware Security Integration:
+• TPM 2.0 key storage and platform attestation (TCG specification)
+• PKCS#11 hardware security module (HSM) interface support
+• Intel SGX and ARM TrustZone secure enclave integration
+• Hardware true random number generator (TRNG) entropy sources
+• Secure boot chain verification and measured boot attestation
+
+Standards Compliance and Validation:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+• NIST FIPS 203: Module-Lattice-Based Key-Encapsulation Mechanism Standard
+• NIST FIPS 204: Module-Lattice-Based Digital Signature Standard
+• NIST FIPS 205: Stateless Hash-Based Digital Signature Standard
+• RFC 8446: Transport Layer Security (TLS) Protocol Version 1.3
+• RFC 5869: HMAC-based Extract-and-Expand Key Derivation Function
+• Signal Protocol: Double Ratchet Algorithm specification
+• FIPS 140-2 Level 3/4: Hardware security module compatibility
+
+This implementation is designed for deployment in high-security environments
+where protection against both current classical attacks and future quantum
+computer threats is required. All cryptographic operations use NIST-standardized
+algorithms with additional implementation hardening for defense against
+sophisticated adversaries.
 """
 
 import asyncio 
